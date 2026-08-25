@@ -41,6 +41,12 @@ set(LEXBOR_BUILD_UTILS OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/lexbor" EXCLUDE_FROM_ALL)
 
+set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(QJS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(QJS_BUILD_CLI_STATIC OFF CACHE BOOL "" FORCE)
+
+add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/quickjs" EXCLUDE_FROM_ALL)
+
 add_library(skia INTERFACE)
 
 target_include_directories(skia INTERFACE
@@ -91,14 +97,19 @@ add_custom_command(
 # dom_node.cpp/widget_tree_builder.cpp are the mutable-DOM counterpart:
 # a heap-allocated Node tree that can be built/edited at runtime and
 # materialized into the same Widget shape, so WidgetRenderer can render
-# either one. Not wired into main.cpp yet - no scripting layer or events
-# drive it, but it's compiled and ready for one.
+# either one.
+#
+# js_engine.cpp embeds QuickJS and exposes a minimal DOM-like API against
+# that same Node tree, so script (not just C++) can drive the UI - this is
+# the only place QuickJS is linked in; artisanc has no need for a JS
+# engine at build time.
 add_executable(artisan
     src/main.cpp
     src/widget_renderer.cpp
     src/skia_renderer.cpp
     src/dom_node.cpp
     src/widget_tree_builder.cpp
+    src/js_engine.cpp
     "${GENERATED_UI_CPP}"
 )
 
@@ -108,5 +119,5 @@ target_include_directories(artisan
 )
 
 target_link_libraries(artisan
-  PRIVATE skia PkgConfig::SDL2
+  PRIVATE skia PkgConfig::SDL2 qjs
 )

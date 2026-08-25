@@ -1,5 +1,6 @@
 #include "compiled_document.h"
 #include "dom_node.h"
+#include "js_engine.h"
 #include "skia_renderer.h"
 #include "widget.h"
 #include "widget_renderer.h"
@@ -31,41 +32,34 @@ std::string GetValue(const Node *node) {
   return value != nullptr ? *value : std::string();
 }
 
-constexpr char kGreetingPrompt[] = "Fill in your name and click Submit.";
-
 // The document is compiled from assets/ui.html by artisanc at build time
 // (BuildCompiledDocument, in the generated translation unit) - the same
 // pipeline that used to produce a separate, inert, immutable Widget tree
-// now produces this ordinary mutable Node tree instead. Wiring up
-// behavior is just finding the right nodes by the ids that markup gave
-// them and calling SetOnClick, same as this app would look them up if a
-// script had built the tree instead of artisanc.
-void WireUpHandlers(Node &document) {
-  Node *nameInput = document.FindById("name-input");
-  Node *emailInput = document.FindById("email-input");
-  Node *submitButton = document.FindById("submit-button");
-  Node *clearButton = document.FindById("clear-button");
-  Node *greeting = document.FindById("greeting");
+// now produces this ordinary mutable Node tree instead. Behavior is wired
+// up by actual JavaScript (JsEngine, below), run once at startup, that
+// finds these same nodes by the ids markup gave them and calls
+// addEventListener - not hand-written C++ standing in for what a script
+// should do.
+constexpr char kAppScript[] = R"js(
+var nameInput = document.getElementById("name-input");
+var emailInput = document.getElementById("email-input");
+var greeting = document.getElementById("greeting");
 
-  if (submitButton == nullptr || clearButton == nullptr ||
-      nameInput == nullptr || emailInput == nullptr || greeting == nullptr) {
-    std::cerr << "main: assets/ui.html is missing an expected id - "
-                 "buttons won't be wired up\n";
-    return;
+document.getElementById("submit-button").addEventListener("click", function () {
+  var name = nameInput.getAttribute("value") || "";
+  if (name === "") {
+    greeting.textContent = "Please enter a name first.";
+  } else {
+    greeting.textContent = "Hello, " + name + "!";
   }
+});
 
-  submitButton->SetOnClick([nameInput, greeting]() {
-    std::string name = GetValue(nameInput);
-    greeting->SetTextContent(name.empty() ? "Please enter a name first."
-                                           : "Hello, " + name + "!");
-  });
-
-  clearButton->SetOnClick([nameInput, emailInput, greeting]() {
-    nameInput->SetAttribute("value", "");
-    emailInput->SetAttribute("value", "");
-    greeting->SetTextContent(kGreetingPrompt);
-  });
-}
+document.getElementById("clear-button").addEventListener("click", function () {
+  nameInput.setAttribute("value", "");
+  emailInput.setAttribute("value", "");
+  greeting.textContent = "Fill in your name and click Submit.";
+});
+)js";
 
 // Erases the focus's selected range (if any) from `value` and collapses
 // the cursor to where the selection started. Returns whether there was
@@ -231,7 +225,23 @@ int main(int argc, char *argv[]) {
   artisan::WidgetRenderer measuringWidgetRenderer(measuringRenderer);
 
   std::unique_ptr<Node> document = artisan::BuildCompiledDocument();
-  WireUpHandlers(*document);
+
+  // jsEngine must outlive `document`: click handlers registered below
+  // hold QuickJS function references (JsCallback) that get released when
+  // the Node owning them is destroyed, and that release needs a live
+  // JSContext. jsEngine has to be constructed after document (it needs a
+  // Node& to bind to), which means the two would normally be torn down in
+  // the *wrong* order at the end of main (reverse of construction -
+  // jsEngine first, document second). The explicit document.reset() right
+  // before main returns fixes that: it destroys the whole Node tree,
+  // JsCallbacks included, while jsEngine/its JSContext are still alive,
+  // before jsEngine's own (now safe, nothing left referencing it)
+  // destructor runs implicitly after.
+  artisan::JsEngine jsEngine(*document);
+  if (!jsEngine.RunScript(kAppScript, "app.js")) {
+    std::cerr << "main: app.js failed to run - buttons may not be wired up\n";
+  }
+
   InputFocus focus;
   bool isSelecting = false;
 
@@ -538,6 +548,11 @@ int main(int argc, char *argv[]) {
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();
+
+  // Destroy the Node tree (and every JsCallback its click handlers hold)
+  // now, while jsEngine is still alive - see the comment where jsEngine
+  // is constructed above.
+  document.reset();
 
   return 0;
 }
