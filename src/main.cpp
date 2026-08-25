@@ -1,3 +1,4 @@
+#include "app.h"
 #include "compiled_document.h"
 #include "dom_node.h"
 #include "js_engine.h"
@@ -35,14 +36,15 @@ std::string GetValue(const Node *node) {
 // The document is compiled from assets/ui.html by artisanc at build time
 // (BuildCompiledDocument, in the generated translation unit) - the same
 // pipeline that used to produce a separate, inert, immutable Widget tree
-// now produces this ordinary mutable Node tree instead. Behavior is wired
-// up by actual JavaScript (JsEngine, below), run once at startup, that
-// finds these same nodes by the ids markup gave them and calls
-// addEventListener - not hand-written C++ standing in for what a script
-// should do.
+// now produces this ordinary mutable Node tree instead. Its behavior
+// comes from two independent sources that both run once at startup and
+// both drive this same tree through the same Node API: SetupApp (app.h),
+// plain compiled C++, wires the Clear button; this script, interpreted by
+// JsEngine below, wires Submit. Neither knows the other exists - proof
+// that "native C++" and "script" are just two ways to drive the DOM, not
+// a fork in the architecture.
 constexpr char kAppScript[] = R"js(
 var nameInput = document.getElementById("name-input");
-var emailInput = document.getElementById("email-input");
 var greeting = document.getElementById("greeting");
 
 document.getElementById("submit-button").addEventListener("click", function () {
@@ -52,12 +54,6 @@ document.getElementById("submit-button").addEventListener("click", function () {
   } else {
     greeting.textContent = "Hello, " + name + "!";
   }
-});
-
-document.getElementById("clear-button").addEventListener("click", function () {
-  nameInput.setAttribute("value", "");
-  emailInput.setAttribute("value", "");
-  greeting.textContent = "Fill in your name and click Submit.";
 });
 )js";
 
@@ -225,6 +221,13 @@ int main(int argc, char *argv[]) {
   artisan::WidgetRenderer measuringWidgetRenderer(measuringRenderer);
 
   std::unique_ptr<Node> document = artisan::BuildCompiledDocument();
+
+  // Plain compiled C++, wired up before any script runs - see app.h/
+  // app.cpp. Ordering relative to the JS engine below doesn't matter
+  // functionally (the two wire up different buttons here), but native
+  // code owning the more foundational behavior and script layering on
+  // top is a reasonable default convention.
+  artisan::SetupApp(*document);
 
   // jsEngine must outlive `document`: click handlers registered below
   // hold QuickJS function references (JsCallback) that get released when

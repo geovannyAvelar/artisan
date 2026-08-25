@@ -100,9 +100,10 @@ add_custom_command(
 # either one.
 #
 # js_engine.cpp embeds QuickJS and exposes a minimal DOM-like API against
-# that same Node tree, so script (not just C++) can drive the UI - this is
-# the only place QuickJS is linked in; artisanc has no need for a JS
-# engine at build time.
+# that same Node tree, so script can drive the UI too - this is the only
+# place QuickJS is linked in; artisanc has no need for a JS engine at
+# build time. app.cpp is the native-C++ counterpart: plain compiled code
+# against the same Node API, no interpreter involved.
 add_executable(artisan
     src/main.cpp
     src/widget_renderer.cpp
@@ -110,6 +111,7 @@ add_executable(artisan
     src/dom_node.cpp
     src/widget_tree_builder.cpp
     src/js_engine.cpp
+    src/app.cpp
     "${GENERATED_UI_CPP}"
 )
 
