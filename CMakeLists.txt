@@ -98,11 +98,23 @@ set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
 
 set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
+# Each ARTISAN_UI_SOURCES entry is either a bare path or "name=path" (an
+# explicit page name, for a nested route a bare path's stem can't express
+# - see artisan-cli's project-dir discovery and artisanc's own usage).
+# DEPENDS needs real filesystem paths to track, not artisanc's argument
+# syntax, so strip any "name=" prefix before using it there; a bare entry
+# (no "=") passes through unchanged.
+set(ARTISAN_UI_SOURCE_PATHS "")
+foreach(_artisan_ui_entry ${ARTISAN_UI_SOURCES})
+    string(REGEX REPLACE "^[^=]*=" "" _artisan_ui_path "${_artisan_ui_entry}")
+    list(APPEND ARTISAN_UI_SOURCE_PATHS "${_artisan_ui_path}")
+endforeach()
+
 add_custom_command(
     OUTPUT "${GENERATED_UI_CPP}"
     COMMAND artisanc "${GENERATED_UI_CPP}" ${ARTISAN_UI_SOURCES}
-    DEPENDS artisanc ${ARTISAN_UI_SOURCES}
-    COMMENT "Compiling ${ARTISAN_UI_SOURCES} into a native widget tree bundle"
+    DEPENDS artisanc ${ARTISAN_UI_SOURCE_PATHS}
+    COMMENT "Compiling ${ARTISAN_UI_SOURCE_PATHS} into a native widget tree bundle"
     VERBATIM
 )
 

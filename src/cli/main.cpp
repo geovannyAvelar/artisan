@@ -59,16 +59,18 @@ void PrintBuildUsage() {
          "                         [--build-dir <dir>] [-o <output>] [--run]\n\n"
          "Given a project directory (the layout artisan-cli new scaffolds),\n"
          "its files are discovered automatically - no need to name each one:\n"
-         "  <project-dir>/pages/*.html   every page in the bundle, named\n"
-         "                               after its stem (\"about.html\"\n"
-         "                               becomes \"about\"); index.html, if\n"
-         "                               present, is the page the app opens\n"
-         "                               on, otherwise the first\n"
-         "                               alphabetically. An <a href=\"...\">\n"
-         "                               anywhere in the bundle can\n"
-         "                               navigate to any other page.\n"
-         "  <project-dir>/src/*.cpp      every native C++ source.\n"
-         "  <project-dir>/app.js         optional embedded script.\n\n"
+         "  <project-dir>/pages/**/*.html   every page in the bundle,\n"
+         "        named after its path relative to pages/, folders and all\n"
+         "        (Next.js-style): pages/about.html becomes \"about\";\n"
+         "        pages/settings/profile.html becomes \"settings/profile\";\n"
+         "        pages/settings/index.html becomes \"settings\" (a folder's\n"
+         "        own index.html is that folder's route, same as the\n"
+         "        project root's). pages/index.html, if present, is the\n"
+         "        page the app opens on. An <a href=\"...\"> anywhere in\n"
+         "        the bundle can navigate to any other page by name.\n"
+         "  <project-dir>/src/**/*.cpp      every native C++ source,\n"
+         "        nesting is just organization here (not a route).\n"
+         "  <project-dir>/app.js            optional embedded script.\n\n"
          "Or list individual files by hand for full manual control:\n"
          "  --html <file>   A page's markup - same naming/ordering rules as\n"
          "                  pages/*.html above. Repeatable, at least one\n"
@@ -113,20 +115,34 @@ std::string JoinPaths(const std::vector<fs::path> &paths) {
   return joined.str();
 }
 
+// Same as JoinPaths, for entries that are already formatted strings
+// (bare paths or "name=path" - see DiscoverPages) rather than fs::paths.
+std::string JoinStrings(const std::vector<std::string> &items) {
+  std::ostringstream joined;
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) {
+      joined << ";";
+    }
+    joined << items[i];
+  }
+  return joined.str();
+}
+
 int RunCommand(const std::string &command) {
   std::cout << "$ " << command << "\n";
   return std::system(command.c_str());
 }
 
-// Every absolute .html file directly inside `dir`, sorted for a
-// deterministic build across runs/filesystems - directory_iterator order
-// isn't guaranteed. "index.html", if present, is moved to the front,
-// since it's the page the app opens on (see main.cpp's Navigate()).
-std::vector<fs::path> SortedFilesWithExtension(const fs::path &dir,
-                                                const std::string &extension) {
+// Every absolute file with `extension`, anywhere under `dir` (however
+// deeply nested), sorted for a deterministic build across runs/
+// filesystems - directory_iterator order isn't guaranteed. Used for
+// src/**/*.cpp, where nesting is just organization - unlike pages/ below,
+// a .cpp's location doesn't name anything, so no route logic is needed.
+std::vector<fs::path> SortedFilesWithExtensionRecursive(const fs::path &dir,
+                                                         const std::string &extension) {
   std::vector<fs::path> paths;
   if (fs::is_directory(dir)) {
-    for (const auto &entry : fs::directory_iterator(dir)) {
+    for (const auto &entry : fs::recursive_directory_iterator(dir)) {
       if (entry.is_regular_file() && entry.path().extension() == extension) {
         paths.push_back(fs::absolute(entry.path()));
       }
@@ -136,36 +152,87 @@ std::vector<fs::path> SortedFilesWithExtension(const fs::path &dir,
   return paths;
 }
 
+struct PageEntry {
+  std::string name;
+  fs::path path;
+};
+
+// Every .html file under `pagesDir`, however deeply nested, named after
+// its path relative to pagesDir with the extension stripped and '/' as
+// the separator - a Next.js-style folder-per-route convention:
+// pages/settings/profile.html becomes the page "settings/profile", and
+// an <a href="settings/profile"> anywhere in the bundle can navigate to
+// it. A file named index.html stands for its own directory's own route,
+// same as the project root's pages/index.html becoming "index" (not
+// "index/index") - so pages/settings/index.html becomes "settings".
+// Sorted by name for a deterministic build, with "index" (the page the
+// app opens on - see main.cpp's Navigate()) moved to the front.
+std::vector<PageEntry> DiscoverPages(const fs::path &pagesDir) {
+  std::vector<PageEntry> pages;
+
+  if (fs::is_directory(pagesDir)) {
+    for (const auto &entry : fs::recursive_directory_iterator(pagesDir)) {
+      if (!entry.is_regular_file() || entry.path().extension() != ".html") {
+        continue;
+      }
+
+      fs::path relative = fs::relative(entry.path(), pagesDir);
+      relative.replace_extension();
+      std::string name = relative.generic_string();
+
+      const std::string kIndexSuffix = "/index";
+      if (name.size() > kIndexSuffix.size() &&
+          name.compare(name.size() - kIndexSuffix.size(), kIndexSuffix.size(),
+                        kIndexSuffix) == 0) {
+        name.erase(name.size() - kIndexSuffix.size());
+      }
+
+      pages.push_back({name, fs::absolute(entry.path())});
+    }
+  }
+
+  std::sort(pages.begin(), pages.end(), [](const PageEntry &a, const PageEntry &b) {
+    return a.name < b.name;
+  });
+
+  auto indexIt = std::find_if(pages.begin(), pages.end(), [](const PageEntry &page) {
+    return page.name == "index";
+  });
+  if (indexIt != pages.end()) {
+    std::iter_swap(pages.begin(), indexIt);
+  }
+
+  return pages;
+}
+
 struct DiscoveredProject {
-  std::vector<fs::path> htmlPaths;
+  std::vector<std::string> htmlEntries; // "name=absolute/path.html", one per page.
   std::vector<fs::path> cppPaths;
   fs::path jsPath; // Empty if app.js doesn't exist.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
-// markup under pages/, every native C++ source under src/, and one
-// optional shared app.js at the project root. Exits the process with an
-// error if pages/ is missing or empty - a bundle needs at least one page.
+// markup under pages/ (nested folders form nested routes - see
+// DiscoverPages), every native C++ source under src/, and one optional
+// shared app.js at the project root. Exits the process with an error if
+// pages/ is missing or empty - a bundle needs at least one page.
 DiscoveredProject DiscoverProject(const fs::path &projectDir) {
   DiscoveredProject discovered;
 
   fs::path pagesDir = projectDir / "pages";
-  discovered.htmlPaths = SortedFilesWithExtension(pagesDir, ".html");
-  if (discovered.htmlPaths.empty()) {
+  std::vector<PageEntry> pages = DiscoverPages(pagesDir);
+  if (pages.empty()) {
     std::cerr << "artisan-cli: " << pagesDir
                << " doesn't exist or has no .html files - a project needs "
                   "at least one page\n";
     std::exit(1);
   }
-
-  auto indexIt = std::find_if(
-      discovered.htmlPaths.begin(), discovered.htmlPaths.end(),
-      [](const fs::path &path) { return path.filename() == "index.html"; });
-  if (indexIt != discovered.htmlPaths.end()) {
-    std::iter_swap(discovered.htmlPaths.begin(), indexIt);
+  for (const PageEntry &page : pages) {
+    discovered.htmlEntries.push_back(page.name + "=" + page.path.string());
   }
 
-  discovered.cppPaths = SortedFilesWithExtension(projectDir / "src", ".cpp");
+  discovered.cppPaths =
+      SortedFilesWithExtensionRecursive(projectDir / "src", ".cpp");
 
   fs::path jsPath = projectDir / "app.js";
   if (fs::exists(jsPath)) {
@@ -178,7 +245,10 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
 // The tail both build modes (project-directory and explicit --html/--cpp/
 // --js) share once they've settled on the same three lists of files:
 // configure, build, optionally copy the binary out and/or run it.
-int ConfigureAndBuild(const std::vector<fs::path> &htmlAbs,
+// `htmlEntries` items are each either a bare absolute path (artisanc
+// derives the page name from its stem) or "name=path" (an explicit name,
+// for a nested route - see DiscoverPages).
+int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
                        const std::vector<fs::path> &cppAbs,
                        const fs::path &jsAbs, const std::string &buildDirStr,
                        const std::string &outputPathStr, bool run) {
@@ -188,7 +258,8 @@ int ConfigureAndBuild(const std::vector<fs::path> &htmlAbs,
   std::ostringstream configureCmd;
   configureCmd << "cmake -S " << ShellQuote(projectSourceDir.string())
                << " -B " << ShellQuote(buildDir.string())
-               << " -DARTISAN_UI_SOURCES=" << ShellQuote(JoinPaths(htmlAbs));
+               << " -DARTISAN_UI_SOURCES="
+               << ShellQuote(JoinStrings(htmlEntries));
 
   if (!cppAbs.empty()) {
     configureCmd << " -DARTISAN_APP_CPP_SOURCES="
@@ -244,8 +315,10 @@ void PrintNewUsage() {
   std::cerr << "usage: artisan-cli new <project-dir>\n\n"
                "Scaffolds a new native artisan project at <project-dir>:\n"
                "  pages/index.html   starter markup - the page the app\n"
-               "                     opens on; add more pages/*.html and\n"
-               "                     link between them with <a href=\"...\">\n"
+               "                     opens on; add more pages/*.html (or\n"
+               "                     pages/some-folder/*.html for a nested\n"
+               "                     route, Next.js-style) and link between\n"
+               "                     them with <a href=\"...\">\n"
                "  src/main.cpp       native SetupApp(Node&) - see\n"
                "                     include/app.h. Add more src/*.cpp as\n"
                "                     the project grows - every one gets\n"
@@ -397,7 +470,7 @@ int RunBuildFromProject(int argc, char *argv[]) {
     }
   }
 
-  return ConfigureAndBuild(discovered.htmlPaths, discovered.cppPaths,
+  return ConfigureAndBuild(discovered.htmlEntries, discovered.cppPaths,
                             discovered.jsPath, buildDirStr, outputPathStr,
                             run);
 }
@@ -443,9 +516,12 @@ int RunBuildFromFlags(int argc, char *argv[]) {
     return 1;
   }
 
-  std::vector<fs::path> htmlAbs;
+  std::vector<std::string> htmlEntries;
   for (const std::string &path : options.htmlPaths) {
-    htmlAbs.push_back(ResolveExisting(path));
+    // Bare path - artisanc derives this page's name from its stem, same
+    // as always. --html has no syntax for an explicit/nested name; use a
+    // project directory (DiscoverPages) for that.
+    htmlEntries.push_back(ResolveExisting(path).string());
   }
 
   std::vector<fs::path> cppAbs;
@@ -458,7 +534,7 @@ int RunBuildFromFlags(int argc, char *argv[]) {
     jsAbs = ResolveExisting(options.jsPath);
   }
 
-  return ConfigureAndBuild(htmlAbs, cppAbs, jsAbs, options.buildDir,
+  return ConfigureAndBuild(htmlEntries, cppAbs, jsAbs, options.buildDir,
                             options.outputPath, options.run);
 }
 
