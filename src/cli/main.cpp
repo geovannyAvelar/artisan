@@ -18,8 +18,17 @@
 // native and script are two different ways to drive the same Node tree
 // (see app.h/js_engine.h), not two flavors of the same thing, so a
 // scaffolded project is one or the other, never a blend of both.
+//
+// `component` scaffolds a smaller, reusable pairing within an existing
+// project: a markup fragment (components/<name>.html, meant to be pasted
+// into a page - it isn't itself a routable page) and a matching
+// Setup_<name>(Node&) (src/components/<name>.cpp) the page's own SetupApp
+// calls explicitly with the Node the fragment landed in. There's no
+// automatic markup-embedding here (artisanc compiles each page
+// independently) - this is a naming/wiring convention, not new machinery.
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -44,8 +53,11 @@ struct Options {
 void PrintTopUsage() {
   std::cerr << "usage: artisan-cli <command> [<args>]\n\n"
                "commands:\n"
-               "  new <project-dir>   Scaffold a new native project.\n"
-               "  build               Compile a project into a binary.\n\n"
+               "  new <project-dir>              Scaffold a new native project.\n"
+               "  component <project-dir> <name> Scaffold a reusable\n"
+               "                                  component in an existing\n"
+               "                                  project.\n"
+               "  build                           Compile a project into a binary.\n\n"
                "Run `artisan-cli <command>` with no further arguments for\n"
                "that command's own usage.\n";
 }
@@ -420,6 +432,151 @@ int RunNew(int argc, char *argv[]) {
   return 0;
 }
 
+void PrintComponentUsage() {
+  std::cerr
+      << "usage: artisan-cli component <project-dir> <name>\n\n"
+         "Scaffolds a reusable component in an existing project:\n"
+         "  components/<name>.html     markup fragment - paste this into\n"
+         "                             any page under pages/ wherever you\n"
+         "                             want it to appear. Not itself a\n"
+         "                             routable page.\n"
+         "  src/components/<name>.cpp  Setup_<name>(Node&) - call it from\n"
+         "                             that page's SetupApp (or another\n"
+         "                             component's) with the Node the\n"
+         "                             fragment landed in. Auto-discovered\n"
+         "                             and compiled in like any other\n"
+         "                             src/**/*.cpp - no extra wiring.\n";
+}
+
+// Mirrors artisanc's own SanitizeIdentifier (src/compiler/main.cpp): a
+// component name is arbitrary user-facing text (may have hyphens, like an
+// id - "my-button"), but the C++ function built from it needs to be a
+// valid identifier - "Setup_my_button".
+std::string SanitizeIdentifier(const std::string &name) {
+  std::string out = name;
+  for (char &c : out) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+      c = '_';
+    }
+  }
+  if (!out.empty() && std::isdigit(static_cast<unsigned char>(out.front()))) {
+    out = "_" + out;
+  }
+  return out.empty() ? "_" : out;
+}
+
+std::string ComponentHtmlTemplate(const std::string &name) {
+  std::string identifier = SanitizeIdentifier(name);
+  std::ostringstream out;
+  out << "<!--\n"
+      << "  \"" << name << "\" component markup - paste this into any page\n"
+      << "  under pages/ wherever you want it to appear, then wire it up\n"
+      << "  by calling Setup_" << identifier << "(...) from that page's\n"
+      << "  SetupApp with the Node it landed in (see\n"
+      << "  src/components/" << name << ".cpp).\n"
+      << "-->\n"
+      << "<div id=\"" << name << "\">\n"
+      << "  <!-- Component markup goes here. -->\n"
+      << "</div>\n";
+  return out.str();
+}
+
+std::string ComponentCppTemplate(const std::string &name) {
+  std::string identifier = SanitizeIdentifier(name);
+  std::ostringstream out;
+  out << "#include \"dom_node.h\"\n"
+      << "#include \"hooks.h\"\n\n"
+      << "namespace artisan {\n\n"
+      << "// Wires up the \"" << name << "\" component - call this from\n"
+      << "// SetupApp (see app.h) or another component's setup function,\n"
+      << "// passing the Node this component's markup\n"
+      << "// (components/" << name << ".html) landed in, e.g.:\n"
+      << "//\n"
+      << "//   Node *" << identifier << " = document.FindById(\"" << name
+      << "\");\n"
+      << "//   if (" << identifier << " != nullptr) {\n"
+      << "//     Setup_" << identifier << "(*" << identifier << ");\n"
+      << "//   }\n"
+      << "void Setup_" << identifier << "(Node &root) {\n"
+      << "  // Your component's native startup code goes here, e.g.:\n"
+      << "  //\n"
+      << "  //   Node *button = root.FindById(\"" << name << "-button\");\n"
+      << "  //   if (button != nullptr) {\n"
+      << "  //     button->SetOnClick([]() {\n"
+      << "  //       // ...\n"
+      << "  //     });\n"
+      << "  //   }\n"
+      << "  //\n"
+      << "  // Need state a handler can read/update across calls? Use\n"
+      << "  // UseState (hooks.h) instead of a class or a hand-rolled\n"
+      << "  // shared_ptr - Setup_" << identifier << " still only runs once,\n"
+      << "  // so it's the handlers that close over the state, e.g.:\n"
+      << "  //\n"
+      << "  //   auto [count, setCount] = UseState(0);\n"
+      << "  //   Node *label = root.FindById(\"" << name << "-count\");\n"
+      << "  //   if (button != nullptr && label != nullptr) {\n"
+      << "  //     button->SetOnClick([=]() mutable {\n"
+      << "  //       setCount(count() + 1);\n"
+      << "  //       label->SetTextContent(std::to_string(count()));\n"
+      << "  //     });\n"
+      << "  //   }\n"
+      << "}\n\n"
+      << "} // namespace artisan\n";
+  return out.str();
+}
+
+bool IsValidComponentName(const std::string &name) {
+  return !name.empty() && name != "." && name != ".." &&
+         name.find('/') == std::string::npos;
+}
+
+int RunComponent(int argc, char *argv[]) {
+  if (argc != 4) {
+    PrintComponentUsage();
+    return 1;
+  }
+
+  fs::path projectDir = argv[2];
+  std::string name = argv[3];
+
+  if (!fs::is_directory(projectDir)) {
+    std::cerr << "artisan-cli: " << projectDir << " is not a directory\n";
+    return 1;
+  }
+
+  if (!IsValidComponentName(name)) {
+    std::cerr << "artisan-cli: \"" << name
+               << "\" isn't a valid component name - no '/', and not empty, "
+                  "\".\", or \"..\"\n";
+    return 1;
+  }
+
+  fs::path htmlPath = projectDir / "components" / (name + ".html");
+  fs::path cppPath = projectDir / "src" / "components" / (name + ".cpp");
+
+  if (fs::exists(htmlPath) || fs::exists(cppPath)) {
+    std::cerr << "artisan-cli: " << (fs::exists(htmlPath) ? htmlPath : cppPath)
+               << " already exists - refusing to overwrite\n";
+    return 1;
+  }
+
+  CreateDirectory(htmlPath.parent_path());
+  CreateDirectory(cppPath.parent_path());
+
+  WriteFile(htmlPath, ComponentHtmlTemplate(name));
+  WriteFile(cppPath, ComponentCppTemplate(name));
+
+  std::cout << "artisan-cli: created component \"" << name << "\" at\n"
+            << "  " << fs::absolute(htmlPath).string() << "\n"
+            << "  " << fs::absolute(cppPath).string() << "\n\n"
+            << "Next steps:\n"
+            << "  1. Paste the markup from " << htmlPath.filename().string()
+            << " into a page under pages/.\n"
+            << "  2. In that page's SetupApp, find it by id and call\n"
+            << "     Setup_" << SanitizeIdentifier(name) << "(...).\n";
+  return 0;
+}
+
 bool LooksLikeFlag(const std::string &arg) {
   return !arg.empty() && arg.front() == '-';
 }
@@ -556,6 +713,9 @@ int main(int argc, char *argv[]) {
   std::string command = argv[1];
   if (command == "new") {
     return RunNew(argc, argv);
+  }
+  if (command == "component") {
+    return RunComponent(argc, argv);
   }
   if (command == "build") {
     return RunBuild(argc, argv);
