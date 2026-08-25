@@ -1,4 +1,5 @@
 #include "app.h"
+#include "app_script.h"
 #include "compiled_document.h"
 #include "dom_node.h"
 #include "js_engine.h"
@@ -33,29 +34,19 @@ std::string GetValue(const Node *node) {
   return value != nullptr ? *value : std::string();
 }
 
-// The document is compiled from assets/ui.html by artisanc at build time
+// The document is compiled from whatever markup file the build was
+// configured with (ARTISAN_UI_SOURCE / --html) by artisanc at build time
 // (BuildCompiledDocument, in the generated translation unit) - the same
 // pipeline that used to produce a separate, inert, immutable Widget tree
 // now produces this ordinary mutable Node tree instead. Its behavior
 // comes from two independent sources that both run once at startup and
 // both drive this same tree through the same Node API: SetupApp (app.h),
-// plain compiled C++, wires the Clear button; this script, interpreted by
-// JsEngine below, wires Submit. Neither knows the other exists - proof
-// that "native C++" and "script" are just two ways to drive the DOM, not
-// a fork in the architecture.
-constexpr char kAppScript[] = R"js(
-var nameInput = document.getElementById("name-input");
-var greeting = document.getElementById("greeting");
-
-document.getElementById("submit-button").addEventListener("click", function () {
-  var name = nameInput.getAttribute("value") || "";
-  if (name === "") {
-    greeting.textContent = "Please enter a name first.";
-  } else {
-    greeting.textContent = "Hello, " + name + "!";
-  }
-});
-)js";
+// plain compiled C++ from whichever sources the build was configured
+// with (ARTISAN_APP_CPP_SOURCES / --cpp); and GetAppScript() (below),
+// interpreted by JsEngine, from whichever .js file it was configured
+// with (ARTISAN_APP_JS_SOURCE / --js, "" if none). Neither knows the
+// other exists - proof that "native C++" and "script" are just two ways
+// to drive the DOM, not a fork in the architecture.
 
 // Erases the focus's selected range (if any) from `value` and collapses
 // the cursor to where the selection started. Returns whether there was
@@ -241,8 +232,9 @@ int main(int argc, char *argv[]) {
   // before jsEngine's own (now safe, nothing left referencing it)
   // destructor runs implicitly after.
   artisan::JsEngine jsEngine(*document);
-  if (!jsEngine.RunScript(kAppScript, "app.js")) {
-    std::cerr << "main: app.js failed to run - buttons may not be wired up\n";
+  std::string appScript = artisan::GetAppScript();
+  if (!appScript.empty() && !jsEngine.RunScript(appScript, "app.js")) {
+    std::cerr << "main: the app script failed to run\n";
   }
 
   InputFocus focus;

@@ -80,16 +80,54 @@ target_link_libraries(artisanc
     PRIVATE lexbor_static
 )
 
-set(UI_SOURCE "${PROJECT_SOURCE_DIR}/assets/ui.html")
+# These three are the whole surface area artisan-cli's `--html`/`--cpp`/
+# `--js` flags configure (see src/cli/main.cpp) - set directly, building
+# with plain `cmake`/`ninja` gets you exactly the same project artisan-cli
+# would, just with an extra step. Defaults build this repo's own demo.
+set(ARTISAN_UI_SOURCE "${PROJECT_SOURCE_DIR}/assets/ui.html" CACHE STRING
+    "HTML-like markup compiled into the app's initial document")
+set(ARTISAN_APP_CPP_SOURCES "${PROJECT_SOURCE_DIR}/src/app.cpp" CACHE STRING
+    "Semicolon-separated native C++ source(s) compiled into the app")
+set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
+    "Optional script embedded into the app and run once at startup")
+
 set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
 add_custom_command(
     OUTPUT "${GENERATED_UI_CPP}"
-    COMMAND artisanc "${UI_SOURCE}" "${GENERATED_UI_CPP}"
-    DEPENDS artisanc "${UI_SOURCE}"
-    COMMENT "Compiling ${UI_SOURCE} into a native widget tree"
+    COMMAND artisanc "${ARTISAN_UI_SOURCE}" "${GENERATED_UI_CPP}"
+    DEPENDS artisanc "${ARTISAN_UI_SOURCE}"
+    COMMENT "Compiling ${ARTISAN_UI_SOURCE} into a native widget tree"
     VERBATIM
 )
+
+# embed_text is a second build-time-only tool, independent of artisanc: a
+# generic "text file -> C++ string" embedder, used below for the optional
+# JS file (and reusable for any other text asset later) the same way
+# artisanc embeds markup and <img> bytes.
+add_executable(embed_text
+    src/tools/embed_text.cpp
+)
+
+set(GENERATED_SCRIPT_CPP "${CMAKE_BINARY_DIR}/generated_script.cpp")
+
+if(ARTISAN_APP_JS_SOURCE)
+    add_custom_command(
+        OUTPUT "${GENERATED_SCRIPT_CPP}"
+        COMMAND embed_text "${ARTISAN_APP_JS_SOURCE}" "${GENERATED_SCRIPT_CPP}" GetAppScript
+        DEPENDS embed_text "${ARTISAN_APP_JS_SOURCE}"
+        COMMENT "Embedding ${ARTISAN_APP_JS_SOURCE}"
+        VERBATIM
+    )
+else()
+    # No script configured - GetAppScript() still needs to exist and
+    # return something main.cpp can safely treat as "nothing to run",
+    # without main.cpp having to know whether a script was configured at
+    # all. Written directly (not through embed_text) since there's no
+    # input file to embed.
+    file(WRITE "${GENERATED_SCRIPT_CPP}"
+        "namespace artisan { const char *GetAppScript() { return \"\"; } }\n")
+endif()
 
 # The app itself never links lexbor or parses markup - it only walks the
 # Widget tree that artisanc baked into generated_ui.cpp at build time.
@@ -102,8 +140,8 @@ add_custom_command(
 # js_engine.cpp embeds QuickJS and exposes a minimal DOM-like API against
 # that same Node tree, so script can drive the UI too - this is the only
 # place QuickJS is linked in; artisanc has no need for a JS engine at
-# build time. app.cpp is the native-C++ counterpart: plain compiled code
-# against the same Node API, no interpreter involved.
+# build time. ARTISAN_APP_CPP_SOURCES is the native-C++ counterpart: plain
+# compiled code against the same Node API, no interpreter involved.
 add_executable(artisan
     src/main.cpp
     src/widget_renderer.cpp
@@ -111,8 +149,9 @@ add_executable(artisan
     src/dom_node.cpp
     src/widget_tree_builder.cpp
     src/js_engine.cpp
-    src/app.cpp
+    ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
+    "${GENERATED_SCRIPT_CPP}"
 )
 
 target_include_directories(artisan
@@ -122,4 +161,19 @@ target_include_directories(artisan
 
 target_link_libraries(artisan
   PRIVATE skia PkgConfig::SDL2 qjs
+)
+
+# artisan-cli is the single CLI entry point for the whole workflow: it
+# just turns `artisan-cli build --html ... --cpp ... --js ...` into a
+# `cmake -S ${PROJECT_SOURCE_DIR} -B <dir> -DARTISAN_UI_SOURCE=... ...`
+# configure + build of this same project - it doesn't compile or link
+# anything itself.
+add_executable(artisan_cli
+    src/cli/main.cpp
+)
+
+set_target_properties(artisan_cli PROPERTIES OUTPUT_NAME "artisan-cli")
+
+target_compile_definitions(artisan_cli PRIVATE
+    ARTISAN_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
