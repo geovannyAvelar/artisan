@@ -37,14 +37,17 @@
 namespace {
 
 bool IsSkippedTag(const std::string &tag) {
-  // Never visible under any interpretation, and <script>/<style> content
-  // in particular could be arbitrarily large text worth not even
-  // emitting - unlike layout semantics (block/inline, table grids, ...),
-  // this is a simple "don't bother" filter, not a rendering decision, so
-  // it's fine for artisanc itself to make it rather than deferring to
-  // BuildWidgetTree.
-  return tag == "head" || tag == "script" || tag == "style" ||
-         tag == "title" || tag == "meta" || tag == "link";
+  // Never visible under any interpretation and never read by anything -
+  // <script> content in particular is never used inline (a project's JS
+  // comes from a separate file, see ARTISAN_APP_JS_SOURCE/embed_text),
+  // so it's fine for artisanc to drop it rather than deferring to
+  // BuildWidgetTree. <style> is NOT here despite never becoming a widget
+  // itself (widget_tree_builder.cpp's own IsSkippedTag still keeps it out
+  // of the Widget tree) - its text content is real, load-bearing CSS
+  // (see css.h) that BuildWidgetTree reads at runtime, so it has to
+  // survive into the compiled Node tree like any other element's text.
+  return tag == "head" || tag == "script" || tag == "title" ||
+         tag == "meta" || tag == "link";
 }
 
 bool IsAllWhitespace(const std::string &text) {

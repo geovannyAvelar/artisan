@@ -31,6 +31,8 @@ struct LayoutState {
   // own. Block-level boundaries flush it before moving on.
   std::string pendingLine;
   float pendingFontSize = 0.0f;
+  bool pendingBold = false;
+  Color pendingColor = kDefaultTextColor;
 
   // Non-null only on the real (non-dry-run) top-level render: where
   // BoxWidgetHandler records each box's final on-screen rect for hit
@@ -45,20 +47,27 @@ void FlushLine(LayoutState &state) {
   }
 
   state.renderer.DrawText(state.pendingLine, state.x, state.y,
-                           state.pendingFontSize);
-  state.y += state.renderer.LineHeight(state.pendingFontSize);
+                           state.pendingFontSize, state.pendingBold,
+                           state.pendingColor);
+  state.y += state.renderer.LineHeight(state.pendingFontSize, state.pendingBold);
   state.pendingLine.clear();
 }
 
 void AppendWrappedText(LayoutState &state, const std::string &text,
-                        float fontSize) {
-  // A font-size change (e.g. a heading right after inline text - shouldn't
-  // normally happen since headings are block-level, but stay defensive)
-  // can't share a line with what came before.
-  if (!state.pendingLine.empty() && state.pendingFontSize != fontSize) {
+                        float fontSize, bool bold, const Color &color) {
+  // A font-size/weight/color change (e.g. a heading right after inline
+  // text, or a <span style="color:..."> mid-paragraph) can't share a line
+  // with what came before - this flow model draws one line with one set
+  // of text attributes, not per-run styling within a line.
+  if (!state.pendingLine.empty() &&
+      (state.pendingFontSize != fontSize || state.pendingBold != bold ||
+       state.pendingColor.r != color.r || state.pendingColor.g != color.g ||
+       state.pendingColor.b != color.b)) {
     FlushLine(state);
   }
   state.pendingFontSize = fontSize;
+  state.pendingBold = bold;
+  state.pendingColor = color;
 
   std::istringstream words(text);
   std::string word;
@@ -66,11 +75,12 @@ void AppendWrappedText(LayoutState &state, const std::string &text,
   while (words >> word) {
     std::string candidate =
         state.pendingLine.empty() ? word : state.pendingLine + " " + word;
-    float width = state.renderer.MeasureText(candidate, fontSize);
+    float width = state.renderer.MeasureText(candidate, fontSize, bold);
 
     if (width > state.maxWidth && !state.pendingLine.empty()) {
-      state.renderer.DrawText(state.pendingLine, state.x, state.y, fontSize);
-      state.y += state.renderer.LineHeight(fontSize);
+      state.renderer.DrawText(state.pendingLine, state.x, state.y, fontSize,
+                               bold, color);
+      state.y += state.renderer.LineHeight(fontSize, bold);
       state.pendingLine = word;
     } else {
       state.pendingLine = candidate;
@@ -94,24 +104,27 @@ public:
   explicit NullRenderer(const IRenderer &inner) : inner_(inner) {}
 
   void DrawText(const std::string &text, float x, float /*y*/,
-                float fontSize) override {
-    naturalWidth_ = std::max(naturalWidth_, x + inner_.MeasureText(text, fontSize));
+                float fontSize, bool bold, const Color & /*color*/) override {
+    naturalWidth_ =
+        std::max(naturalWidth_, x + inner_.MeasureText(text, fontSize, bold));
   }
 
-  float MeasureText(const std::string &text, float fontSize) const override {
-    return inner_.MeasureText(text, fontSize);
+  float MeasureText(const std::string &text, float fontSize,
+                     bool bold) const override {
+    return inner_.MeasureText(text, fontSize, bold);
   }
 
-  float LineHeight(float fontSize) const override {
-    return inner_.LineHeight(fontSize);
+  float LineHeight(float fontSize, bool bold) const override {
+    return inner_.LineHeight(fontSize, bold);
   }
 
-  void DrawRect(float x, float /*y*/, float width, float /*height*/) override {
+  void DrawRect(float x, float /*y*/, float width, float /*height*/,
+                float /*strokeWidth*/, const Color & /*color*/) override {
     naturalWidth_ = std::max(naturalWidth_, x + width);
   }
 
-  void DrawFilledRect(float x, float /*y*/, float width,
-                       float /*height*/) override {
+  void DrawFilledRect(float x, float /*y*/, float width, float /*height*/,
+                       const Color & /*color*/) override {
     naturalWidth_ = std::max(naturalWidth_, x + width);
   }
 
@@ -186,7 +199,8 @@ public:
 class TextWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
-    AppendWrappedText(state, widget.text, widget.fontSize);
+    Color color = widget.hasColor ? widget.color : kDefaultTextColor;
+    AppendWrappedText(state, widget.text, widget.fontSize, widget.bold, color);
   }
 };
 
@@ -196,17 +210,19 @@ public:
     if (!state.pendingLine.empty()) {
       FlushLine(state);
     } else {
-      state.y += state.renderer.LineHeight(widget.fontSize);
+      state.y += state.renderer.LineHeight(widget.fontSize, widget.bold);
     }
   }
 };
 
 class RuleWidgetHandler final : public WidgetHandler {
 public:
-  void Render(const Widget & /*widget*/, LayoutState &state) const override {
+  void Render(const Widget &widget, LayoutState &state) const override {
     FlushLine(state);
     state.y += kBlockSpacing;
-    state.renderer.DrawRect(state.x, state.y, state.maxWidth, kRuleHeight);
+    Color color = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
+    state.renderer.DrawRect(state.x, state.y, state.maxWidth, kRuleHeight,
+                             widget.borderWidth, color);
     state.y += kRuleHeight + kBlockSpacing;
   }
 };
@@ -217,9 +233,9 @@ public:
     FlushLine(state);
 
     const std::string label = widget.text != nullptr ? widget.text : "";
-    const float lineHeight = state.renderer.LineHeight(widget.fontSize);
+    const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
     const float textWidth =
-        state.renderer.MeasureText(label, widget.fontSize);
+        state.renderer.MeasureText(label, widget.fontSize, widget.bold);
 
     const float width = std::max(kBoxMinWidth, textWidth + 2.0f * kBoxPadding);
     const float height = lineHeight + 2.0f * kBoxPadding;
@@ -232,6 +248,11 @@ public:
                                widget.selectionAnchor >= 0 &&
                                widget.selectionAnchor != widget.cursorPos;
 
+    if (widget.hasBackgroundColor) {
+      state.renderer.DrawFilledRect(state.x, state.y, width, height,
+                                     widget.backgroundColor);
+    }
+
     if (hasSelection) {
       size_t selStart = static_cast<size_t>(
           std::min(widget.cursorPos, widget.selectionAnchor));
@@ -239,26 +260,31 @@ public:
           std::max(widget.cursorPos, widget.selectionAnchor));
       float startX =
           textX + state.renderer.MeasureText(label.substr(0, selStart),
-                                              widget.fontSize);
+                                              widget.fontSize, widget.bold);
       float endX =
           textX + state.renderer.MeasureText(label.substr(0, selEnd),
-                                              widget.fontSize);
-      state.renderer.DrawFilledRect(startX, textY, endX - startX, lineHeight);
+                                              widget.fontSize, widget.bold);
+      state.renderer.DrawFilledRect(startX, textY, endX - startX, lineHeight,
+                                     kSelectionColor);
     }
 
-    state.renderer.DrawRect(state.x, state.y, width, height);
+    Color borderColor = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
+    state.renderer.DrawRect(state.x, state.y, width, height,
+                             widget.borderWidth, borderColor);
 
     if (!label.empty()) {
+      Color textColor = widget.hasColor ? widget.color : kDefaultTextColor;
       state.renderer.DrawText(label, textX, textY + widget.fontSize,
-                               widget.fontSize);
+                               widget.fontSize, widget.bold, textColor);
     }
 
     if (widget.cursorPos >= 0 && !hasSelection) {
       float caretX =
           textX + state.renderer.MeasureText(
                       label.substr(0, static_cast<size_t>(widget.cursorPos)),
-                      widget.fontSize);
-      state.renderer.DrawFilledRect(caretX, textY, kCaretWidth, lineHeight);
+                      widget.fontSize, widget.bold);
+      state.renderer.DrawFilledRect(caretX, textY, kCaretWidth, lineHeight,
+                                     kSelectionColor);
     }
 
     if (state.boxRegions != nullptr) {
@@ -281,17 +307,18 @@ public:
     FlushLine(state);
 
     const std::string label = widget.text != nullptr ? widget.text : "";
-    const float lineHeight = state.renderer.LineHeight(widget.fontSize);
+    const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
     const float textWidth =
-        state.renderer.MeasureText(label, widget.fontSize);
+        state.renderer.MeasureText(label, widget.fontSize, widget.bold);
 
     state.y += kBlockSpacing;
 
     if (!label.empty()) {
+      Color color = widget.hasColor ? widget.color : kDefaultTextColor;
       state.renderer.DrawText(label, state.x, state.y + widget.fontSize,
-                               widget.fontSize);
+                               widget.fontSize, widget.bold, color);
       state.renderer.DrawFilledRect(state.x, state.y + lineHeight - kLinkUnderlineHeight,
-                                     textWidth, kLinkUnderlineHeight);
+                                     textWidth, kLinkUnderlineHeight, color);
     }
 
     if (state.boxRegions != nullptr) {
@@ -410,7 +437,9 @@ public:
     FlushLine(state);
 
     if (table.text != nullptr && table.text[0] != '\0') {
-      AppendWrappedText(state, table.text, table.fontSize);
+      Color captionColor = table.hasColor ? table.color : kDefaultTextColor;
+      AppendWrappedText(state, table.text, table.fontSize, table.bold,
+                         captionColor);
       FlushLine(state);
     }
 
@@ -539,7 +568,15 @@ public:
         float cellX = state.x + columnX[placed.col];
         float cellY = state.y + rowY[r];
 
-        state.renderer.DrawRect(cellX, cellY, cellWidth, cellHeight);
+        if (placed.cell->hasBackgroundColor) {
+          state.renderer.DrawFilledRect(cellX, cellY, cellWidth, cellHeight,
+                                         placed.cell->backgroundColor);
+        }
+        Color cellBorderColor = placed.cell->hasBorderColor
+                                     ? placed.cell->borderColor
+                                     : kDefaultBorderColor;
+        state.renderer.DrawRect(cellX, cellY, cellWidth, cellHeight,
+                                 placed.cell->borderWidth, cellBorderColor);
         RenderContentAt(*placed.cell, state.renderer, cellX + kCellPadding,
                          cellY + kCellPadding,
                          std::max(0.0f, cellWidth - 2.0f * kCellPadding));
@@ -558,6 +595,26 @@ public:
     if (widget.blockSpacing) {
       FlushLine(state);
       state.y += kBlockSpacing;
+    }
+
+    // A background/border wraps the container's own content box - only
+    // meaningful for block-level containers (div, p, ...): an inline one
+    // (span) shares its parent's line and has no width of its own to
+    // paint a tight background against in this flow model, so it's left
+    // unpainted rather than incorrectly spanning the full page width.
+    if (widget.blockSpacing &&
+        (widget.hasBackgroundColor || widget.hasBorderColor)) {
+      float contentHeight =
+          MeasureHeightAt(widget, state.renderer, state.maxWidth);
+      if (widget.hasBackgroundColor) {
+        state.renderer.DrawFilledRect(state.x, state.y, state.maxWidth,
+                                       contentHeight, widget.backgroundColor);
+      }
+      if (widget.hasBorderColor) {
+        state.renderer.DrawRect(state.x, state.y, state.maxWidth,
+                                 contentHeight, widget.borderWidth,
+                                 widget.borderColor);
+      }
     }
 
     for (int i = 0; i < widget.childCount; ++i) {
@@ -626,10 +683,14 @@ int CharIndexAtX(const IRenderer &renderer, const std::string &text,
   // Walk character-by-character, snapping to whichever side of each
   // character's midpoint relativeX falls on. O(n^2) in text length (each
   // step remeasures the whole prefix), which is fine for the short
-  // strings a single-line input field holds.
+  // strings a single-line input field holds. Always measured non-bold:
+  // an <input>/<button>'s BoxRegion (the hit-test record this reads
+  // against) doesn't carry the widget's resolved style, so a bold field's
+  // caret could land very slightly off - not worth threading style
+  // through BoxRegion just for this.
   float previousWidth = 0.0f;
   for (size_t i = 1; i <= text.size(); ++i) {
-    float width = renderer.MeasureText(text.substr(0, i), fontSize);
+    float width = renderer.MeasureText(text.substr(0, i), fontSize, false);
     float midpoint = (previousWidth + width) / 2.0f;
     if (relativeX < midpoint) {
       return static_cast<int>(i - 1);

@@ -2,6 +2,16 @@
 
 namespace artisan {
 
+// A plain RGB color - shared between Widget (what a resolved style bakes
+// in) and IRenderer (what actually gets painted). No alpha: nothing here
+// composites, so it would only ever be all-or-nothing, which named colors
+// like "transparent" already approximate well enough without it.
+struct Color {
+  unsigned char r = 0;
+  unsigned char g = 0;
+  unsigned char b = 0;
+};
+
 enum class WidgetKind {
   kContainer,  // Groups children (div, span, body, ...); no text of its own.
   kText,       // A leaf that paints `text` at `fontSize` (word-wrapped).
@@ -81,6 +91,21 @@ struct Widget {
   // range between them instead of just drawing a caret line.
   int cursorPos = -1;
   int selectionAnchor = -1;
+
+  // CSS (css.h), resolved once at widget-build time - see
+  // widget_tree_builder.cpp. color/bold inherit to descendants that don't
+  // set their own (same as real CSS); backgroundColor/borderColor/
+  // borderWidth don't. hasXxx distinguishes "not set" from a resolved
+  // value that happens to be black/1px - which kinds actually paint these
+  // is up to WidgetRenderer, not this struct.
+  bool hasColor = false;
+  Color color;
+  bool bold = false;
+  bool hasBackgroundColor = false;
+  Color backgroundColor;
+  bool hasBorderColor = false;
+  Color borderColor;
+  float borderWidth = 1.0f;
 };
 
 } // namespace artisan

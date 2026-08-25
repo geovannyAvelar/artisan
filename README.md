@@ -179,6 +179,42 @@ If moving this checkout later breaks the build, update the `replace` line
 in `goapp/go.mod` to point at the new location (same underlying constraint
 `ARTISAN_PROJECT_SOURCE_DIR` already has for the C++ path).
 
+## Using CSS
+
+A `<style>` block anywhere in a page's markup can style elements by tag,
+`.class`, `#id`, or a compound of these (`div.card`, `p#intro.warning`):
+
+```html
+<style>
+  div.card { background-color: #f5f5f5; border-color: #ccc; border-width: 2px; }
+  h1 { color: #2563eb; }
+  #warning { color: red; font-weight: bold; }
+</style>
+<div class="card">
+  <h1>Title</h1>
+  <p id="warning">Careful!</p>
+</div>
+```
+
+Five properties are supported: `color`, `background-color`, `font-weight`
+(`bold`/`normal`), `border-color`, `border-width`. Colors accept `#rgb`,
+`#rrggbb`, `rgb(r, g, b)`, or a common keyword (`red`, `navy`, `gray`,
+...). Cascade and specificity work the way you'd expect - `id` beats
+`class` beats `tag`, later rules win ties, and each property resolves
+independently (a tag rule's `color` and a later class rule's
+`background-color` on the same element both apply). `color`/`font-weight`
+inherit to children that don't set their own; `background-color`/`border`
+never do.
+
+A few things this doesn't do: no combinators (`div p`, `div > p`), no
+pseudo-classes/attribute selectors, and `<style>` only works inside
+`<body>` - a `<head><style>` never reaches the document at all, since
+`<head>` itself is discarded (see `html_document.cpp`). There's also no
+shared stylesheet across pages - each page's markup is compiled
+independently, so a `<style>` block meant for every page needs pasting
+into each one (or turned into a `components`-style fragment, see
+`artisan-cli component`).
+
 ## Building a .deb
 
 ```bash

@@ -222,6 +222,7 @@ add_executable(artisan
     src/widget_tree_builder.cpp
     src/js_engine.cpp
     src/node_c_api.cpp
+    src/css.cpp
     ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"

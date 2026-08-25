@@ -8,6 +8,8 @@
 
 #include "widget_tree_builder.h"
 
+#include "css.h"
+
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -16,6 +18,26 @@
 namespace artisan {
 
 namespace {
+
+// Copies a resolved CSS declaration set onto the widget it produced -
+// color/bold apply wherever WidgetRenderer draws text for this kind;
+// background/border apply wherever it draws this kind's own rect (a
+// kBox/kTable/kTableCell border, a <hr>, or a block-level kContainer's
+// content box - see widget_renderer.cpp). borderWidth keeps Widget's own
+// default (1px) when the stylesheet didn't set one, rather than being
+// overwritten with Declarations' own default.
+void ApplyStyle(Widget &widget, const Declarations &style) {
+  widget.hasColor = style.hasColor;
+  widget.color = style.color;
+  widget.bold = style.bold;
+  widget.hasBackgroundColor = style.hasBackgroundColor;
+  widget.backgroundColor = style.backgroundColor;
+  widget.hasBorderColor = style.hasBorderColor;
+  widget.borderColor = style.borderColor;
+  if (style.hasBorderWidth) {
+    widget.borderWidth = style.borderWidth;
+  }
+}
 
 bool IsAllWhitespace(const std::string &text) {
   return std::all_of(text.begin(), text.end(),
@@ -48,6 +70,25 @@ bool IsSkippedTag(const std::string &tag) {
          tag == "title" || tag == "meta" || tag == "link";
 }
 
+// Concatenates the text content of every <style> element anywhere in
+// `node`'s subtree, depth-first - a document can have more than one, and
+// (like a real browser) its rules apply document-wide regardless of
+// where in the tree they physically sit, not just to elements after
+// them. Note this only ever sees <style> inside <body>: HtmlDocument
+// only exposes the body element (see html_document.cpp), so a <style> in
+// <head> - the conventional place to put one - never reaches the Node
+// tree at all and is silently dropped, same as every other <head> tag.
+void CollectStyleText(const Node &node, std::string &out) {
+  for (const auto &childPtr : node.children()) {
+    const Node &child = *childPtr;
+    if (child.type() == NodeType::kElement && child.tagName() == "style") {
+      out += child.textContent();
+      out += '\n';
+    }
+    CollectStyleText(child, out);
+  }
+}
+
 bool IsBlockTag(const std::string &tag) {
   static const std::vector<std::string> kBlockTags = {
       "html",   "body",   "div",    "p",      "ul",     "ol",
@@ -68,16 +109,19 @@ float FontSizeForTag(const std::string &tag) {
 
 std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
                                         float fontSize,
-                                        const InputFocus &focus);
+                                        const InputFocus &focus,
+                                        const StyleSheet &sheet,
+                                        const Declarations &inheritedStyle);
 
 Widget MakeContainer(const Node &node, WidgetTree &tree, float fontSize,
-                      bool blockSpacing, const InputFocus &focus) {
+                      bool blockSpacing, const InputFocus &focus,
+                      const StyleSheet &sheet, const Declarations &style) {
   std::vector<Widget> childInits =
-      BuildChildrenInits(node, tree, fontSize, focus);
+      BuildChildrenInits(node, tree, fontSize, focus, sheet, style);
   int count = static_cast<int>(childInits.size());
   const Widget *childrenPtr = tree.StoreArray(std::move(childInits));
 
-  return Widget{WidgetKind::kContainer,
+  Widget widget{WidgetKind::kContainer,
                 blockSpacing,
                 0.0f,
                 nullptr,
@@ -90,11 +134,13 @@ Widget MakeContainer(const Node &node, WidgetTree &tree, float fontSize,
                 false,
                 1,
                 1};
+  ApplyStyle(widget, style);
+  return widget;
 }
 
 Widget MakeBox(WidgetTree &tree, const std::string &label, float fontSize,
-                const void *userData, int cursorPos = -1,
-                int selectionAnchor = -1) {
+                const void *userData, const Declarations &style,
+                int cursorPos = -1, int selectionAnchor = -1) {
   Widget widget{WidgetKind::kBox,
                 false,
                 fontSize,
@@ -111,6 +157,7 @@ Widget MakeBox(WidgetTree &tree, const std::string &label, float fontSize,
   widget.userData = userData;
   widget.cursorPos = cursorPos;
   widget.selectionAnchor = selectionAnchor;
+  ApplyStyle(widget, style);
   return widget;
 }
 
@@ -118,7 +165,8 @@ Widget MakeBox(WidgetTree &tree, const std::string &label, float fontSize,
 // treatment for a <button> - the underlying text isn't word-wrapped or
 // otherwise laid out as flowing inline content (see widget_renderer.cpp's
 // LinkWidgetHandler for why).
-Widget MakeLink(WidgetTree &tree, const Node &node, float fontSize) {
+Widget MakeLink(WidgetTree &tree, const Node &node, float fontSize,
+                 const Declarations &style) {
   Widget widget{WidgetKind::kLink,
                 false,
                 fontSize,
@@ -133,24 +181,30 @@ Widget MakeLink(WidgetTree &tree, const Node &node, float fontSize) {
                 1,
                 1};
   widget.userData = &node;
+  ApplyStyle(widget, style);
   return widget;
 }
 
-Widget MakeLineBreak(float fontSize) {
-  return Widget{
+Widget MakeLineBreak(float fontSize, const Declarations &style) {
+  Widget widget{
       WidgetKind::kLineBreak, false, fontSize, nullptr, nullptr, 0,
       nullptr,                0,     0.0f,     0.0f,    false,   1,
       1};
+  ApplyStyle(widget, style);
+  return widget;
 }
 
-Widget MakeRule() {
-  return Widget{WidgetKind::kRule, false, 0.0f, nullptr, nullptr, 0,
+Widget MakeRule(const Declarations &style) {
+  Widget widget{WidgetKind::kRule, false, 0.0f, nullptr, nullptr, 0,
                 nullptr,           0,     0.0f, 0.0f,    false,   1,
                 1};
+  ApplyStyle(widget, style);
+  return widget;
 }
 
-Widget MakeText(WidgetTree &tree, const std::string &text, float fontSize) {
-  return Widget{WidgetKind::kText,
+Widget MakeText(WidgetTree &tree, const std::string &text, float fontSize,
+                 const Declarations &style) {
+  Widget widget{WidgetKind::kText,
                 false,
                 fontSize,
                 tree.StoreString(text),
@@ -163,6 +217,8 @@ Widget MakeText(WidgetTree &tree, const std::string &text, float fontSize) {
                 false,
                 1,
                 1};
+  ApplyStyle(widget, style);
+  return widget;
 }
 
 // A `width`/`height` attribute value: either a plain pixel number or a
@@ -290,16 +346,17 @@ std::string FindCaptionText(const Node &tableNode) {
 // flattened to text: TableWidgetHandler runs the same block-flow layout
 // on it to size and paint it within whatever width its column gets.
 Widget MakeTableCell(const Node &node, WidgetTree &tree, float fontSize,
-                      const InputFocus &focus) {
+                      const InputFocus &focus, const StyleSheet &sheet,
+                      const Declarations &style) {
   std::vector<Widget> childInits =
-      BuildChildrenInits(node, tree, fontSize, focus);
+      BuildChildrenInits(node, tree, fontSize, focus, sheet, style);
   int count = static_cast<int>(childInits.size());
   const Widget *childrenPtr = tree.StoreArray(std::move(childInits));
 
   int colSpan = ParseSpan(node, "colspan");
   int rowSpan = ParseSpan(node, "rowspan");
 
-  return Widget{WidgetKind::kTableCell,
+  Widget widget{WidgetKind::kTableCell,
                 false,
                 0.0f,
                 nullptr,
@@ -312,6 +369,8 @@ Widget MakeTableCell(const Node &node, WidgetTree &tree, float fontSize,
                 false,
                 colSpan,
                 rowSpan};
+  ApplyStyle(widget, style);
+  return widget;
 }
 
 // <table> - flattens away thead/tbody/tfoot wrappers into a plain list of
@@ -320,7 +379,8 @@ Widget MakeTableCell(const Node &node, WidgetTree &tree, float fontSize,
 // the whole thing out as a real grid at render time, honoring each cell's
 // colspan/rowspan and painting the <caption> above it.
 Widget MakeTable(const Node &node, WidgetTree &tree, float fontSize,
-                  const InputFocus &focus) {
+                  const InputFocus &focus, const StyleSheet &sheet,
+                  const Declarations &style) {
   std::string captionText = FindCaptionText(node);
 
   std::vector<const Node *> rowNodes;
@@ -328,36 +388,45 @@ Widget MakeTable(const Node &node, WidgetTree &tree, float fontSize,
 
   std::vector<Widget> rowInits;
   for (const Node *rowNode : rowNodes) {
+    // Cascades table -> row -> cell -> cell's own children, same as any
+    // other nesting - a <tr class="highlight"> can color its cells' text
+    // without each <td> needing its own class.
+    Declarations rowStyle = sheet.Resolve(*rowNode, style);
+
     std::vector<const Node *> cellNodes;
     CollectTableCells(*rowNode, cellNodes);
 
     std::vector<Widget> cellInits;
     for (const Node *cellNode : cellNodes) {
-      cellInits.push_back(MakeTableCell(*cellNode, tree, fontSize, focus));
+      Declarations cellStyle = sheet.Resolve(*cellNode, rowStyle);
+      cellInits.push_back(
+          MakeTableCell(*cellNode, tree, fontSize, focus, sheet, cellStyle));
     }
 
     int cellCount = static_cast<int>(cellInits.size());
     const Widget *cellsPtr = tree.StoreArray(std::move(cellInits));
 
-    rowInits.push_back(Widget{WidgetKind::kContainer,
-                               false,
-                               0.0f,
-                               nullptr,
-                               cellsPtr,
-                               cellCount,
-                               nullptr,
-                               0,
-                               0.0f,
-                               0.0f,
-                               false,
-                               1,
-                               1});
+    Widget rowWidget{WidgetKind::kContainer,
+                      false,
+                      0.0f,
+                      nullptr,
+                      cellsPtr,
+                      cellCount,
+                      nullptr,
+                      0,
+                      0.0f,
+                      0.0f,
+                      false,
+                      1,
+                      1};
+    ApplyStyle(rowWidget, rowStyle);
+    rowInits.push_back(rowWidget);
   }
 
   int rowCount = static_cast<int>(rowInits.size());
   const Widget *rowsPtr = tree.StoreArray(std::move(rowInits));
 
-  return Widget{WidgetKind::kTable,
+  Widget widget{WidgetKind::kTable,
                 false,
                 fontSize,
                 captionText.empty() ? nullptr : tree.StoreString(captionText),
@@ -370,6 +439,8 @@ Widget MakeTable(const Node &node, WidgetTree &tree, float fontSize,
                 false,
                 1,
                 1};
+  ApplyStyle(widget, style);
+  return widget;
 }
 
 std::string InputLabel(const Node &node) {
@@ -383,7 +454,9 @@ std::string InputLabel(const Node &node) {
 
 std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
                                         float fontSize,
-                                        const InputFocus &focus) {
+                                        const InputFocus &focus,
+                                        const StyleSheet &sheet,
+                                        const Declarations &inheritedStyle) {
   std::vector<Widget> inits;
 
   for (const auto &childPtr : parent.children()) {
@@ -394,7 +467,7 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
       if (IsAllWhitespace(text)) {
         continue;
       }
-      inits.push_back(MakeText(tree, text, fontSize));
+      inits.push_back(MakeText(tree, text, fontSize, inheritedStyle));
       continue;
     }
 
@@ -403,14 +476,22 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
       continue;
     }
 
+    // Every element resolves its own style once, against whatever its
+    // parent already resolved (inheritedStyle) - color/font-weight
+    // cascade down from there; background/border never do (see
+    // Declarations, css.h). Text nodes above skip this entirely and just
+    // take inheritedStyle directly, since they have no tag/class/id of
+    // their own to match a selector against.
+    Declarations style = sheet.Resolve(child, inheritedStyle);
+
     if (tag == "br") {
-      inits.push_back(MakeLineBreak(fontSize));
+      inits.push_back(MakeLineBreak(fontSize, style));
     } else if (tag == "hr") {
-      inits.push_back(MakeRule());
+      inits.push_back(MakeRule(style));
     } else if (tag == "img") {
       inits.push_back(MakeImage(child));
     } else if (tag == "table") {
-      inits.push_back(MakeTable(child, tree, fontSize, focus));
+      inits.push_back(MakeTable(child, tree, fontSize, focus, sheet, style));
     } else if (tag == "input") {
       if (&child == focus.node) {
         // The rendered label falls back to the placeholder when `value`
@@ -429,17 +510,19 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
             valueLen > 0 ? std::clamp(focus.selectionAnchor, 0, valueLen)
                          : 0;
         inits.push_back(MakeBox(tree, InputLabel(child), fontSize, &child,
-                                 cursorPos, selectionAnchor));
+                                 style, cursorPos, selectionAnchor));
       } else {
-        inits.push_back(MakeBox(tree, InputLabel(child), fontSize, &child));
+        inits.push_back(
+            MakeBox(tree, InputLabel(child), fontSize, &child, style));
       }
     } else if (tag == "button") {
-      inits.push_back(MakeBox(tree, FlattenText(child), fontSize, &child));
+      inits.push_back(
+          MakeBox(tree, FlattenText(child), fontSize, &child, style));
     } else if (tag == "a") {
-      inits.push_back(MakeLink(tree, child, fontSize));
+      inits.push_back(MakeLink(tree, child, fontSize, style));
     } else {
       inits.push_back(MakeContainer(child, tree, FontSizeForTag(tag),
-                                     IsBlockTag(tag), focus));
+                                     IsBlockTag(tag), focus, sheet, style));
     }
   }
 
@@ -452,8 +535,18 @@ std::unique_ptr<WidgetTree> BuildWidgetTree(const Node &root,
                                              const InputFocus &focus) {
   auto tree = std::make_unique<WidgetTree>();
 
-  std::vector<Widget> rootChildren =
-      BuildChildrenInits(root, *tree, kDefaultFontSize, focus);
+  std::string cssText;
+  CollectStyleText(root, cssText);
+  StyleSheet sheet = StyleSheet::Parse(cssText);
+
+  // `root` itself (the document/body element) never becomes a Widget of
+  // its own (see the synthetic top-level container below) but a rule
+  // like `body { color: ... }` should still seed inheritance for
+  // everything under it, so it's resolved here rather than skipped.
+  Declarations rootStyle = sheet.Resolve(root, Declarations{});
+
+  std::vector<Widget> rootChildren = BuildChildrenInits(
+      root, *tree, kDefaultFontSize, focus, sheet, rootStyle);
   int count = static_cast<int>(rootChildren.size());
   const Widget *childrenPtr = tree->StoreArray(std::move(rootChildren));
 

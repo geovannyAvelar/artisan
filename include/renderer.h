@@ -2,7 +2,13 @@
 
 #include <string>
 
+#include "widget.h"
+
 namespace artisan {
+
+constexpr Color kDefaultTextColor{0, 0, 0};     // Black.
+constexpr Color kDefaultBorderColor{0, 0, 0};   // Black.
+constexpr Color kSelectionColor{0xB4, 0xD7, 0xFF}; // Standard-ish selection blue.
 
 // Backend-agnostic drawing primitives needed to paint a laid-out document.
 // Implementations own the actual drawing surface (a Skia canvas, etc.) and
@@ -13,21 +19,24 @@ public:
   virtual ~IRenderer() = default;
 
   virtual void DrawText(const std::string &text, float x, float y,
-                         float fontSize) = 0;
+                         float fontSize, bool bold, const Color &color) = 0;
 
-  virtual float MeasureText(const std::string &text, float fontSize) const = 0;
+  // bold affects real font metrics (a bold face isn't just a thicker
+  // paint), so measurement needs it too, not just drawing.
+  virtual float MeasureText(const std::string &text, float fontSize,
+                             bool bold) const = 0;
 
-  virtual float LineHeight(float fontSize) const = 0;
+  virtual float LineHeight(float fontSize, bool bold) const = 0;
 
   // Strokes an unfilled rectangle outline - the border for boxy controls
-  // (input, button) and the bar used for a horizontal rule.
-  virtual void DrawRect(float x, float y, float width, float height) = 0;
+  // (input, button), table cells, and the bar used for a horizontal rule.
+  virtual void DrawRect(float x, float y, float width, float height,
+                         float strokeWidth, const Color &color) = 0;
 
-  // Paints a solid filled rectangle - text selection highlight and the
-  // text-entry caret. The one place this renderer uses a color besides
-  // black/white: a selection you can't see isn't a functional selection.
-  virtual void DrawFilledRect(float x, float y, float width,
-                               float height) = 0;
+  // Paints a solid filled rectangle - text selection highlight, the
+  // text-entry caret, and a CSS background-color.
+  virtual void DrawFilledRect(float x, float y, float width, float height,
+                               const Color &color) = 0;
 
   // Decodes `data` (raw encoded image bytes) and paints it at (x, y).
   // `explicitWidth`/`explicitHeight` (0 = unspecified) come from the

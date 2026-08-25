@@ -43,44 +43,53 @@ SkiaRenderer::SkiaRenderer(SkCanvas *canvas) : canvas_(canvas) {
   sk_sp<SkFontMgr> fontMgr =
       SkFontMgr_New_FontConfig(nullptr, SkFontScanner_Make_FreeType());
   typeface_ = fontMgr->legacyMakeTypeface(nullptr, SkFontStyle());
+  boldTypeface_ = fontMgr->legacyMakeTypeface(
+      nullptr, SkFontStyle(SkFontStyle::kBold_Weight,
+                            SkFontStyle::kNormal_Width,
+                            SkFontStyle::kUpright_Slant));
 
   RegisterImageCodecsOnce();
 }
 
-void SkiaRenderer::DrawText(const std::string &text, float x, float y,
-                             float fontSize) {
-  SkPaint paint;
-  paint.setColor(SK_ColorBLACK);
-  paint.setAntiAlias(true);
-
-  canvas_->drawString(text.c_str(), x, y, MakeFont(typeface_, fontSize),
-                       paint);
+const sk_sp<SkTypeface> &SkiaRenderer::TypefaceFor(bool bold) const {
+  return bold ? boldTypeface_ : typeface_;
 }
 
-float SkiaRenderer::MeasureText(const std::string &text,
-                                 float fontSize) const {
-  return MakeFont(typeface_, fontSize)
+void SkiaRenderer::DrawText(const std::string &text, float x, float y,
+                             float fontSize, bool bold, const Color &color) {
+  SkPaint paint;
+  paint.setColor(SkColorSetRGB(color.r, color.g, color.b));
+  paint.setAntiAlias(true);
+
+  canvas_->drawString(text.c_str(), x, y,
+                       MakeFont(TypefaceFor(bold), fontSize), paint);
+}
+
+float SkiaRenderer::MeasureText(const std::string &text, float fontSize,
+                                 bool bold) const {
+  return MakeFont(TypefaceFor(bold), fontSize)
       .measureText(text.c_str(), text.size(), SkTextEncoding::kUTF8);
 }
 
-float SkiaRenderer::LineHeight(float fontSize) const {
-  return MakeFont(typeface_, fontSize).getSpacing();
+float SkiaRenderer::LineHeight(float fontSize, bool bold) const {
+  return MakeFont(TypefaceFor(bold), fontSize).getSpacing();
 }
 
-void SkiaRenderer::DrawRect(float x, float y, float width, float height) {
+void SkiaRenderer::DrawRect(float x, float y, float width, float height,
+                             float strokeWidth, const Color &color) {
   SkPaint paint;
-  paint.setColor(SK_ColorBLACK);
+  paint.setColor(SkColorSetRGB(color.r, color.g, color.b));
   paint.setAntiAlias(true);
   paint.setStyle(SkPaint::kStroke_Style);
-  paint.setStrokeWidth(1.0f);
+  paint.setStrokeWidth(strokeWidth);
 
   canvas_->drawRect(SkRect::MakeXYWH(x, y, width, height), paint);
 }
 
-void SkiaRenderer::DrawFilledRect(float x, float y, float width,
-                                   float height) {
+void SkiaRenderer::DrawFilledRect(float x, float y, float width, float height,
+                                   const Color &color) {
   SkPaint paint;
-  paint.setColor(SkColorSetRGB(0xB4, 0xD7, 0xFF)); // Standard-ish selection blue.
+  paint.setColor(SkColorSetRGB(color.r, color.g, color.b));
   paint.setStyle(SkPaint::kFill_Style);
 
   canvas_->drawRect(SkRect::MakeXYWH(x, y, width, height), paint);
