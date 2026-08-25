@@ -63,22 +63,16 @@ need to list them anywhere.
 artisan-cli build my-app --run
 ```
 
-By default this auto-discovers the project's files: every `pages/**/*.html`,
-every `src/**/*.cpp`, an optional `app.js` at the project root (embedded and
-run once at startup, alongside `SetupApp`), and an optional Go app under
-`goapp/` (see [Using Go](#using-go) below). Flags:
+There's no mode for naming individual files by hand - it's always a project
+directory, and its files are discovered automatically: every
+`pages/**/*.html`, either every `src/**/*.cpp` *or* a Go app under `goapp/`
+(never both - see [Using Go](#using-go) below), and an optional `app.js` at
+the project root (embedded and run once at startup, alongside whichever
+native language the project uses). Flags:
 
 - `--build-dir <dir>` - where to configure/build (default `./build`)
 - `-o, --output <path>` - copy the built binary here
 - `--run` - run the binary after a successful build
-
-For full manual control, list files explicitly instead of a project
-directory:
-
-```bash
-artisan-cli build --html pages/index.html --html pages/about.html \
-  --cpp src/main.cpp --js app.js --go goapp --run
-```
 
 ## Adding a component
 
@@ -115,12 +109,16 @@ any other mutation via the `Node` API (see `include/dom_node.h`).
 
 ## Using Go
 
-A project can drive its DOM from a native Go app instead of (or alongside)
-C++/JS, compiled ahead-of-time into a static archive (`go build
--buildmode=c-archive`) and linked straight into the binary - it never runs
-interpreted, and requires a Go toolchain only for projects that use it.
+A project can drive its DOM from a native Go app instead of C++, compiled
+ahead-of-time into a static archive (`go build -buildmode=c-archive`) and
+linked straight into the binary - it never runs interpreted, and requires a
+Go toolchain only for projects that use it. A project picks one native
+language, not both: if `src/**/*.cpp` and `goapp/` are both present,
+`artisan-cli build` refuses to build until one is removed. `app.js` is
+orthogonal to that choice and can layer on either.
 
-Create `<project-dir>/goapp/` with its own module:
+To switch a scaffolded project to Go, delete `src/main.cpp` and create
+`<project-dir>/goapp/` with its own module:
 
 ```go
 // goapp/go.mod
@@ -162,8 +160,7 @@ func main() {}
 ```
 
 `artisan-cli build` auto-discovers `goapp/` the same way it discovers
-`app.js` - no flag needed (`--go <dir>` is there for the explicit-files
-build mode). `artisango.Node` mirrors the same `Node` API C++/JS get:
+`app.js` - no flag needed. `artisango.Node` mirrors the same `Node` API C++/JS get:
 `FindById`, `TagName`, `TextContent`/`SetTextContent`,
 `GetAttribute`/`SetAttribute`/`RemoveAttribute`, `SetOnClick` - see
 `go/artisango/node.go` and the C ABI it wraps, `include/node_c_api.h`.

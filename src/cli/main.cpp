@@ -6,18 +6,19 @@
 // `build` does not reimplement compilation or linking itself - Skia,
 // lexbor, and QuickJS all need to be found and wired together correctly,
 // and the project's own CMakeLists.txt already knows how to do that. What
-// it actually does is turn a simple command line into the right CMake
-// configure + build invocation, with the caller's markup/C++/JS files
-// substituted in via cache variables (ARTISAN_UI_SOURCES,
-// ARTISAN_APP_CPP_SOURCES, ARTISAN_APP_JS_SOURCE) that CMakeLists.txt
-// exposes for exactly this purpose. Compiling native code for artisan and
-// setting up a QuickJS script are the same command - the split happens
-// entirely inside the one build it drives.
+// it actually does is discover a project directory's files (see
+// DiscoverProject) and turn them into the right CMake configure + build
+// invocation, substituted in via cache variables (ARTISAN_UI_SOURCES,
+// ARTISAN_APP_CPP_SOURCES, ARTISAN_APP_JS_SOURCE, ARTISAN_APP_GO_SOURCE)
+// that CMakeLists.txt exposes for exactly this purpose. There's no mode
+// for naming individual files by hand - always a project directory, so
+// there's exactly one way a project is laid out.
 //
-// `new` writes out a starting point for one of those --cpp files -
-// native and script are two different ways to drive the same Node tree
-// (see app.h/js_engine.h), not two flavors of the same thing, so a
-// scaffolded project is one or the other, never a blend of both.
+// `new` writes out a starting point for the native C++ path
+// (src/main.cpp) - a project using Go instead adds its own goapp/ by
+// hand (see README.md) and removes src/main.cpp, since a project can
+// only use one native language at a time (see DiscoverProject). Script
+// (app.js) is orthogonal to that choice and can layer on either.
 //
 // `component` scaffolds a smaller, reusable pairing within an existing
 // project: a markup fragment (components/<name>.html, meant to be pasted
@@ -41,16 +42,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-struct Options {
-  std::vector<std::string> htmlPaths;
-  std::vector<std::string> cppPaths;
-  std::string jsPath;
-  std::string goPath;
-  std::string buildDir = "build";
-  std::string outputPath;
-  bool run = false;
-};
-
 void PrintTopUsage() {
   std::cerr << "usage: artisan-cli <command> [<args>]\n\n"
                "commands:\n"
@@ -66,12 +57,9 @@ void PrintTopUsage() {
 void PrintBuildUsage() {
   std::cerr
       << "usage: artisan-cli build <project-dir> [--build-dir <dir>]\n"
-         "                         [-o <output>] [--run]\n"
-         "   or: artisan-cli build --html <file.html> [--html <file.html>]...\n"
-         "                         [--cpp <file.cpp>]... [--js <file.js>]\n"
-         "                         [--build-dir <dir>] [-o <output>] [--run]\n\n"
-         "Given a project directory (the layout artisan-cli new scaffolds),\n"
-         "its files are discovered automatically - no need to name each one:\n"
+         "                         [-o <output>] [--run]\n\n"
+         "<project-dir> is the layout artisan-cli new scaffolds - its files\n"
+         "are discovered automatically, never named one by one:\n"
          "  <project-dir>/pages/**/*.html   every page in the bundle,\n"
          "        named after its path relative to pages/, folders and all\n"
          "        (Next.js-style): pages/about.html becomes \"about\";\n"
@@ -81,38 +69,18 @@ void PrintBuildUsage() {
          "        project root's). pages/index.html, if present, is the\n"
          "        page the app opens on. An <a href=\"...\"> anywhere in\n"
          "        the bundle can navigate to any other page by name.\n"
-         "  <project-dir>/src/**/*.cpp      every native C++ source,\n"
-         "        nesting is just organization here (not a route).\n"
-         "  <project-dir>/app.js            optional embedded script.\n"
-         "  <project-dir>/goapp/            optional native Go app - its own\n"
-         "        go.mod/main.go (see go/artisango), compiled ahead of time\n"
-         "        and linked in like ARTISAN_APP_CPP_SOURCES, not\n"
-         "        interpreted like app.js.\n\n"
-         "Or list individual files by hand for full manual control:\n"
-         "  --html <file>   A page's markup - same naming/ordering rules as\n"
-         "                  pages/*.html above. Repeatable, at least one\n"
-         "                  required.\n"
-         "  --cpp <file>    Native C++ source - repeatable. Defaults to the\n"
-         "                  project's own src/app.cpp if omitted.\n"
-         "  --js <file>     Optional script embedded and run at startup.\n"
-         "  --go <dir>      Optional native Go app directory (its own\n"
-         "                  go.mod/main.go), compiled and linked in.\n\n"
+         "  <project-dir>/src/**/*.cpp      native C++ source, if the\n"
+         "        project uses that language - nesting is just\n"
+         "        organization here (not a route).\n"
+         "  <project-dir>/goapp/            a native Go app instead, if the\n"
+         "        project uses that language - its own go.mod/main.go (see\n"
+         "        go/artisango), compiled ahead of time, never both this\n"
+         "        and src/**/*.cpp in the same project.\n"
+         "  <project-dir>/app.js            optional embedded script -\n"
+         "        orthogonal to the C++/Go choice above, works with either.\n\n"
          "  --build-dir     Where to configure/build (default: ./build).\n"
          "  -o, --output    Copy the built binary here.\n"
          "  --run           Run the binary after a successful build.\n";
-}
-
-// Resolves `path` to an absolute path and exits with an error if it
-// doesn't exist - every file this tool hands to CMake needs to be
-// absolute, since the build directory (and so CMake's notion of "here")
-// isn't necessarily the caller's current directory.
-fs::path ResolveExisting(const std::string &path) {
-  fs::path abs = fs::absolute(path);
-  if (!fs::exists(abs)) {
-    std::cerr << "artisan-cli: " << abs << " does not exist\n";
-    std::exit(1);
-  }
-  return abs;
 }
 
 // Single-quotes a path for /bin/sh - safe against spaces and the ';'
@@ -269,12 +237,25 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.goPath = fs::absolute(goPath);
   }
 
+  // A project drives its DOM natively from exactly one language, never
+  // both at once - a Go app and C++ sources both trying to run their own
+  // SetupApp-equivalent against the same page on load would be two
+  // independent, unordered sources of truth for the same startup
+  // behavior. Script (app.js) doesn't compete here since it's already
+  // designed to layer on top of whichever native language runs.
+  if (!discovered.cppPaths.empty() && !discovered.goPath.empty()) {
+    std::cerr << "artisan-cli: " << projectDir
+               << " has both src/**/*.cpp and goapp/ - a project can only "
+                  "use one native language at a time. Remove src/*.cpp "
+                  "for a Go project, or goapp/ for a C++ one.\n";
+    std::exit(1);
+  }
+
   return discovered;
 }
 
-// The tail both build modes (project-directory and explicit --html/--cpp/
-// --js) share once they've settled on the same three lists of files:
-// configure, build, optionally copy the binary out and/or run it.
+// The tail RunBuild shares across every project build: configure, build,
+// optionally copy the binary out and/or run it.
 // `htmlEntries` items are each either a bare absolute path (artisanc
 // derives the page name from its stem) or "name=path" (an explicit name,
 // for a nested route - see DiscoverPages).
@@ -292,10 +273,14 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
                << " -DARTISAN_UI_SOURCES="
                << ShellQuote(JoinStrings(htmlEntries));
 
-  if (!cppAbs.empty()) {
-    configureCmd << " -DARTISAN_APP_CPP_SOURCES="
-                 << ShellQuote(JoinPaths(cppAbs));
-  }
+  // Always set, even when empty: ARTISAN_APP_CPP_SOURCES is a CACHE
+  // STRING with its own default (this repo's own demo src/app.cpp, for
+  // building it directly with plain cmake) that would otherwise stick
+  // around from a previous configure of this same build dir - a Go-only
+  // project (empty cppAbs) needs that cleared, not silently left as
+  // whatever it was, to actually be Go-only.
+  configureCmd << " -DARTISAN_APP_CPP_SOURCES="
+               << ShellQuote(JoinPaths(cppAbs));
 
   configureCmd << " -DARTISAN_APP_JS_SOURCE="
                << ShellQuote(jsAbs.empty() ? "" : jsAbs.string());
@@ -599,14 +584,17 @@ int RunComponent(int argc, char *argv[]) {
   return 0;
 }
 
-bool LooksLikeFlag(const std::string &arg) {
-  return !arg.empty() && arg.front() == '-';
-}
+} // namespace
 
 // `artisan-cli build <project-dir> [--build-dir <dir>] [-o <output>]
-// [--run]` - argv[2] is a bare path, not a flag, so its pages/src/app.js
+// [--run]` - always a project directory; its pages/src or goapp/app.js
 // get discovered instead of named one by one (see DiscoverProject).
-int RunBuildFromProject(int argc, char *argv[]) {
+int RunBuild(int argc, char *argv[]) {
+  if (argc < 3) {
+    PrintBuildUsage();
+    return 1;
+  }
+
   fs::path projectDir = fs::absolute(argv[2]);
   if (!fs::is_directory(projectDir)) {
     std::cerr << "artisan-cli: " << projectDir << " is not a directory\n";
@@ -635,14 +623,6 @@ int RunBuildFromProject(int argc, char *argv[]) {
       outputPathStr = next();
     } else if (arg == "--run") {
       run = true;
-    } else if (arg == "--html" || arg == "--cpp" || arg == "--js" ||
-               arg == "--go") {
-      std::cerr << "artisan-cli: " << arg
-                 << " can't be combined with a project directory - its "
-                    "files are discovered automatically. Pass individual "
-                    "--html/--cpp files instead of a directory for manual "
-                    "control.\n";
-      return 1;
     } else {
       std::cerr << "artisan-cli: unknown argument " << arg << "\n";
       PrintBuildUsage();
@@ -653,85 +633,6 @@ int RunBuildFromProject(int argc, char *argv[]) {
   return ConfigureAndBuild(discovered.htmlEntries, discovered.cppPaths,
                             discovered.jsPath, discovered.goPath, buildDirStr,
                             outputPathStr, run);
-}
-
-// `artisan-cli build --html ... [--cpp ...] [--js ...] ...` - the fully
-// manual mode, for a layout DiscoverProject doesn't fit (or just full
-// control over exactly which files are included).
-int RunBuildFromFlags(int argc, char *argv[]) {
-  Options options;
-
-  for (int i = 2; i < argc; ++i) {
-    std::string arg = argv[i];
-    auto next = [&]() -> std::string {
-      if (i + 1 >= argc) {
-        std::cerr << "artisan-cli: " << arg << " needs a value\n";
-        std::exit(1);
-      }
-      return argv[++i];
-    };
-
-    if (arg == "--html") {
-      options.htmlPaths.push_back(next());
-    } else if (arg == "--cpp") {
-      options.cppPaths.push_back(next());
-    } else if (arg == "--js") {
-      options.jsPath = next();
-    } else if (arg == "--go") {
-      options.goPath = next();
-    } else if (arg == "--build-dir") {
-      options.buildDir = next();
-    } else if (arg == "-o" || arg == "--output") {
-      options.outputPath = next();
-    } else if (arg == "--run") {
-      options.run = true;
-    } else {
-      std::cerr << "artisan-cli: unknown argument " << arg << "\n";
-      PrintBuildUsage();
-      return 1;
-    }
-  }
-
-  if (options.htmlPaths.empty()) {
-    std::cerr << "artisan-cli: at least one --html is required\n";
-    PrintBuildUsage();
-    return 1;
-  }
-
-  std::vector<std::string> htmlEntries;
-  for (const std::string &path : options.htmlPaths) {
-    // Bare path - artisanc derives this page's name from its stem, same
-    // as always. --html has no syntax for an explicit/nested name; use a
-    // project directory (DiscoverPages) for that.
-    htmlEntries.push_back(ResolveExisting(path).string());
-  }
-
-  std::vector<fs::path> cppAbs;
-  for (const std::string &path : options.cppPaths) {
-    cppAbs.push_back(ResolveExisting(path));
-  }
-
-  fs::path jsAbs;
-  if (!options.jsPath.empty()) {
-    jsAbs = ResolveExisting(options.jsPath);
-  }
-
-  fs::path goAbs;
-  if (!options.goPath.empty()) {
-    goAbs = ResolveExisting(options.goPath);
-  }
-
-  return ConfigureAndBuild(htmlEntries, cppAbs, jsAbs, goAbs, options.buildDir,
-                            options.outputPath, options.run);
-}
-
-} // namespace
-
-int RunBuild(int argc, char *argv[]) {
-  if (argc >= 3 && !LooksLikeFlag(argv[2])) {
-    return RunBuildFromProject(argc, argv);
-  }
-  return RunBuildFromFlags(argc, argv);
 }
 
 int main(int argc, char *argv[]) {

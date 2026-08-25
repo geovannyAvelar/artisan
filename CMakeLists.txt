@@ -188,6 +188,19 @@ else()
         "extern \"C\" void ArtisanGoReleaseClickHandler(uintptr_t) {}\n")
 endif()
 
+# A project using Go (or one with no native app code at all) has nothing
+# defining SetupApp(Node&) - main.cpp calls it unconditionally, so it
+# needs a no-op stub here the same way ArtisanSetupApp/GetAppScript get
+# one above, rather than silently falling back to ARTISAN_APP_CPP_SOURCES'
+# own CACHE default (this repo's demo src/app.cpp).
+set(GENERATED_CPP_STUB "${CMAKE_BINARY_DIR}/generated_cpp_stub.cpp")
+
+if(NOT ARTISAN_APP_CPP_SOURCES)
+    file(WRITE "${GENERATED_CPP_STUB}"
+        "#include \"app.h\"\n"
+        "namespace artisan { void SetupApp(Node &) {} }\n")
+endif()
+
 # The app itself never links lexbor or parses markup - it only walks the
 # Widget tree that artisanc baked into generated_ui.cpp at build time.
 #
@@ -216,6 +229,10 @@ add_executable(artisan
 
 if(NOT ARTISAN_APP_GO_SOURCE)
     target_sources(artisan PRIVATE "${GENERATED_GO_STUB_CPP}")
+endif()
+
+if(NOT ARTISAN_APP_CPP_SOURCES)
+    target_sources(artisan PRIVATE "${GENERATED_CPP_STUB}")
 endif()
 
 target_include_directories(artisan
