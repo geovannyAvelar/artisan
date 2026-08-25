@@ -178,3 +178,29 @@ C++/JS get: `FindById`, `TagName`, `TextContent`/`SetTextContent`,
 If moving this checkout later breaks the build, update the `replace` line
 in `goapp/go.mod` to point at the new location (same underlying constraint
 `ARTISAN_PROJECT_SOURCE_DIR` already has for the C++ path).
+
+## Building a .deb
+
+```bash
+./package/build_deb.sh
+```
+
+Produces `dist/artisan-cli_<version>_amd64.deb`. Requires Skia already
+built (`./build_skia.sh`) - the script packages what's there, it doesn't
+build Skia itself.
+
+`artisan-cli` isn't self-contained: every `artisan-cli build` re-invokes
+cmake against this whole checkout, Skia's prebuilt static libraries
+included, so the .deb bundles a copy of the tree (installed to
+`/usr/lib/artisan`) rather than just the binary - expect several hundred
+MB. Installing it (`sudo dpkg -i dist/artisan-cli_*.deb`) pulls in the
+toolchain `artisan-cli build` itself shells out to (cmake, ninja, g++,
+pkg-config, and the freetype/fontconfig/sdl2 dev packages) via the
+package's declared dependencies, so `apt install ./artisan-cli_*.deb` on a
+clean machine is enough to get straight to `artisan-cli new && artisan-cli
+build --run`.
+
+The version embeds the commit the package was built from (e.g.
+`0.0.1~git20260825.d90e8f8`) so repeated local builds are distinguishable
+- this is a local packaging script only, not tied to any CI or publishing
+process.

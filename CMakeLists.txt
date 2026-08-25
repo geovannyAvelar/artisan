@@ -262,6 +262,78 @@ add_executable(artisan_cli
 
 set_target_properties(artisan_cli PROPERTIES OUTPUT_NAME "artisan-cli")
 
+# Empty (the default) means "build/run in place": ARTISAN_PROJECT_SOURCE_DIR
+# is just this checkout, correct for a dev build. Packaging (see
+# package/build_deb.sh) overrides this to wherever the .deb installs this
+# tree (/usr/lib/artisan) instead, since that install location - not
+# whatever machine happened to build the package - is where a packaged
+# artisan-cli's own `cmake -S ...` re-invocations (ConfigureAndBuild, in
+# src/cli/main.cpp) need to point once installed.
+set(ARTISAN_PROJECT_SOURCE_DIR_OVERRIDE "" CACHE STRING
+    "Path a packaged artisan-cli should treat as its own checkout, if different from where it's being built")
+
+if(ARTISAN_PROJECT_SOURCE_DIR_OVERRIDE)
+    set(ARTISAN_CLI_PROJECT_SOURCE_DIR "${ARTISAN_PROJECT_SOURCE_DIR_OVERRIDE}")
+else()
+    set(ARTISAN_CLI_PROJECT_SOURCE_DIR "${PROJECT_SOURCE_DIR}")
+endif()
+
 target_compile_definitions(artisan_cli PRIVATE
-    ARTISAN_PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    ARTISAN_PROJECT_SOURCE_DIR="${ARTISAN_CLI_PROJECT_SOURCE_DIR}"
 )
+
+# --- Packaging (see package/build_deb.sh) ---
+#
+# artisan-cli isn't self-contained: every `artisan-cli build` re-invokes
+# cmake against this whole checkout (ARTISAN_PROJECT_SOURCE_DIR above),
+# Skia's prebuilt static libraries included - rebuilding Skia per install
+# is a non-starter (build_skia.sh alone takes tens of minutes). So a
+# packaged artisan-cli ships its own copy of the tree under
+# /usr/lib/artisan, installed here alongside the binary. This makes for a
+# large package (Skia's .a files alone run several hundred MB) - only
+# out/Debug's *.a and gen/ are installed, dropping the much larger pile of
+# intermediate .o/.ninja build files that out/Debug also holds and that
+# nothing at runtime needs.
+install(TARGETS artisan_cli RUNTIME DESTINATION bin)
+
+set(ARTISAN_INSTALL_SOURCE_DIR "lib/artisan")
+
+install(FILES CMakeLists.txt DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}")
+install(DIRECTORY include/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/include")
+install(DIRECTORY src/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/src")
+install(DIRECTORY go/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/go")
+
+install(DIRECTORY third_party/lexbor/
+    DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/third_party/lexbor"
+    PATTERN ".git" EXCLUDE)
+install(DIRECTORY third_party/quickjs/
+    DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/third_party/quickjs"
+    PATTERN ".git" EXCLUDE)
+
+install(DIRECTORY third_party/skia/
+    DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/third_party/skia"
+    PATTERN ".git" EXCLUDE
+    PATTERN "out" EXCLUDE)
+install(DIRECTORY third_party/skia/out/Debug/gen/
+    DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/third_party/skia/out/Debug/gen")
+install(DIRECTORY third_party/skia/out/Debug/
+    DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/third_party/skia/out/Debug"
+    FILES_MATCHING PATTERN "*.a")
+
+set(CPACK_PACKAGE_NAME "artisan-cli")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}" CACHE STRING
+    "Overridden by package/build_deb.sh with a git-commit-derived version")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Build native desktop apps from HTML-like markup")
+set(CPACK_PACKAGE_CONTACT "Giovanni Avelar <geovanny.avelar@gmail.com>")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Giovanni Avelar <geovanny.avelar@gmail.com>")
+set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+# The toolchain artisan-cli shells out to for every `build` - not
+# artisan-cli's own runtime deps (it barely has any), but what makes the
+# projects it builds actually compile once this package is installed.
+set(CPACK_DEBIAN_PACKAGE_DEPENDS
+    "cmake (>= 3.20), ninja-build, g++, pkg-config, libfreetype-dev, libfontconfig-dev, libsdl2-dev")
+set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
+set(CPACK_GENERATOR "DEB")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+include(CPack)
