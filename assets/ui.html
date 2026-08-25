@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+  <head>
+    <title>artisan</title>
+  </head>
+  <body>
+    <h1>Hello, artisan</h1>
+    <img src="images/logo.png">
+    <img src="images/logo.png" width="40">
+    <p>
+      This UI is compiled ahead of time by artisanc into a mutable
+      artisan::Node tree baked directly into the binary - nothing here is
+      parsed at runtime. It's the same live tree the app can click, type
+      into, and mutate below - one pipeline, not two.
+    </p>
+
+    <hr>
+
+    <div>
+      A div is just a block-level container: it starts on its own line
+      and adds margin above and below.
+      <span>A span, on the other hand, flows inline</span> with no margin
+      of its own - notice this text sits right after it on the same line.
+    </div>
+
+    <h2>Table</h2>
+    <table>
+      <caption>Compiled element sizes</caption>
+      <thead>
+        <tr>
+          <th rowspan="2">Element</th>
+          <th colspan="2">Size</th>
+        </tr>
+        <tr>
+          <th>Width</th>
+          <th>Height</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>logo.png</td>
+          <td colspan="2">160 x 100</td>
+        </tr>
+        <tr>
+          <td>input box</td>
+          <td>auto</td>
+          <td>auto</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Form elements</h2>
+    <p>
+      Click a box and type, drag to select, or use shift+arrows /
+      ctrl+A/C/X/V. Then try the buttons - Submit and Clear are wired to
+      these exact compiled nodes by id, from main.cpp.
+    </p>
+
+    <p>Name</p>
+    <input id="name-input" placeholder="Type your name" />
+
+    <p>Email</p>
+    <input id="email-input" placeholder="Type your email" />
+
+    <button id="submit-button">Submit</button>
+    <button id="clear-button">Clear</button>
+
+    <p id="greeting">Fill in your name and click Submit.</p>
+  </body>
+</html>
