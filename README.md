@@ -57,6 +57,25 @@ Link between pages from markup with `<a href="...">`. Add more `.cpp`
 files anywhere under `src/` and they're compiled in automatically - no
 need to list them anywhere.
 
+Pass `--lang go` to scaffold a Go project instead (see [Using
+Go](#using-go)):
+
+```bash
+artisan-cli new my-app --lang go
+```
+
+```
+my-app/
+  pages/index.html
+  goapp/
+    go.mod   # replace artisango => <this checkout>/go/artisango
+    main.go  # SetupApp(artisango.Node) - native startup code
+```
+
+A project uses one native language, never both - `new` always scaffolds
+one or the other, and `artisan-cli build` refuses to build a project that
+somehow ends up with both `src/**/*.cpp` and `goapp/`.
+
 ## Building a project
 
 ```bash
@@ -112,27 +131,16 @@ any other mutation via the `Node` API (see `include/dom_node.h`).
 A project can drive its DOM from a native Go app instead of C++, compiled
 ahead-of-time into a static archive (`go build -buildmode=c-archive`) and
 linked straight into the binary - it never runs interpreted, and requires a
-Go toolchain only for projects that use it. A project picks one native
-language, not both: if `src/**/*.cpp` and `goapp/` are both present,
-`artisan-cli build` refuses to build until one is removed. `app.js` is
-orthogonal to that choice and can layer on either.
+Go toolchain only for projects that use it.
 
-To switch a scaffolded project to Go, delete `src/main.cpp` and create
-`<project-dir>/goapp/` with its own module:
-
-```go
-// goapp/go.mod
-module myapp/goapp
-
-go 1.21
-
-require artisango v0.0.0
-
-replace artisango => /path/to/your/artisan/checkout/go/artisango
+```bash
+artisan-cli new my-app --lang go
 ```
 
+scaffolds `goapp/go.mod` (with a `replace artisango => ...` already
+pointing at this checkout) and `goapp/main.go`:
+
 ```go
-// goapp/main.go
 package main
 
 import "C"
@@ -143,12 +151,14 @@ import (
 )
 
 func SetupApp(doc artisango.Node) {
-	button := doc.FindById("my-button")
-	if button != nil {
-		button.SetOnClick(func() {
-			// ...
-		})
-	}
+	// Your native startup code goes here, e.g.:
+	//
+	//   button := doc.FindById("my-button")
+	//   if button != nil {
+	//     button.SetOnClick(func() {
+	//       // ...
+	//     })
+	//   }
 }
 
 //export ArtisanSetupApp
@@ -160,7 +170,11 @@ func main() {}
 ```
 
 `artisan-cli build` auto-discovers `goapp/` the same way it discovers
-`app.js` - no flag needed. `artisango.Node` mirrors the same `Node` API C++/JS get:
-`FindById`, `TagName`, `TextContent`/`SetTextContent`,
+`app.js` - no flag needed. `artisango.Node` mirrors the same `Node` API
+C++/JS get: `FindById`, `TagName`, `TextContent`/`SetTextContent`,
 `GetAttribute`/`SetAttribute`/`RemoveAttribute`, `SetOnClick` - see
 `go/artisango/node.go` and the C ABI it wraps, `include/node_c_api.h`.
+
+If moving this checkout later breaks the build, update the `replace` line
+in `goapp/go.mod` to point at the new location (same underlying constraint
+`ARTISAN_PROJECT_SOURCE_DIR` already has for the C++ path).

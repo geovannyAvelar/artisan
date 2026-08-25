@@ -14,10 +14,9 @@
 // for naming individual files by hand - always a project directory, so
 // there's exactly one way a project is laid out.
 //
-// `new` writes out a starting point for the native C++ path
-// (src/main.cpp) - a project using Go instead adds its own goapp/ by
-// hand (see README.md) and removes src/main.cpp, since a project can
-// only use one native language at a time (see DiscoverProject). Script
+// `new` writes out a starting point for one native language - C++
+// (src/main.cpp, the default) or, with --lang go, Go (goapp/) - a project
+// uses one or the other, never both (see DiscoverProject). Script
 // (app.js) is orthogonal to that choice and can layer on either.
 //
 // `component` scaffolds a smaller, reusable pairing within an existing
@@ -331,18 +330,24 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 }
 
 void PrintNewUsage() {
-  std::cerr << "usage: artisan-cli new <project-dir>\n\n"
-               "Scaffolds a new native artisan project at <project-dir>:\n"
+  std::cerr << "usage: artisan-cli new <project-dir> [--lang cpp|go]\n\n"
+               "Scaffolds a new artisan project at <project-dir>:\n"
                "  pages/index.html   starter markup - the page the app\n"
                "                     opens on; add more pages/*.html (or\n"
                "                     pages/some-folder/*.html for a nested\n"
                "                     route, Next.js-style) and link between\n"
-               "                     them with <a href=\"...\">\n"
-               "  src/main.cpp       native SetupApp(Node&) - see\n"
+               "                     them with <a href=\"...\">\n\n"
+               "  --lang cpp (default)\n"
+               "    src/main.cpp     native SetupApp(Node&) - see\n"
                "                     include/app.h. Add more src/*.cpp as\n"
                "                     the project grows - every one gets\n"
                "                     compiled in, no need to list them.\n\n"
-               "Build it afterward with:\n"
+               "  --lang go\n"
+               "    goapp/           a Go app (go.mod/main.go) exporting\n"
+               "                     ArtisanSetupApp - see go/artisango and\n"
+               "                     README.md's \"Using Go\" section.\n\n"
+               "A project uses one native language, never both. Build it\n"
+               "afterward with:\n"
                "  artisan-cli build <project-dir>\n";
 }
 
@@ -390,6 +395,53 @@ void SetupApp(Node &document) {
 } // namespace artisan
 )cpp";
 
+// go.mod's replace directive needs an absolute path to go/artisango - the
+// same checkout artisan-cli itself was built from (ARTISAN_PROJECT_SOURCE_DIR,
+// already how ConfigureAndBuild finds this repo's own CMakeLists.txt), since
+// artisango isn't a published module a project could otherwise `go get`.
+std::string GoModTemplate() {
+  fs::path artisangoPath =
+      fs::path(ARTISAN_PROJECT_SOURCE_DIR) / "go" / "artisango";
+  std::ostringstream out;
+  out << "module goapp\n\n"
+      << "go 1.21\n\n"
+      << "require artisango v0.0.0\n\n"
+      << "replace artisango => " << artisangoPath.string() << "\n";
+  return out.str();
+}
+
+// ArtisanSetupApp is the Go counterpart to SetupApp above - see
+// go/artisango's own doc comment for the full picture. The trampoline
+// (ArtisanSetupApp/unsafe.Pointer) is boilerplate every Go app needs
+// verbatim; SetupApp itself is where a project's own code goes.
+constexpr const char *kMainGoTemplate = R"go(package main
+
+import "C"
+import (
+	"unsafe"
+
+	"artisango"
+)
+
+func SetupApp(doc artisango.Node) {
+	// Your native startup code goes here, e.g.:
+	//
+	//   button := doc.FindById("my-button")
+	//   if button != nil {
+	//     button.SetOnClick(func() {
+	//       // ...
+	//     })
+	//   }
+}
+
+//export ArtisanSetupApp
+func ArtisanSetupApp(doc unsafe.Pointer) {
+	SetupApp(artisango.WrapNode(doc))
+}
+
+func main() {}
+)go";
+
 // Creates `dir` (including any missing parents) or exits the process with
 // an error - used for both the project root and its pages/src
 // subdirectories below.
@@ -404,12 +456,34 @@ void CreateDirectory(const fs::path &dir) {
 }
 
 int RunNew(int argc, char *argv[]) {
-  if (argc != 3) {
+  if (argc < 3) {
     PrintNewUsage();
     return 1;
   }
 
   fs::path projectDir = argv[2];
+  std::string lang = "cpp";
+
+  for (int i = 3; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--lang") {
+      if (i + 1 >= argc) {
+        std::cerr << "artisan-cli: --lang needs a value\n";
+        return 1;
+      }
+      lang = argv[++i];
+    } else {
+      std::cerr << "artisan-cli: unknown argument " << arg << "\n";
+      PrintNewUsage();
+      return 1;
+    }
+  }
+
+  if (lang != "cpp" && lang != "go") {
+    std::cerr << "artisan-cli: --lang must be \"cpp\" or \"go\", got \""
+               << lang << "\"\n";
+    return 1;
+  }
 
   if (fs::exists(projectDir)) {
     if (!fs::is_directory(projectDir)) {
@@ -426,13 +500,19 @@ int RunNew(int argc, char *argv[]) {
   }
 
   CreateDirectory(projectDir / "pages");
-  CreateDirectory(projectDir / "src");
-
   WriteFile(projectDir / "pages" / "index.html", kIndexHtmlTemplate);
-  WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
 
-  std::cout << "artisan-cli: created a new native project at "
-            << fs::absolute(projectDir).string() << "\n\n"
+  if (lang == "go") {
+    CreateDirectory(projectDir / "goapp");
+    WriteFile(projectDir / "goapp" / "go.mod", GoModTemplate());
+    WriteFile(projectDir / "goapp" / "main.go", kMainGoTemplate);
+  } else {
+    CreateDirectory(projectDir / "src");
+    WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
+  }
+
+  std::cout << "artisan-cli: created a new " << (lang == "go" ? "Go" : "C++")
+            << " project at " << fs::absolute(projectDir).string() << "\n\n"
             << "Next steps:\n"
             << "  artisan-cli build " << fs::absolute(projectDir).string()
             << " --run\n";
