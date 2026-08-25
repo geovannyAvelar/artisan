@@ -3,6 +3,7 @@
 #include "compiled_document.h"
 #include "dom_node.h"
 #include "js_engine.h"
+#include "node_c_api.h"
 #include "skia_renderer.h"
 #include "widget.h"
 #include "widget_renderer.h"
@@ -44,14 +45,17 @@ std::string GetValue(const Node *node) {
 // startup, then again on every Navigate()) and both drive that tree
 // through the same Node API: SetupApp (app.h), plain compiled C++ from
 // whichever sources the build was configured with
-// (ARTISAN_APP_CPP_SOURCES / --cpp); and GetAppScript() (below),
-// interpreted by JsEngine, from whichever .js file it was configured
-// with (ARTISAN_APP_JS_SOURCE / --js, "" if none). Neither knows the
-// other exists - proof that "native C++" and "script" are just two ways
-// to drive the DOM, not a fork in the architecture. Both are shared
-// across every page in the bundle (there's exactly one app.cpp/app.js
-// configured, not one per page) - a page missing the ids they look for
-// is simply left alone, the same way SetupApp already tolerates that.
+// (ARTISAN_APP_CPP_SOURCES / --cpp); GetAppScript() (below), interpreted
+// by JsEngine, from whichever .js file it was configured with
+// (ARTISAN_APP_JS_SOURCE / --js, "" if none); and ArtisanSetupApp
+// (node_c_api.h), a Go app compiled ahead of time from whichever
+// directory it was configured with (ARTISAN_APP_GO_SOURCE / --go, a
+// no-op stub if none). None of the three knows the others exist - proof
+// that "native C++", "script", and "native Go" are just three ways to
+// drive the DOM, not a fork in the architecture. All three are shared
+// across every page in the bundle (there's exactly one app.cpp/app.js/Go
+// app configured, not one per page) - a page missing the ids they look
+// for is simply left alone, the same way SetupApp already tolerates that.
 
 // Erases the focus's selected range (if any) from `value` and collapses
 // the cursor to where the selection started. Returns whether there was
@@ -277,6 +281,7 @@ int main(int argc, char *argv[]) {
 
     document = page->build();
     artisan::SetupApp(*document);
+    ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     jsEngine = std::make_unique<artisan::JsEngine>(*document);
     std::string appScript = artisan::GetAppScript();
     if (!appScript.empty() && !jsEngine->RunScript(appScript, "app.js")) {

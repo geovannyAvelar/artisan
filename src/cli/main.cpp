@@ -45,6 +45,7 @@ struct Options {
   std::vector<std::string> htmlPaths;
   std::vector<std::string> cppPaths;
   std::string jsPath;
+  std::string goPath;
   std::string buildDir = "build";
   std::string outputPath;
   bool run = false;
@@ -82,14 +83,20 @@ void PrintBuildUsage() {
          "        the bundle can navigate to any other page by name.\n"
          "  <project-dir>/src/**/*.cpp      every native C++ source,\n"
          "        nesting is just organization here (not a route).\n"
-         "  <project-dir>/app.js            optional embedded script.\n\n"
+         "  <project-dir>/app.js            optional embedded script.\n"
+         "  <project-dir>/goapp/            optional native Go app - its own\n"
+         "        go.mod/main.go (see go/artisango), compiled ahead of time\n"
+         "        and linked in like ARTISAN_APP_CPP_SOURCES, not\n"
+         "        interpreted like app.js.\n\n"
          "Or list individual files by hand for full manual control:\n"
          "  --html <file>   A page's markup - same naming/ordering rules as\n"
          "                  pages/*.html above. Repeatable, at least one\n"
          "                  required.\n"
          "  --cpp <file>    Native C++ source - repeatable. Defaults to the\n"
          "                  project's own src/app.cpp if omitted.\n"
-         "  --js <file>     Optional script embedded and run at startup.\n\n"
+         "  --js <file>     Optional script embedded and run at startup.\n"
+         "  --go <dir>      Optional native Go app directory (its own\n"
+         "                  go.mod/main.go), compiled and linked in.\n\n"
          "  --build-dir     Where to configure/build (default: ./build).\n"
          "  -o, --output    Copy the built binary here.\n"
          "  --run           Run the binary after a successful build.\n";
@@ -221,13 +228,15 @@ struct DiscoveredProject {
   std::vector<std::string> htmlEntries; // "name=absolute/path.html", one per page.
   std::vector<fs::path> cppPaths;
   fs::path jsPath; // Empty if app.js doesn't exist.
+  fs::path goPath; // Empty if goapp/go.mod doesn't exist.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
 // markup under pages/ (nested folders form nested routes - see
-// DiscoverPages), every native C++ source under src/, and one optional
-// shared app.js at the project root. Exits the process with an error if
-// pages/ is missing or empty - a bundle needs at least one page.
+// DiscoverPages), every native C++ source under src/, one optional
+// shared app.js at the project root, and one optional shared Go app
+// under goapp/. Exits the process with an error if pages/ is missing or
+// empty - a bundle needs at least one page.
 DiscoveredProject DiscoverProject(const fs::path &projectDir) {
   DiscoveredProject discovered;
 
@@ -251,6 +260,15 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.jsPath = fs::absolute(jsPath);
   }
 
+  // A Go app is its own module (go.mod), not a bag of loose .cpp-style
+  // files - unlike src/**/*.cpp, "every .go file under goapp/" isn't a
+  // meaningful unit to compile on its own, so this only recognizes the
+  // whole directory, gated on go.mod actually being there.
+  fs::path goPath = projectDir / "goapp";
+  if (fs::exists(goPath / "go.mod")) {
+    discovered.goPath = fs::absolute(goPath);
+  }
+
   return discovered;
 }
 
@@ -262,7 +280,8 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
 // for a nested route - see DiscoverPages).
 int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
                        const std::vector<fs::path> &cppAbs,
-                       const fs::path &jsAbs, const std::string &buildDirStr,
+                       const fs::path &jsAbs, const fs::path &goAbs,
+                       const std::string &buildDirStr,
                        const std::string &outputPathStr, bool run) {
   fs::path projectSourceDir = ARTISAN_PROJECT_SOURCE_DIR;
   fs::path buildDir = fs::absolute(buildDirStr);
@@ -280,6 +299,9 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 
   configureCmd << " -DARTISAN_APP_JS_SOURCE="
                << ShellQuote(jsAbs.empty() ? "" : jsAbs.string());
+
+  configureCmd << " -DARTISAN_APP_GO_SOURCE="
+               << ShellQuote(goAbs.empty() ? "" : goAbs.string());
 
   if (RunCommand(configureCmd.str()) != 0) {
     std::cerr << "artisan-cli: cmake configure failed\n";
@@ -613,7 +635,8 @@ int RunBuildFromProject(int argc, char *argv[]) {
       outputPathStr = next();
     } else if (arg == "--run") {
       run = true;
-    } else if (arg == "--html" || arg == "--cpp" || arg == "--js") {
+    } else if (arg == "--html" || arg == "--cpp" || arg == "--js" ||
+               arg == "--go") {
       std::cerr << "artisan-cli: " << arg
                  << " can't be combined with a project directory - its "
                     "files are discovered automatically. Pass individual "
@@ -628,8 +651,8 @@ int RunBuildFromProject(int argc, char *argv[]) {
   }
 
   return ConfigureAndBuild(discovered.htmlEntries, discovered.cppPaths,
-                            discovered.jsPath, buildDirStr, outputPathStr,
-                            run);
+                            discovered.jsPath, discovered.goPath, buildDirStr,
+                            outputPathStr, run);
 }
 
 // `artisan-cli build --html ... [--cpp ...] [--js ...] ...` - the fully
@@ -654,6 +677,8 @@ int RunBuildFromFlags(int argc, char *argv[]) {
       options.cppPaths.push_back(next());
     } else if (arg == "--js") {
       options.jsPath = next();
+    } else if (arg == "--go") {
+      options.goPath = next();
     } else if (arg == "--build-dir") {
       options.buildDir = next();
     } else if (arg == "-o" || arg == "--output") {
@@ -691,7 +716,12 @@ int RunBuildFromFlags(int argc, char *argv[]) {
     jsAbs = ResolveExisting(options.jsPath);
   }
 
-  return ConfigureAndBuild(htmlEntries, cppAbs, jsAbs, options.buildDir,
+  fs::path goAbs;
+  if (!options.goPath.empty()) {
+    goAbs = ResolveExisting(options.goPath);
+  }
+
+  return ConfigureAndBuild(htmlEntries, cppAbs, jsAbs, goAbs, options.buildDir,
                             options.outputPath, options.run);
 }
 

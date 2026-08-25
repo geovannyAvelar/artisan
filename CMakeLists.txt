@@ -95,6 +95,8 @@ set(ARTISAN_APP_CPP_SOURCES "${PROJECT_SOURCE_DIR}/src/app.cpp" CACHE STRING
     "Semicolon-separated native C++ source(s) compiled into the app")
 set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
     "Optional script embedded into the app and run once at startup")
+set(ARTISAN_APP_GO_SOURCE "" CACHE STRING
+    "Optional directory of a Go app (its own go.mod/main.go, see go/artisango) compiled and linked into the app")
 
 set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
@@ -146,6 +148,46 @@ else()
         "namespace artisan { const char *GetAppScript() { return \"\"; } }\n")
 endif()
 
+# ARTISAN_APP_GO_SOURCE is the Go counterpart to ARTISAN_APP_CPP_SOURCES/
+# ARTISAN_APP_JS_SOURCE above: a directory holding its own go.mod and a
+# `package main` that imports go/artisango (this repo's Go bindings over
+# node_c_api.h) and exports ArtisanSetupApp - compiled ahead of time into
+# a static archive (`go build -buildmode=c-archive`, the same "runs
+# compiled, not interpreted" deal ARTISAN_APP_CPP_SOURCES gets) and linked
+# straight into the artisan binary, exactly like Skia's own .a files
+# above.
+set(GENERATED_GO_STUB_CPP "${CMAKE_BINARY_DIR}/generated_go_stub.cpp")
+
+if(ARTISAN_APP_GO_SOURCE)
+    find_program(ARTISAN_GO_EXECUTABLE go REQUIRED)
+
+    file(GLOB_RECURSE ARTISAN_GO_SOURCE_FILES "${ARTISAN_APP_GO_SOURCE}/*.go")
+    set(GENERATED_GO_ARCHIVE "${CMAKE_BINARY_DIR}/libgoapp.a")
+    set(GENERATED_GO_HEADER "${CMAKE_BINARY_DIR}/libgoapp.h")
+
+    add_custom_command(
+        OUTPUT "${GENERATED_GO_ARCHIVE}" "${GENERATED_GO_HEADER}"
+        COMMAND "${ARTISAN_GO_EXECUTABLE}" build -buildmode=c-archive
+                -o "${GENERATED_GO_ARCHIVE}" .
+        WORKING_DIRECTORY "${ARTISAN_APP_GO_SOURCE}"
+        DEPENDS ${ARTISAN_GO_SOURCE_FILES} "${ARTISAN_APP_GO_SOURCE}/go.mod"
+        COMMENT "Compiling ${ARTISAN_APP_GO_SOURCE} into a native Go archive"
+        VERBATIM
+    )
+    add_custom_target(artisan_go_archive DEPENDS "${GENERATED_GO_ARCHIVE}")
+else()
+    # No Go app configured - ArtisanSetupApp (and the two callback hooks
+    # node_c_api.cpp's GoCallback always references, whether or not
+    # anything ends up calling ArtisanNodeSetOnClick) still need to exist
+    # so the app links, the same way GetAppScript() above always exists
+    # whether or not a script was configured.
+    file(WRITE "${GENERATED_GO_STUB_CPP}"
+        "#include \"node_c_api.h\"\n"
+        "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n"
+        "extern \"C\" void ArtisanGoInvokeClickHandler(uintptr_t) {}\n"
+        "extern \"C\" void ArtisanGoReleaseClickHandler(uintptr_t) {}\n")
+endif()
+
 # The app itself never links lexbor or parses markup - it only walks the
 # Widget tree that artisanc baked into generated_ui.cpp at build time.
 #
@@ -166,10 +208,15 @@ add_executable(artisan
     src/dom_node.cpp
     src/widget_tree_builder.cpp
     src/js_engine.cpp
+    src/node_c_api.cpp
     ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"
 )
+
+if(NOT ARTISAN_APP_GO_SOURCE)
+    target_sources(artisan PRIVATE "${GENERATED_GO_STUB_CPP}")
+endif()
 
 target_include_directories(artisan
     PRIVATE
@@ -179,6 +226,13 @@ target_include_directories(artisan
 target_link_libraries(artisan
   PRIVATE skia PkgConfig::SDL2 qjs
 )
+
+if(ARTISAN_APP_GO_SOURCE)
+    add_dependencies(artisan artisan_go_archive)
+    # cgo's runtime needs pthread regardless of platform specifics the Go
+    # app itself touches - same reason skia already links it above.
+    target_link_libraries(artisan PRIVATE "${GENERATED_GO_ARCHIVE}" pthread)
+endif()
 
 # artisan-cli is the single CLI entry point for the whole workflow: it
 # just turns `artisan-cli build --html ... --cpp ... --js ...` into a

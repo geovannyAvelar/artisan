@@ -3,8 +3,9 @@
 A framework for building native desktop apps from HTML-like markup. Markup
 is compiled ahead-of-time (by `artisanc`) into a widget tree baked straight
 into the binary, and rendered with Skia - no browser, no webview. App
-behavior can be plain C++ (`SetupApp(Node&)`) or an embedded JavaScript
-file, both driving the same mutable DOM (`Node`) at runtime.
+behavior can be plain C++ (`SetupApp(Node&)`), a compiled Go app, or an
+embedded JavaScript file - all three drive the same mutable DOM (`Node`)
+at runtime, and none of them know the others exist.
 
 `artisan-cli` is the single command that ties the workflow together:
 scaffold a project, add components, and build it into one native binary.
@@ -14,6 +15,7 @@ scaffold a project, add components, and build it into one native binary.
 - CMake 3.20+, a C++20 compiler, Python 3, Ninja
 - `pkg-config` packages: `freetype2`, `fontconfig`, `sdl2`
 - Git submodules: Skia, lexbor, QuickJS
+- Go 1.21+ - only needed if a project uses a Go app (see [Using Go](#using-go))
 
 ```bash
 git submodule update --init --recursive
@@ -62,8 +64,9 @@ artisan-cli build my-app --run
 ```
 
 By default this auto-discovers the project's files: every `pages/**/*.html`,
-every `src/**/*.cpp`, and an optional `app.js` at the project root (embedded
-and run once at startup, alongside `SetupApp`). Flags:
+every `src/**/*.cpp`, an optional `app.js` at the project root (embedded and
+run once at startup, alongside `SetupApp`), and an optional Go app under
+`goapp/` (see [Using Go](#using-go) below). Flags:
 
 - `--build-dir <dir>` - where to configure/build (default `./build`)
 - `-o, --output <path>` - copy the built binary here
@@ -74,7 +77,7 @@ directory:
 
 ```bash
 artisan-cli build --html pages/index.html --html pages/about.html \
-  --cpp src/main.cpp --js app.js --run
+  --cpp src/main.cpp --js app.js --go goapp --run
 ```
 
 ## Adding a component
@@ -109,3 +112,58 @@ Note there's no re-render loop here: `Setup_<name>` runs once at startup,
 so `setCount` just stores the new value - updating the DOM in response
 (`SetTextContent`, `SetAttribute`, ...) is still up to the handler, same as
 any other mutation via the `Node` API (see `include/dom_node.h`).
+
+## Using Go
+
+A project can drive its DOM from a native Go app instead of (or alongside)
+C++/JS, compiled ahead-of-time into a static archive (`go build
+-buildmode=c-archive`) and linked straight into the binary - it never runs
+interpreted, and requires a Go toolchain only for projects that use it.
+
+Create `<project-dir>/goapp/` with its own module:
+
+```go
+// goapp/go.mod
+module myapp/goapp
+
+go 1.21
+
+require artisango v0.0.0
+
+replace artisango => /path/to/your/artisan/checkout/go/artisango
+```
+
+```go
+// goapp/main.go
+package main
+
+import "C"
+import (
+	"unsafe"
+
+	"artisango"
+)
+
+func SetupApp(doc artisango.Node) {
+	button := doc.FindById("my-button")
+	if button != nil {
+		button.SetOnClick(func() {
+			// ...
+		})
+	}
+}
+
+//export ArtisanSetupApp
+func ArtisanSetupApp(doc unsafe.Pointer) {
+	SetupApp(artisango.WrapNode(doc))
+}
+
+func main() {}
+```
+
+`artisan-cli build` auto-discovers `goapp/` the same way it discovers
+`app.js` - no flag needed (`--go <dir>` is there for the explicit-files
+build mode). `artisango.Node` mirrors the same `Node` API C++/JS get:
+`FindById`, `TagName`, `TextContent`/`SetTextContent`,
+`GetAttribute`/`SetAttribute`/`RemoveAttribute`, `SetOnClick` - see
+`go/artisango/node.go` and the C ABI it wraps, `include/node_c_api.h`.
