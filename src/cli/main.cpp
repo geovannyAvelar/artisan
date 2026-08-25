@@ -8,7 +8,7 @@
 // and the project's own CMakeLists.txt already knows how to do that. What
 // this tool actually does is turn a simple command line into the right
 // CMake configure + build invocation, with the caller's markup/C++/JS
-// files substituted in via cache variables (ARTISAN_UI_SOURCE,
+// files substituted in via cache variables (ARTISAN_UI_SOURCES,
 // ARTISAN_APP_CPP_SOURCES, ARTISAN_APP_JS_SOURCE) that CMakeLists.txt
 // exposes for exactly this purpose. Compiling native code for artisan and
 // setting up a QuickJS script are the same command - the split happens
@@ -26,7 +26,7 @@ namespace fs = std::filesystem;
 namespace {
 
 struct Options {
-  std::string htmlPath;
+  std::vector<std::string> htmlPaths;
   std::vector<std::string> cppPaths;
   std::string jsPath;
   std::string buildDir = "build";
@@ -36,11 +36,16 @@ struct Options {
 
 void PrintUsage() {
   std::cerr
-      << "usage: artisan-cli build --html <file.html> [--cpp <file.cpp>]...\n"
-         "                         [--js <file.js>] [--build-dir <dir>]\n"
-         "                         [-o <output>] [--run]\n\n"
-         "  --html <file>   UI markup compiled into the app's initial\n"
-         "                  document (required).\n"
+      << "usage: artisan-cli build --html <file.html> [--html <file.html>]...\n"
+         "                         [--cpp <file.cpp>]... [--js <file.js>]\n"
+         "                         [--build-dir <dir>] [-o <output>] [--run]\n\n"
+         "  --html <file>   A page's markup, compiled into the app's page\n"
+         "                  bundle and named after the file's stem\n"
+         "                  (\"about.html\" becomes \"about\") - repeatable,\n"
+         "                  at least one required. The first one given is\n"
+         "                  the page the app opens on; an <a href=\"...\">\n"
+         "                  anywhere in the bundle can navigate to any\n"
+         "                  other page by name.\n"
          "  --cpp <file>    Native C++ source compiled into the app -\n"
          "                  repeatable. Defaults to the project's own\n"
          "                  src/app.cpp if omitted.\n"
@@ -69,6 +74,19 @@ fs::path ResolveExisting(const std::string &path) {
 // tool's own inputs and not worth more complexity to handle perfectly.
 std::string ShellQuote(const std::string &text) { return "'" + text + "'"; }
 
+// Joins paths with ';', the separator CMake list-valued cache variables
+// (ARTISAN_UI_SOURCES, ARTISAN_APP_CPP_SOURCES) expect.
+std::string JoinPaths(const std::vector<fs::path> &paths) {
+  std::ostringstream joined;
+  for (size_t i = 0; i < paths.size(); ++i) {
+    if (i > 0) {
+      joined << ";";
+    }
+    joined << paths[i].string();
+  }
+  return joined.str();
+}
+
 int RunCommand(const std::string &command) {
   std::cout << "$ " << command << "\n";
   return std::system(command.c_str());
@@ -95,7 +113,7 @@ int main(int argc, char *argv[]) {
     };
 
     if (arg == "--html") {
-      options.htmlPath = next();
+      options.htmlPaths.push_back(next());
     } else if (arg == "--cpp") {
       options.cppPaths.push_back(next());
     } else if (arg == "--js") {
@@ -113,13 +131,16 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (options.htmlPath.empty()) {
-    std::cerr << "artisan-cli: --html is required\n";
+  if (options.htmlPaths.empty()) {
+    std::cerr << "artisan-cli: at least one --html is required\n";
     PrintUsage();
     return 1;
   }
 
-  fs::path htmlAbs = ResolveExisting(options.htmlPath);
+  std::vector<fs::path> htmlAbs;
+  for (const std::string &path : options.htmlPaths) {
+    htmlAbs.push_back(ResolveExisting(path));
+  }
 
   std::vector<fs::path> cppAbs;
   for (const std::string &path : options.cppPaths) {
@@ -137,18 +158,11 @@ int main(int argc, char *argv[]) {
   std::ostringstream configureCmd;
   configureCmd << "cmake -S " << ShellQuote(projectDir.string()) << " -B "
                << ShellQuote(buildDir.string())
-               << " -DARTISAN_UI_SOURCE=" << ShellQuote(htmlAbs.string());
+               << " -DARTISAN_UI_SOURCES=" << ShellQuote(JoinPaths(htmlAbs));
 
   if (!cppAbs.empty()) {
-    std::ostringstream cppList;
-    for (size_t i = 0; i < cppAbs.size(); ++i) {
-      if (i > 0) {
-        cppList << ";";
-      }
-      cppList << cppAbs[i].string();
-    }
     configureCmd << " -DARTISAN_APP_CPP_SOURCES="
-                 << ShellQuote(cppList.str());
+                 << ShellQuote(JoinPaths(cppAbs));
   }
 
   configureCmd << " -DARTISAN_APP_JS_SOURCE="

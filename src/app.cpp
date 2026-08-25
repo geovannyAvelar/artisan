@@ -21,7 +21,7 @@ void SetupApp(Node &document) {
 
   if (nameInput == nullptr || emailInput == nullptr ||
       clearButton == nullptr || greeting == nullptr) {
-    std::cerr << "SetupApp: assets/ui.html is missing an expected id - "
+    std::cerr << "SetupApp: this page is missing an expected id - "
                  "the Clear button won't be wired up\n";
     return;
   }

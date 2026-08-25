@@ -114,6 +114,28 @@ Widget MakeBox(WidgetTree &tree, const std::string &label, float fontSize,
   return widget;
 }
 
+// <a>: a single-line clickable label, same as MakeBox's FlattenText
+// treatment for a <button> - the underlying text isn't word-wrapped or
+// otherwise laid out as flowing inline content (see widget_renderer.cpp's
+// LinkWidgetHandler for why).
+Widget MakeLink(WidgetTree &tree, const Node &node, float fontSize) {
+  Widget widget{WidgetKind::kLink,
+                false,
+                fontSize,
+                tree.StoreString(FlattenText(node)),
+                nullptr,
+                0,
+                nullptr,
+                0,
+                0.0f,
+                0.0f,
+                false,
+                1,
+                1};
+  widget.userData = &node;
+  return widget;
+}
+
 Widget MakeLineBreak(float fontSize) {
   return Widget{
       WidgetKind::kLineBreak, false, fontSize, nullptr, nullptr, 0,
@@ -413,6 +435,8 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
       }
     } else if (tag == "button") {
       inits.push_back(MakeBox(tree, FlattenText(child), fontSize, &child));
+    } else if (tag == "a") {
+      inits.push_back(MakeLink(tree, child, fontSize));
     } else {
       inits.push_back(MakeContainer(child, tree, FontSizeForTag(tag),
                                      IsBlockTag(tag), focus));

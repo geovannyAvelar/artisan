@@ -84,8 +84,13 @@ target_link_libraries(artisanc
 # `--js` flags configure (see src/cli/main.cpp) - set directly, building
 # with plain `cmake`/`ninja` gets you exactly the same project artisan-cli
 # would, just with an extra step. Defaults build this repo's own demo.
-set(ARTISAN_UI_SOURCE "${PROJECT_SOURCE_DIR}/assets/ui.html" CACHE STRING
-    "HTML-like markup compiled into the app's initial document")
+#
+# ARTISAN_UI_SOURCES is a *bundle*: one or more markup files, each compiled
+# into its own named page (named after its stem - "about.html" becomes
+# "about") that an <a href="..."> anywhere in the bundle can navigate to.
+# The first file given is the page the app opens on.
+set(ARTISAN_UI_SOURCES "${PROJECT_SOURCE_DIR}/assets/index.html;${PROJECT_SOURCE_DIR}/assets/about.html"
+    CACHE STRING "Semicolon-separated markup file(s) compiled into the app's page bundle")
 set(ARTISAN_APP_CPP_SOURCES "${PROJECT_SOURCE_DIR}/src/app.cpp" CACHE STRING
     "Semicolon-separated native C++ source(s) compiled into the app")
 set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
@@ -95,9 +100,9 @@ set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
 add_custom_command(
     OUTPUT "${GENERATED_UI_CPP}"
-    COMMAND artisanc "${ARTISAN_UI_SOURCE}" "${GENERATED_UI_CPP}"
-    DEPENDS artisanc "${ARTISAN_UI_SOURCE}"
-    COMMENT "Compiling ${ARTISAN_UI_SOURCE} into a native widget tree"
+    COMMAND artisanc "${GENERATED_UI_CPP}" ${ARTISAN_UI_SOURCES}
+    DEPENDS artisanc ${ARTISAN_UI_SOURCES}
+    COMMENT "Compiling ${ARTISAN_UI_SOURCES} into a native widget tree bundle"
     VERBATIM
 )
 
@@ -165,7 +170,7 @@ target_link_libraries(artisan
 
 # artisan-cli is the single CLI entry point for the whole workflow: it
 # just turns `artisan-cli build --html ... --cpp ... --js ...` into a
-# `cmake -S ${PROJECT_SOURCE_DIR} -B <dir> -DARTISAN_UI_SOURCE=... ...`
+# `cmake -S ${PROJECT_SOURCE_DIR} -B <dir> -DARTISAN_UI_SOURCES=... ...`
 # configure + build of this same project - it doesn't compile or link
 # anything itself.
 add_executable(artisan_cli

@@ -1,11 +1,14 @@
-// artisanc - compiles an HTML-like UI markup file into a C++ translation
-// unit that defines artisan::BuildCompiledDocument(), a function that
+// artisanc - compiles one or more HTML-like UI markup files (a "bundle")
+// into a single C++ translation unit that defines artisan::CompiledPages(),
+// a registry of {name, build-function} pairs - one per input file, named
+// after its stem ("about.html" becomes "about"). Each build function
 // constructs a mutable artisan::Node tree at startup: a structural mirror
-// of the parsed markup (tag names, attributes, text, nesting), baked into
-// the binary at build time so the final artisan executable never links
-// lexbor and never parses markup at runtime. <img> file bytes are
-// embedded as static byte arrays too, so images need no runtime file I/O
-// either.
+// of that file's parsed markup (tag names, attributes, text, nesting),
+// baked into the binary at build time so the final artisan executable
+// never links lexbor and never parses markup at runtime. <img> file bytes
+// are embedded as static byte arrays too, so images need no runtime file
+// I/O either. main.cpp's Navigate() looks a page up by name when an
+// <a href="..."> is clicked, to switch which one is live.
 //
 // artisanc does no layout or rendering interpretation whatsoever - it
 // doesn't know a <div> is block-level, or that colspan means anything, or
@@ -112,13 +115,18 @@ std::vector<unsigned char> ReadBinaryFile(const std::string &path) {
   return buffer;
 }
 
-// Accumulates the two things a generated file needs: top-level
-// declarations (just <img> byte arrays) emitted before
-// BuildCompiledDocument(), and the statements that make up its body -
-// plus counters for unique local variable / array names.
+// Accumulates what the generated file needs: top-level declarations (just
+// <img> byte arrays, shared across every page so array names stay unique
+// file-wide) in `decls`; every page's finished BuildPage_<name>() function
+// body, one after another, in `pageFunctions`; `body` is where the page
+// currently being compiled is written before getting appended there.
+// `nodeCounter` resets per page (its names are function-local); `baseDir`
+// is that page's own input file's directory, for resolving its <img> src
+// paths.
 struct CodegenContext {
   std::ostringstream decls;
   std::ostringstream body;
+  std::ostringstream pageFunctions;
   int nodeCounter = 0;
   int imageCounter = 0;
   std::string baseDir;
@@ -261,33 +269,89 @@ std::string DirName(const std::string &path) {
   return path.substr(0, pos);
 }
 
+// The page name a <a href="..."> in one file navigates to another with -
+// the file's stem, directory and extension stripped: "assets/about.html"
+// becomes "about". Two input files that stem to the same name is a build
+// error (checked in main), same as two C++ files defining the same symbol.
+std::string StemName(const std::string &path) {
+  size_t slash = path.find_last_of('/');
+  std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
+  size_t dot = base.find_last_of('.');
+  return dot == std::string::npos ? base : base.substr(0, dot);
+}
+
+// A page name is arbitrary user-facing text (whatever the file was
+// called); the C++ function built from it needs to be a valid identifier
+// and unique even if two names only differ in characters this mangles
+// away - "counter" -> "BuildPage_counter", anything not [A-Za-z0-9_]
+// becomes '_', and a leading digit gets an underscore prefix since C++
+// identifiers can't start with one.
+std::string SanitizeIdentifier(const std::string &name) {
+  std::string out = name;
+  for (char &c : out) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+      c = '_';
+    }
+  }
+  if (!out.empty() && std::isdigit(static_cast<unsigned char>(out.front()))) {
+    out = "_" + out;
+  }
+  return out.empty() ? "_" : out;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc != 3) {
-    std::cerr << "usage: artisanc <input.html> <output.cpp>\n";
+  if (argc < 3) {
+    std::cerr << "usage: artisanc <output.cpp> <input1.html> "
+                 "[<input2.html> ...]\n";
     return 1;
   }
 
-  const std::string inputPath = argv[1];
-  const std::string outputPath = argv[2];
-
-  artisan::HtmlDocument document(ReadFile(inputPath));
-
-  lxb_dom_node_t *body = document.Body();
-  if (body == nullptr) {
-    std::cerr << "artisanc: " << inputPath << " has no <body>\n";
-    return 1;
-  }
+  const std::string outputPath = argv[1];
+  std::vector<std::string> inputPaths(argv + 2, argv + argc);
 
   CodegenContext ctx;
-  ctx.baseDir = DirName(inputPath);
 
-  ctx.body << "std::unique_ptr<Node> BuildCompiledDocument() {\n";
-  ctx.body << "  auto root = Node::CreateElement(\"body\");\n";
-  EmitChildren(body, ctx, "root");
-  ctx.body << "  return root;\n";
-  ctx.body << "}\n";
+  struct Page {
+    std::string name;
+    std::string identifier;
+  };
+  std::vector<Page> pages;
+
+  for (const std::string &inputPath : inputPaths) {
+    artisan::HtmlDocument document(ReadFile(inputPath));
+
+    lxb_dom_node_t *body = document.Body();
+    if (body == nullptr) {
+      std::cerr << "artisanc: " << inputPath << " has no <body>\n";
+      return 1;
+    }
+
+    std::string name = StemName(inputPath);
+    for (const Page &existing : pages) {
+      if (existing.name == name) {
+        std::cerr << "artisanc: two input files both name the page \""
+                   << name << "\" - " << inputPath << " and an earlier one\n";
+        return 1;
+      }
+    }
+    std::string identifier = SanitizeIdentifier(name);
+
+    ctx.baseDir = DirName(inputPath);
+    ctx.body.str("");
+    ctx.body.clear();
+    ctx.nodeCounter = 0;
+
+    ctx.body << "std::unique_ptr<Node> BuildPage_" << identifier << "() {\n";
+    ctx.body << "  auto root = Node::CreateElement(\"body\");\n";
+    EmitChildren(body, ctx, "root");
+    ctx.body << "  return root;\n";
+    ctx.body << "}\n\n";
+
+    ctx.pageFunctions << ctx.body.str();
+    pages.push_back({name, identifier});
+  }
 
   std::ofstream out(outputPath);
   if (!out) {
@@ -296,16 +360,30 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  out << "// Generated by artisanc from " << inputPath << " - do not edit.\n\n";
+  out << "// Generated by artisanc from " << inputPaths.size()
+      << " page(s) - do not edit.\n\n";
+  out << "#include \"compiled_document.h\"\n";
   out << "#include \"dom_node.h\"\n\n";
   out << "#include <memory>\n";
-  out << "#include <utility>\n\n";
+  out << "#include <utility>\n";
+  out << "#include <vector>\n\n";
   out << "namespace {\n\n";
   out << ctx.decls.str();
   out << "} // namespace\n\n";
   out << "namespace artisan {\n\n";
-  out << ctx.body.str();
-  out << "\n} // namespace artisan\n";
+  out << "namespace {\n\n";
+  out << ctx.pageFunctions.str();
+  out << "} // namespace\n\n";
+  out << "const std::vector<PageDescriptor> &CompiledPages() {\n";
+  out << "  static const std::vector<PageDescriptor> kPages = {\n";
+  for (const Page &page : pages) {
+    out << "    {\"" << EscapeStringLiteral(page.name) << "\", &BuildPage_"
+        << page.identifier << "},\n";
+  }
+  out << "  };\n";
+  out << "  return kPages;\n";
+  out << "}\n\n";
+  out << "} // namespace artisan\n";
 
   return 0;
 }

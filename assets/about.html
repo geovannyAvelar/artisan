@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <title>About - artisan</title>
+  </head>
+  <body>
+    <h1>About this bundle</h1>
+    <a href="index">&lt;- Back</a>
+    <p>
+      This page and the one you came from are two separate markup files
+      (assets/index.html and assets/about.html) compiled by artisanc into
+      one binary - a "bundle" of pages, each its own compiled Node tree.
+      The link above and the one that brought you here are plain
+      &lt;a href="..."&gt; elements; clicking one tears down the current
+      page's Node tree and JsEngine and builds the target page fresh, the
+      same way navigating between pages works in a real multi-page site.
+    </p>
+    <p>
+      Every page in the bundle shares the same compiled C++ (app.cpp) and
+      embedded script (app.js) - both re-run against whichever page is
+      currently live, finding elements by id the same way they always
+      have. A page with none of the ids they look for (like this one) is
+      simply left alone.
+    </p>
+  </body>
+</html>

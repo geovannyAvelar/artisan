@@ -14,6 +14,10 @@ enum class WidgetKind {
   kTableCell,  // <td>/<th>: children are the cell's own nested content,
                // laid out (and wrapped) within whatever width the grid
                // gives its column - not flattened to a single line.
+  kLink,       // <a>: an underlined, single-line clickable label - the
+               // same hit-testing shape as kBox (userData holds the
+               // Node*), but painted without a border, since navigating
+               // isn't "boxy" the way a button/input is.
 };
 
 // A single node of a paintable UI tree - what WidgetRenderer actually
@@ -24,9 +28,10 @@ enum class WidgetKind {
 struct Widget {
   WidgetKind kind;
   bool blockSpacing; // kContainer only: add vertical margin around children.
-  float fontSize;     // kText, kLineBreak, kBox, kTable (caption).
-  // kText, kBox (may be ""); kTable's optional <caption> text (nullptr if
-  // none); nullptr otherwise (in particular, kTableCell - see `children`).
+  float fontSize;     // kText, kLineBreak, kBox, kLink, kTable (caption).
+  // kText, kBox, kLink (may be ""); kTable's optional <caption> text
+  // (nullptr if none); nullptr otherwise (in particular, kTableCell - see
+  // `children`).
   const char *text;
   // kContainer, kTable (rows), kTableCell (nested content); nullptr
   // otherwise.
@@ -63,9 +68,10 @@ struct Widget {
   int colSpan;
   int rowSpan;
 
-  // kBox only: the Node this widget was materialized from - lets a
+  // kBox, kLink only: the Node this widget was materialized from - lets a
   // hit-test find which live DOM node the user clicked, to focus/edit or
-  // click it. Opaque here so widget.h doesn't need to know about Node.
+  // click it (or, for kLink, read its href and navigate). Opaque here so
+  // widget.h doesn't need to know about Node.
   const void *userData = nullptr;
 
   // kBox only, and only meaningful when this is the focused <input>: the

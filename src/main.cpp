@@ -34,19 +34,24 @@ std::string GetValue(const Node *node) {
   return value != nullptr ? *value : std::string();
 }
 
-// The document is compiled from whatever markup file the build was
-// configured with (ARTISAN_UI_SOURCE / --html) by artisanc at build time
-// (BuildCompiledDocument, in the generated translation unit) - the same
-// pipeline that used to produce a separate, inert, immutable Widget tree
-// now produces this ordinary mutable Node tree instead. Its behavior
-// comes from two independent sources that both run once at startup and
-// both drive this same tree through the same Node API: SetupApp (app.h),
-// plain compiled C++ from whichever sources the build was configured
-// with (ARTISAN_APP_CPP_SOURCES / --cpp); and GetAppScript() (below),
+// The document is compiled from whatever markup bundle the build was
+// configured with (ARTISAN_UI_SOURCES / repeatable --html) by artisanc at
+// build time (CompiledPages(), in the generated translation unit) - the
+// same pipeline that used to produce a separate, inert, immutable Widget
+// tree now produces these ordinary mutable Node trees instead, one per
+// page. Whichever page is currently live gets its behavior from two
+// independent sources that both re-run every time a page loads (first at
+// startup, then again on every Navigate()) and both drive that tree
+// through the same Node API: SetupApp (app.h), plain compiled C++ from
+// whichever sources the build was configured with
+// (ARTISAN_APP_CPP_SOURCES / --cpp); and GetAppScript() (below),
 // interpreted by JsEngine, from whichever .js file it was configured
 // with (ARTISAN_APP_JS_SOURCE / --js, "" if none). Neither knows the
 // other exists - proof that "native C++" and "script" are just two ways
-// to drive the DOM, not a fork in the architecture.
+// to drive the DOM, not a fork in the architecture. Both are shared
+// across every page in the bundle (there's exactly one app.cpp/app.js
+// configured, not one per page) - a page missing the ids they look for
+// is simply left alone, the same way SetupApp already tolerates that.
 
 // Erases the focus's selected range (if any) from `value` and collapses
 // the cursor to where the selection started. Returns whether there was
@@ -211,31 +216,26 @@ int main(int argc, char *argv[]) {
   artisan::SkiaRenderer measuringRenderer(nullptr);
   artisan::WidgetRenderer measuringWidgetRenderer(measuringRenderer);
 
-  std::unique_ptr<Node> document = artisan::BuildCompiledDocument();
+  const std::vector<artisan::PageDescriptor> &pages = artisan::CompiledPages();
+  if (pages.empty()) {
+    std::cerr << "main: the compiled bundle has no pages\n";
+    return 1;
+  }
 
-  // Plain compiled C++, wired up before any script runs - see app.h/
-  // app.cpp. Ordering relative to the JS engine below doesn't matter
-  // functionally (the two wire up different buttons here), but native
-  // code owning the more foundational behavior and script layering on
-  // top is a reasonable default convention.
-  artisan::SetupApp(*document);
+  std::unique_ptr<Node> document;
 
   // jsEngine must outlive `document`: click handlers registered below
   // hold QuickJS function references (JsCallback) that get released when
   // the Node owning them is destroyed, and that release needs a live
-  // JSContext. jsEngine has to be constructed after document (it needs a
-  // Node& to bind to), which means the two would normally be torn down in
-  // the *wrong* order at the end of main (reverse of construction -
-  // jsEngine first, document second). The explicit document.reset() right
-  // before main returns fixes that: it destroys the whole Node tree,
-  // JsCallbacks included, while jsEngine/its JSContext are still alive,
-  // before jsEngine's own (now safe, nothing left referencing it)
-  // destructor runs implicitly after.
-  artisan::JsEngine jsEngine(*document);
-  std::string appScript = artisan::GetAppScript();
-  if (!appScript.empty() && !jsEngine.RunScript(appScript, "app.js")) {
-    std::cerr << "main: the app script failed to run\n";
-  }
+  // JSContext. A unique_ptr (rather than a stack object) lets Navigate()
+  // below tear down and rebuild both per page-visit, in the safe order:
+  // release the old document (and every JsCallback it holds) before
+  // releasing the old jsEngine, then build the new page and construct a
+  // fresh jsEngine bound to it. The same ordering happens once more, via
+  // the explicit document.reset() right before main returns: it destroys
+  // the final Node tree while jsEngine/its JSContext are still alive,
+  // before jsEngine's own (now safe) destructor runs implicitly after.
+  std::unique_ptr<artisan::JsEngine> jsEngine;
 
   InputFocus focus;
   bool isSelecting = false;
@@ -249,15 +249,56 @@ int main(int argc, char *argv[]) {
   int height = kInitialHeight;
   std::vector<BoxRegion> boxRegions;
 
+  bool running = true;
+  bool needsRedraw = false;
+
+  // Tears down whichever page is currently live (if any) and builds
+  // `pageName` fresh in its place: a new Node tree, SetupApp rewired
+  // against it, and the embedded script re-run against it - the same
+  // startup sequence every page goes through, including the first one
+  // (called once below, outside the event loop). Does nothing but log if
+  // `pageName` isn't in the bundle, same as SetupApp's own missing-id
+  // tolerance.
+  auto navigate = [&](std::string pageName) {
+    const artisan::PageDescriptor *page = nullptr;
+    for (const artisan::PageDescriptor &candidate : pages) {
+      if (candidate.name == pageName) {
+        page = &candidate;
+        break;
+      }
+    }
+    if (page == nullptr) {
+      std::cerr << "main: no such page \"" << pageName << "\"\n";
+      return;
+    }
+
+    document.reset();
+    jsEngine.reset();
+
+    document = page->build();
+    artisan::SetupApp(*document);
+    jsEngine = std::make_unique<artisan::JsEngine>(*document);
+    std::string appScript = artisan::GetAppScript();
+    if (!appScript.empty() && !jsEngine->RunScript(appScript, "app.js")) {
+      std::cerr << "main: the app script failed to run\n";
+    }
+
+    focus = InputFocus{};
+    isSelecting = false;
+    scrollY = 0.0f;
+    needsRedraw = true;
+  };
+
+  navigate(pages.front().name);
+
   SDL_Texture *texture =
       RenderFrame(renderer, measuringWidgetRenderer, *document, focus, width,
                   height, &boxRegions, &contentHeight);
   if (texture == nullptr) {
     return 1;
   }
+  needsRedraw = false;
 
-  bool running = true;
-  bool needsRedraw = false;
   SDL_Event event;
 
   while (running) {
@@ -454,15 +495,20 @@ int main(int argc, char *argv[]) {
             focus.selectionAnchor = index;
             isSelecting = true;
           } else {
-            // Clicking a button (or anything else) blurs whatever input
-            // was focused, same as a real page - do that before Click()
-            // runs, so a handler that edits the just-blurred input's
-            // value isn't fighting a stale focus/cursor still pointing
-            // at it.
+            // Clicking a button/link (or anything else) blurs whatever
+            // input was focused, same as a real page - do that before
+            // Click()/navigate() runs, so a handler that edits the
+            // just-blurred input's value isn't fighting a stale
+            // focus/cursor still pointing at it.
             focus = InputFocus{};
             isSelecting = false;
             if (node != nullptr && node->tagName() == "button") {
               node->Click();
+            } else if (node != nullptr && node->tagName() == "a") {
+              const std::string *href = node->GetAttribute("href");
+              if (href != nullptr) {
+                navigate(*href);
+              }
             }
           }
           needsRedraw = true;

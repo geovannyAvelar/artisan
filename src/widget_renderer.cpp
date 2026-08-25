@@ -17,6 +17,7 @@ constexpr float kCellPadding = 6.0f;
 constexpr float kCellMinWidth = 24.0f;
 constexpr float kCellMinHeight = 20.0f;
 constexpr float kCaretWidth = 1.5f;
+constexpr float kLinkUnderlineHeight = 1.5f;
 
 struct LayoutState {
   IRenderer &renderer;
@@ -266,6 +267,39 @@ public:
     }
 
     state.y += height + kBlockSpacing;
+  }
+};
+
+// <a>: painted like BoxWidgetHandler's flush-before/register-a-hit-rect
+// treatment, but with an underline instead of a border - a link isn't a
+// boxy control, just clickable text. Single-line only (no word-wrap),
+// same simplification BoxWidgetHandler already makes for button/input
+// labels.
+class LinkWidgetHandler final : public WidgetHandler {
+public:
+  void Render(const Widget &widget, LayoutState &state) const override {
+    FlushLine(state);
+
+    const std::string label = widget.text != nullptr ? widget.text : "";
+    const float lineHeight = state.renderer.LineHeight(widget.fontSize);
+    const float textWidth =
+        state.renderer.MeasureText(label, widget.fontSize);
+
+    state.y += kBlockSpacing;
+
+    if (!label.empty()) {
+      state.renderer.DrawText(label, state.x, state.y + widget.fontSize,
+                               widget.fontSize);
+      state.renderer.DrawFilledRect(state.x, state.y + lineHeight - kLinkUnderlineHeight,
+                                     textWidth, kLinkUnderlineHeight);
+    }
+
+    if (state.boxRegions != nullptr) {
+      state.boxRegions->push_back(
+          {widget.userData, state.x, state.y, textWidth, lineHeight});
+    }
+
+    state.y += lineHeight + kBlockSpacing;
   }
 };
 
@@ -545,6 +579,7 @@ const WidgetHandler &HandlerFor(WidgetKind kind) {
   static const ImageWidgetHandler kImage;
   static const TableWidgetHandler kTable;
   static const ContainerWidgetHandler kContainer;
+  static const LinkWidgetHandler kLink;
 
   switch (kind) {
   case WidgetKind::kText:
@@ -559,6 +594,8 @@ const WidgetHandler &HandlerFor(WidgetKind kind) {
     return kImage;
   case WidgetKind::kTable:
     return kTable;
+  case WidgetKind::kLink:
+    return kLink;
   case WidgetKind::kTableCell:
     // Never reached in practice - kTableCell widgets only appear as row
     // children inside a table's own array, which TableWidgetHandler reads
