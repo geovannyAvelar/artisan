@@ -49,6 +49,29 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   if (style.hasBorderWidth) {
     widget.borderWidth = style.borderWidth;
   }
+  widget.hasWidth = style.hasWidth;
+  widget.width = style.width;
+  widget.widthIsPercent = style.widthIsPercent;
+  widget.hasHeight = style.hasHeight;
+  widget.height = style.height;
+  // Declarations' own hasPaddingXxx/hasMarginXxx only matter for cascade
+  // resolution (StyleSheet::Resolve/MergeInlineStyle) - by here, an
+  // unset side has already resolved to 0, exactly what Widget's own
+  // (flag-less) fields should hold, so a plain copy is correct.
+  widget.paddingTop = style.paddingTop;
+  widget.paddingRight = style.paddingRight;
+  widget.paddingBottom = style.paddingBottom;
+  widget.paddingLeft = style.paddingLeft;
+  widget.marginTop = style.marginTop;
+  widget.marginRight = style.marginRight;
+  widget.marginBottom = style.marginBottom;
+  widget.marginLeft = style.marginLeft;
+  widget.hasDisplay = style.hasDisplay;
+  widget.display = style.display;
+  widget.flexDirection = style.flexDirection;
+  widget.justifyContent = style.justifyContent;
+  widget.alignItems = style.alignItems;
+  widget.gap = style.gap;
 }
 
 bool IsAllWhitespace(const std::string &text) {

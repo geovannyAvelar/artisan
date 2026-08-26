@@ -10,16 +10,56 @@
 namespace artisan {
 
 // A single compound selector, e.g. "div.card#hero" - a tag name (optional
-// - empty matches any tag, i.e. universal), an id (optional), and any
-// number of classes, ALL of which must match (an AND, not an OR). No
-// combinators (descendant/child/sibling), no pseudo-classes, no attribute
-// selectors. A comma-separated selector list in markup ("h1, .card")
-// becomes multiple Selectors sharing one Rule's declarations, each
-// competing for the cascade independently (see StyleSheet::Resolve).
-struct Selector {
-  std::string tag;                // Empty = any tag.
-  std::string id;                 // Empty = no id constraint.
+// - empty matches any tag, i.e. universal), an id (optional), any number
+// of classes, attribute constraints, and structural pseudo-classes, ALL
+// of which must match (an AND, not an OR).
+struct AttributeSelector {
+  std::string name;
+  // nullopt = "[name]" (presence only, any value); set = "[name=value]"
+  // (exact match - no ~=/|=/^=/$=/*= operators, and no case-insensitive
+  // "i" flag - a bounded subset, same philosophy as the rest of this
+  // file's CSS support).
+  std::optional<std::string> value;
+};
+
+enum class PseudoClassKind { kFirstChild, kLastChild, kNthChild };
+
+// nthA/nthB implement "an+b" - :nth-child(2) is {a=0, b=2};
+// :nth-child(even)/:nth-child(odd) are {a=2, b=0}/{a=2, b=1}. Only used
+// when kind == kNthChild.
+struct PseudoClassSelector {
+  PseudoClassKind kind;
+  int nthA = 0;
+  int nthB = 0;
+};
+
+struct CompoundSelector {
+  std::string tag;                  // Empty = any tag.
+  std::string id;                   // Empty = no id constraint.
   std::vector<std::string> classes; // Must all be present on the element.
+  std::vector<AttributeSelector> attributes;
+  std::vector<PseudoClassSelector> pseudoClasses;
+};
+
+// How two adjacent compound selectors in a chain relate - "div p" is
+// {div, kDescendant, p}, "div > p" is {div, kChild, p}, etc.
+enum class Combinator { kDescendant, kChild, kAdjacentSibling, kGeneralSibling };
+
+// A full selector: a chain of compound selectors joined by combinators,
+// e.g. "div.card > p" parses to compounds=[div.card, p],
+// combinators=[kChild]. `compounds` is never empty; `compounds.back()`
+// is the actual subject being matched/selected - everything before it
+// (walked via `combinators`, right to left) constrains its ancestors/
+// siblings instead. A selector with just one compound (the common case)
+// has an empty `combinators` vector. A comma-separated selector list in
+// markup ("h1, .card") becomes multiple Selectors sharing one Rule's
+// declarations, each competing for the cascade independently (see
+// StyleSheet::Resolve) - or, for QuerySelector/QuerySelectorAll/
+// ElementMatches/Closest below, multiple Selectors any of which counts
+// as a match (see ParseSelectorList in css.cpp).
+struct Selector {
+  std::vector<CompoundSelector> compounds;
+  std::vector<Combinator> combinators; // size() == compounds.size() - 1
 };
 
 // What a rule (or a resolved element) actually specifies. hasXxx tells a
@@ -37,6 +77,60 @@ struct Declarations {
   Color borderColor;
   bool hasBorderWidth = false;
   float borderWidth = 1.0f;
+
+  // Box model - kContainer only for now (see widget_renderer.cpp's
+  // ContainerWidgetHandler). width/height clamp/override the container's
+  // natural size; padding/margin inset it. Every one of these carries a
+  // hasXxx flag despite 0 being a plausible "unset" value for
+  // padding/margin too - StyleSheet::Resolve's per-property cascade
+  // (one rule might set padding-top without mentioning padding-left,
+  // say) and MergeInlineStyle (an inline style might only override one
+  // side) both need to tell "this rule/inline style didn't mention this
+  // property" apart from "...set it to 0", the same way every other
+  // property here already does.
+  bool hasWidth = false;
+  float width = 0.0f;
+  bool widthIsPercent = false; // Resolves against the parent's width at
+                                // render time - see kImage's identical
+                                // imageWidthIsPercent for the precedent.
+  bool hasHeight = false; // Pixels only - no percentage height, same
+                           // reasoning kImage's imageHeight already has:
+                           // no stable containing-block height in this
+                           // flow model.
+  float height = 0.0f;
+  bool hasPaddingTop = false;
+  float paddingTop = 0.0f;
+  bool hasPaddingRight = false;
+  float paddingRight = 0.0f;
+  bool hasPaddingBottom = false;
+  float paddingBottom = 0.0f;
+  bool hasPaddingLeft = false;
+  float paddingLeft = 0.0f;
+  bool hasMarginTop = false;
+  float marginTop = 0.0f;
+  bool hasMarginRight = false;
+  float marginRight = 0.0f;
+  bool hasMarginBottom = false;
+  float marginBottom = 0.0f;
+  bool hasMarginLeft = false;
+  float marginLeft = 0.0f;
+
+  // Flexbox (see DisplayMode etc. above) - kContainer only. Every one of
+  // these needs its own hasXxx flag for the same reason padding/margin
+  // do: one rule might set display:flex without mentioning
+  // justify-content, so "unset" has to be distinguishable from "set to
+  // this enum's first value" (kBlock/kRow/kFlexStart), not just implied
+  // by a default-constructed enum.
+  bool hasDisplay = false;
+  DisplayMode display = DisplayMode::kBlock;
+  bool hasFlexDirection = false;
+  FlexDirection flexDirection = FlexDirection::kRow;
+  bool hasJustifyContent = false;
+  JustifyContent justifyContent = JustifyContent::kFlexStart;
+  bool hasAlignItems = false;
+  AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
+  bool hasGap = false;
+  float gap = 0.0f;
 };
 
 struct Rule {
@@ -70,8 +164,9 @@ private:
 };
 
 // The other direction from StyleSheet::Resolve: given a selector string
-// (the same bounded grammar Selector documents - one compound selector,
-// no comma-lists/combinators) rather than a node, find node(s) it matches
+// (the same grammar Selector documents - descendant/child/sibling
+// combinators, attribute selectors, :first-child/:last-child/:nth-child,
+// comma-separated lists) rather than a node, find node(s) it matches
 // within `root`'s subtree (not including `root` itself), in document
 // order. QuerySelector stops at the first match (nullptr if none);
 // QuerySelectorAll collects every match. Backs document/node's

@@ -134,19 +134,82 @@ bool ParsePixelLength(const std::string &raw, float &out) {
   }
 }
 
-// Splits a compound selector ("div.card#hero", ".a.b", "*", "h1") into its
-// tag/id/class parts. The leading segment (before the first '.'/'#') is
-// the tag - absent or "*" means "any tag" (universal). Used both by
-// StyleSheet::Parse's rule parsing and by QuerySelector/QuerySelectorAll
-// below (same grammar, different direction - see css.h).
-Selector ParseSelector(const std::string &raw) {
-  Selector selector;
+// Like ParsePixelLength, but also accepts a trailing '%' (setting
+// `outIsPercent`) - used by `width`, the one box-model property that
+// resolves against a containing size at render time rather than always
+// being an absolute pixel value (see Declarations::widthIsPercent).
+bool ParseLengthOrPercent(const std::string &raw, float &outValue,
+                           bool &outIsPercent) {
+  std::string value = Trim(raw);
+  if (!value.empty() && value.back() == '%') {
+    try {
+      outValue = std::stof(value.substr(0, value.size() - 1));
+      outIsPercent = true;
+      return true;
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  outIsPercent = false;
+  return ParsePixelLength(value, outValue);
+}
+
+// Parses a pseudo-class token (the text after ':', e.g. "first-child",
+// "nth-child(2)", "nth-child(even)") and appends it to `selector` -
+// silently ignored (matching this file's "skip what we don't
+// understand" philosophy elsewhere, e.g. ParseDeclarations) if it isn't
+// one of the structural pseudo-classes this bounded grammar supports.
+// nth-child's v1 grammar: a literal integer, or the "even"/"odd"
+// keywords - not the full "an+b" algebra.
+void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector) {
+  std::string lower = ToLower(token);
+  PseudoClassSelector pc;
+  if (lower == "first-child") {
+    pc.kind = PseudoClassKind::kFirstChild;
+  } else if (lower == "last-child") {
+    pc.kind = PseudoClassKind::kLastChild;
+  } else if (lower.rfind("nth-child(", 0) == 0 && !lower.empty() &&
+             lower.back() == ')') {
+    std::string arg = Trim(lower.substr(10, lower.size() - 10 - 1));
+    pc.kind = PseudoClassKind::kNthChild;
+    if (arg == "even") {
+      pc.nthA = 2;
+      pc.nthB = 0;
+    } else if (arg == "odd") {
+      pc.nthA = 2;
+      pc.nthB = 1;
+    } else {
+      try {
+        pc.nthA = 0;
+        pc.nthB = std::stoi(arg);
+      } catch (const std::exception &) {
+        return;
+      }
+    }
+  } else {
+    return;
+  }
+  selector.pseudoClasses.push_back(pc);
+}
+
+// Splits a compound selector ("div.card#hero", ".a.b", "*", "h1",
+// "a[href]", "li:nth-child(2)") into its tag/id/class/attribute/pseudo-
+// class parts. The leading segment (before the first special marker) is
+// the tag - absent or "*" means "any tag" (universal). Attribute/
+// pseudo-class values are assumed free of whitespace and of the marker
+// characters ('.', '#', '[', ':') themselves - same bounded-subset
+// philosophy as ParseColor's rgb() parsing elsewhere in this file, not a
+// full CSS tokenizer. Used both by StyleSheet::Parse's rule parsing and
+// by ParseSelectorChain below (same grammar, different direction - see
+// css.h).
+CompoundSelector ParseCompoundSelector(const std::string &raw) {
+  CompoundSelector selector;
   std::string value = Trim(raw);
   if (value.empty()) {
     return selector;
   }
 
-  size_t pos = value.find_first_of(".#");
+  size_t pos = value.find_first_of(".#[:");
   std::string head = value.substr(0, pos);
   if (!head.empty() && head != "*") {
     selector.tag = ToLower(head);
@@ -154,7 +217,35 @@ Selector ParseSelector(const std::string &raw) {
 
   while (pos != std::string::npos) {
     char marker = value[pos];
-    size_t next = value.find_first_of(".#", pos + 1);
+
+    if (marker == '[') {
+      size_t close = value.find(']', pos + 1);
+      std::string inner = value.substr(
+          pos + 1, (close == std::string::npos ? value.size() : close) - pos - 1);
+      size_t eq = inner.find('=');
+      AttributeSelector attr;
+      if (eq == std::string::npos) {
+        attr.name = ToLower(Trim(inner));
+      } else {
+        attr.name = ToLower(Trim(inner.substr(0, eq)));
+        std::string attrValue = Trim(inner.substr(eq + 1));
+        if (attrValue.size() >= 2 &&
+            (attrValue.front() == '"' || attrValue.front() == '\'') &&
+            attrValue.back() == attrValue.front()) {
+          attrValue = attrValue.substr(1, attrValue.size() - 2);
+        }
+        attr.value = attrValue;
+      }
+      if (!attr.name.empty()) {
+        selector.attributes.push_back(std::move(attr));
+      }
+      pos = (close == std::string::npos)
+                ? std::string::npos
+                : value.find_first_of(".#[:", close + 1);
+      continue;
+    }
+
+    size_t next = value.find_first_of(".#[:", pos + 1);
     std::string token =
         value.substr(pos + 1, (next == std::string::npos ? value.size()
                                                            : next) -
@@ -163,11 +254,101 @@ Selector ParseSelector(const std::string &raw) {
       selector.classes.push_back(token);
     } else if (marker == '#' && !token.empty()) {
       selector.id = token;
+    } else if (marker == ':' && !token.empty()) {
+      ParsePseudoClassToken(token, selector);
     }
     pos = next;
   }
 
   return selector;
+}
+
+// Splits a full selector string ("div.card > p", "a + b", "div p") into
+// a chain of compound-selector tokens and the combinator between each
+// pair - an implicit descendant combinator is inserted between two
+// compound tokens separated only by whitespace (no explicit >/+/~).
+// Whitespace/combinator characters inside an unclosed '[' ... ']' don't
+// split a token (so "[title=\"a b\"]" isn't torn in two, even though the
+// bounded grammar inside the brackets - see ParseCompoundSelector -
+// doesn't otherwise support a quoted value containing a space).
+Selector ParseSelectorChain(const std::string &raw) {
+  Selector selector;
+  std::string text = Trim(raw);
+  std::string currentToken;
+  bool pendingCombinator = false;
+  Combinator combinator = Combinator::kDescendant;
+  int bracketDepth = 0;
+
+  auto flushToken = [&]() {
+    std::string trimmed = Trim(currentToken);
+    if (!trimmed.empty()) {
+      if (!selector.compounds.empty()) {
+        selector.combinators.push_back(pendingCombinator ? combinator
+                                                           : Combinator::kDescendant);
+      }
+      selector.compounds.push_back(ParseCompoundSelector(trimmed));
+    }
+    pendingCombinator = false;
+    currentToken.clear();
+  };
+
+  for (size_t i = 0; i < text.size(); ++i) {
+    char c = text[i];
+    if (c == '[') {
+      ++bracketDepth;
+      currentToken += c;
+      continue;
+    }
+    if (c == ']') {
+      if (bracketDepth > 0) {
+        --bracketDepth;
+      }
+      currentToken += c;
+      continue;
+    }
+    if (bracketDepth == 0 && (c == '>' || c == '+' || c == '~')) {
+      flushToken();
+      combinator = (c == '>')   ? Combinator::kChild
+                   : (c == '+') ? Combinator::kAdjacentSibling
+                                : Combinator::kGeneralSibling;
+      pendingCombinator = true;
+      continue;
+    }
+    if (bracketDepth == 0 && std::isspace(static_cast<unsigned char>(c))) {
+      if (!currentToken.empty()) {
+        flushToken();
+      }
+      continue;
+    }
+    currentToken += c;
+  }
+  flushToken();
+
+  return selector;
+}
+
+// Splits a comma-separated selector list ("h1, .card") into independent
+// Selectors, each parsed via ParseSelectorChain - shared by
+// StyleSheet::Parse (a rule's selectors, ANY of which puts it in the
+// cascade for a given element) and QuerySelector/QuerySelectorAll/
+// ElementMatches/Closest below (ANY of which counts as a match).
+// Discards a selector that parsed to zero compounds (empty/malformed
+// input) rather than letting it match everything.
+std::vector<Selector> ParseSelectorList(const std::string &raw) {
+  std::vector<Selector> result;
+  std::stringstream ss(raw);
+  std::string part;
+  while (std::getline(ss, part, ',')) {
+    std::string trimmed = Trim(part);
+    if (trimmed.empty()) {
+      continue;
+    }
+    Selector selector = ParseSelectorChain(trimmed);
+    if (!selector.compounds.empty()) {
+      result.push_back(std::move(selector));
+    }
+  }
+  return result;
 }
 
 Declarations ParseDeclarations(const std::string &body) {
@@ -200,6 +381,93 @@ Declarations ParseDeclarations(const std::string &body) {
       decl.hasBorderColor = ParseColor(value, decl.borderColor);
     } else if (property == "border-width") {
       decl.hasBorderWidth = ParsePixelLength(value, decl.borderWidth);
+    } else if (property == "width") {
+      decl.hasWidth = ParseLengthOrPercent(value, decl.width, decl.widthIsPercent);
+    } else if (property == "height") {
+      decl.hasHeight = ParsePixelLength(value, decl.height);
+    } else if (property == "padding") {
+      // Single-value shorthand only (all four sides) - 2/3/4-value
+      // shorthand splitting ("10px 20px") is explicitly deferred, same
+      // bounded-subset philosophy as the rest of this parser.
+      float px;
+      if (ParsePixelLength(value, px)) {
+        decl.hasPaddingTop = decl.hasPaddingRight = decl.hasPaddingBottom =
+            decl.hasPaddingLeft = true;
+        decl.paddingTop = decl.paddingRight = decl.paddingBottom = decl.paddingLeft = px;
+      }
+    } else if (property == "padding-top") {
+      decl.hasPaddingTop = ParsePixelLength(value, decl.paddingTop);
+    } else if (property == "padding-right") {
+      decl.hasPaddingRight = ParsePixelLength(value, decl.paddingRight);
+    } else if (property == "padding-bottom") {
+      decl.hasPaddingBottom = ParsePixelLength(value, decl.paddingBottom);
+    } else if (property == "padding-left") {
+      decl.hasPaddingLeft = ParsePixelLength(value, decl.paddingLeft);
+    } else if (property == "margin") {
+      float px;
+      if (ParsePixelLength(value, px)) {
+        decl.hasMarginTop = decl.hasMarginRight = decl.hasMarginBottom =
+            decl.hasMarginLeft = true;
+        decl.marginTop = decl.marginRight = decl.marginBottom = decl.marginLeft = px;
+      }
+    } else if (property == "margin-top") {
+      decl.hasMarginTop = ParsePixelLength(value, decl.marginTop);
+    } else if (property == "margin-right") {
+      decl.hasMarginRight = ParsePixelLength(value, decl.marginRight);
+    } else if (property == "margin-bottom") {
+      decl.hasMarginBottom = ParsePixelLength(value, decl.marginBottom);
+    } else if (property == "margin-left") {
+      decl.hasMarginLeft = ParsePixelLength(value, decl.marginLeft);
+    } else if (property == "display") {
+      std::string lower = ToLower(value);
+      if (lower == "flex") {
+        decl.hasDisplay = true;
+        decl.display = DisplayMode::kFlex;
+      } else if (lower == "block") {
+        decl.hasDisplay = true;
+        decl.display = DisplayMode::kBlock;
+      }
+    } else if (property == "flex-direction") {
+      std::string lower = ToLower(value);
+      if (lower == "row") {
+        decl.hasFlexDirection = true;
+        decl.flexDirection = FlexDirection::kRow;
+      } else if (lower == "column") {
+        decl.hasFlexDirection = true;
+        decl.flexDirection = FlexDirection::kColumn;
+      }
+    } else if (property == "justify-content") {
+      std::string lower = ToLower(value);
+      if (lower == "flex-start") {
+        decl.hasJustifyContent = true;
+        decl.justifyContent = JustifyContent::kFlexStart;
+      } else if (lower == "center") {
+        decl.hasJustifyContent = true;
+        decl.justifyContent = JustifyContent::kCenter;
+      } else if (lower == "flex-end") {
+        decl.hasJustifyContent = true;
+        decl.justifyContent = JustifyContent::kFlexEnd;
+      } else if (lower == "space-between") {
+        decl.hasJustifyContent = true;
+        decl.justifyContent = JustifyContent::kSpaceBetween;
+      }
+    } else if (property == "align-items") {
+      std::string lower = ToLower(value);
+      if (lower == "flex-start") {
+        decl.hasAlignItems = true;
+        decl.alignItems = AlignItems::kFlexStart;
+      } else if (lower == "center") {
+        decl.hasAlignItems = true;
+        decl.alignItems = AlignItems::kCenter;
+      } else if (lower == "flex-end") {
+        decl.hasAlignItems = true;
+        decl.alignItems = AlignItems::kFlexEnd;
+      } else if (lower == "stretch") {
+        decl.hasAlignItems = true;
+        decl.alignItems = AlignItems::kStretch;
+      }
+    } else if (property == "gap") {
+      decl.hasGap = ParsePixelLength(value, decl.gap);
     }
     // Any other property is silently ignored, same as a browser skipping
     // one it doesn't recognize.
@@ -208,12 +476,59 @@ Declarations ParseDeclarations(const std::string &body) {
   return decl;
 }
 
+// Whether `node` is at the position `pc` describes among its parent's
+// *element* siblings (1-based - real CSS's :nth-child counts only
+// element children). A node with no parent (root/detached) is treated
+// as its own only sibling, so :first-child/:last-child/:nth-child(1)
+// all vacuously match it - same as real CSS resolves an unparented
+// element.
+bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node) {
+  const Node *parent = node.parent();
+  // No parent (root/detached): vacuously node's own only sibling - same
+  // as computing index=1, elementCount=1 below, just without a parent
+  // to walk children() on.
+  int index = 1;
+  int elementCount = 1;
+
+  if (parent != nullptr) {
+    index = 0;
+    elementCount = 0;
+    for (const auto &siblingPtr : parent->children()) {
+      const Node *sibling = siblingPtr.get();
+      if (sibling->type() != NodeType::kElement) {
+        continue;
+      }
+      ++elementCount;
+      if (sibling == &node) {
+        index = elementCount;
+      }
+    }
+    if (index == 0) {
+      return false;
+    }
+  }
+
+  switch (pc.kind) {
+  case PseudoClassKind::kFirstChild:
+    return index == 1;
+  case PseudoClassKind::kLastChild:
+    return index == elementCount;
+  case PseudoClassKind::kNthChild:
+    // v1 grammar only ever produces nthA == 0 (a literal index) or
+    // nthA == 2 (even/odd) - both non-negative, so plain modulo is safe
+    // (no negative-operand sign concerns a general "an+b" would have).
+    return pc.nthA == 0 ? index == pc.nthB : (index % pc.nthA) == pc.nthB;
+  }
+  return false;
+}
+
 // Every part of a compound selector must match - a tag constraint, an id
-// constraint, and every listed class, all AND'd together (an empty part
-// imposes no constraint, so a bare Selector{} - "*" - matches anything).
-// Used both by StyleSheet::Resolve's cascade and by QuerySelector/
-// QuerySelectorAll below, in the opposite direction (see css.h).
-bool Matches(const Selector &selector, const Node &node) {
+// constraint, every listed class, every attribute constraint, and every
+// pseudo-class, all AND'd together (an empty part imposes no constraint,
+// so a bare CompoundSelector{} - "*" - matches anything). The rightmost
+// compound of a Selector chain - see MatchesChain below for the rest of
+// the chain (ancestor/sibling compounds).
+bool CompoundMatches(const CompoundSelector &selector, const Node &node) {
   if (node.type() != NodeType::kElement) {
     return false;
   }
@@ -248,20 +563,110 @@ bool Matches(const Selector &selector, const Node &node) {
     }
   }
 
+  for (const AttributeSelector &attr : selector.attributes) {
+    const std::string *value = node.GetAttribute(attr.name);
+    if (value == nullptr) {
+      return false;
+    }
+    if (attr.value.has_value() && *value != *attr.value) {
+      return false;
+    }
+  }
+
+  for (const PseudoClassSelector &pc : selector.pseudoClasses) {
+    if (!MatchesPseudoClass(pc, node)) {
+      return false;
+    }
+  }
+
   return true;
 }
 
-// Generous per-tier multipliers (id=100, class=10, tag=1) keep id/class/
-// tag as cleanly separated tiers for any realistic number of classes on
-// one selector - same relative ordering real CSS specificity gives.
-int Specificity(const Selector &selector) {
+// Verifies compounds[0..upToIndex] against ancestors/siblings of
+// `contextNode` (the node the compound at upToIndex+1 already matched),
+// walking leftward through `selector.combinators`. kDescendant
+// backtracks - if the rest of the chain doesn't pan out from the first
+// ancestor that matches this compound, it retries the next ancestor up,
+// rather than committing to the first match (real CSS semantics: "div p
+// b" must match even when there are two nested <p> ancestors and only
+// the outer one has a "div" ancestor of its own).
+bool MatchesAncestorChain(const Selector &selector, int upToIndex,
+                           const Node *contextNode) {
+  if (upToIndex < 0) {
+    return true;
+  }
+
+  const CompoundSelector &compound = selector.compounds[upToIndex];
+  switch (selector.combinators[upToIndex]) {
+  case Combinator::kDescendant:
+    for (const Node *ancestor = contextNode->parent(); ancestor != nullptr;
+         ancestor = ancestor->parent()) {
+      if (CompoundMatches(compound, *ancestor) &&
+          MatchesAncestorChain(selector, upToIndex - 1, ancestor)) {
+        return true;
+      }
+    }
+    return false;
+  case Combinator::kChild: {
+    const Node *parent = contextNode->parent();
+    return parent != nullptr && CompoundMatches(compound, *parent) &&
+           MatchesAncestorChain(selector, upToIndex - 1, parent);
+  }
+  case Combinator::kAdjacentSibling: {
+    const Node *prev = contextNode->previousSibling();
+    return prev != nullptr && CompoundMatches(compound, *prev) &&
+           MatchesAncestorChain(selector, upToIndex - 1, prev);
+  }
+  case Combinator::kGeneralSibling:
+    for (const Node *prev = contextNode->previousSibling(); prev != nullptr;
+         prev = prev->previousSibling()) {
+      if (CompoundMatches(compound, *prev) &&
+          MatchesAncestorChain(selector, upToIndex - 1, prev)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+// Whether `node` matches the full selector chain - the rightmost
+// compound against `node` itself, then each earlier compound against an
+// ancestor/sibling per its combinator (MatchesAncestorChain above).
+bool MatchesChain(const Selector &selector, const Node &node) {
+  if (selector.compounds.empty()) {
+    return false;
+  }
+  if (!CompoundMatches(selector.compounds.back(), node)) {
+    return false;
+  }
+  return MatchesAncestorChain(selector, static_cast<int>(selector.compounds.size()) - 2,
+                               &node);
+}
+
+int SpecificityOfCompound(const CompoundSelector &compound) {
   int score = 0;
-  if (!selector.id.empty()) {
+  if (!compound.id.empty()) {
     score += 100;
   }
-  score += static_cast<int>(selector.classes.size()) * 10;
-  if (!selector.tag.empty()) {
+  score += static_cast<int>(compound.classes.size()) * 10;
+  score += static_cast<int>(compound.attributes.size()) * 10;
+  score += static_cast<int>(compound.pseudoClasses.size()) * 10;
+  if (!compound.tag.empty()) {
     score += 1;
+  }
+  return score;
+}
+
+// Generous per-tier multipliers (id=100, class/attribute/pseudo-class=10,
+// tag=1) keep id/class/tag as cleanly separated tiers for any realistic
+// selector - same relative ordering real CSS specificity gives - summed
+// across every compound in the chain (a combinator itself contributes
+// nothing, matching real CSS).
+int Specificity(const Selector &selector) {
+  int score = 0;
+  for (const CompoundSelector &compound : selector.compounds) {
+    score += SpecificityOfCompound(compound);
   }
   return score;
 }
@@ -288,34 +693,43 @@ struct PropertyWinner {
 
 // Depth-first walk of `root`'s subtree (not including `root` itself - a
 // real querySelector never matches the element you called it on) testing
-// each element against `selector`, calling ParseSelector/Matches above -
-// fine to call from out here despite them being anonymous-namespace-local
-// (that only restricts visibility to other translation units, not within
-// this one, and this is textually after their definitions). Shared by
-// QuerySelector (stops at the first match) and QuerySelectorAll (collects
-// every match, in document order) below. Takes/hands back mutable Node*
-// throughout despite children() only ever returning a const vector
-// reference: unique_ptr::get() doesn't propagate that constness to the
-// pointee (a standard library quirk, not one of this codebase's own
-// choices), so `childPtr.get()` is already Node*, not const Node*.
+// each element against every selector in `selectors` (a comma-separated
+// list - a match against ANY of them counts, same as real CSS), calling
+// ParseSelectorList/MatchesChain above - fine to call from out here
+// despite them being anonymous-namespace-local (that only restricts
+// visibility to other translation units, not within this one, and this
+// is textually after their definitions). Shared by QuerySelector (stops
+// at the first match) and QuerySelectorAll (collects every match, in
+// document order) below. Takes/hands back mutable Node* throughout
+// despite children() only ever returning a const vector reference:
+// unique_ptr::get() doesn't propagate that constness to the pointee (a
+// standard library quirk, not one of this codebase's own choices), so
+// `childPtr.get()` is already Node*, not const Node*.
 namespace {
 template <typename Callback>
-void ForEachMatch(const Selector &selector, Node &root,
+void ForEachMatch(const std::vector<Selector> &selectors, Node &root,
                    const Callback &callback) {
   for (const auto &childPtr : root.children()) {
     Node *child = childPtr.get();
-    if (Matches(selector, *child)) {
+    bool matched = false;
+    for (const Selector &selector : selectors) {
+      if (MatchesChain(selector, *child)) {
+        matched = true;
+        break;
+      }
+    }
+    if (matched) {
       if (!callback(child)) {
         return;
       }
     }
-    ForEachMatch(selector, *child, callback);
+    ForEachMatch(selectors, *child, callback);
   }
 }
 } // namespace
 
 Node *QuerySelector(Node &root, const std::string &selector) {
-  Selector parsed = ParseSelector(selector);
+  std::vector<Selector> parsed = ParseSelectorList(selector);
   Node *found = nullptr;
   ForEachMatch(parsed, root, [&](Node *match) {
     found = match;
@@ -325,7 +739,7 @@ Node *QuerySelector(Node &root, const std::string &selector) {
 }
 
 std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector) {
-  Selector parsed = ParseSelector(selector);
+  std::vector<Selector> parsed = ParseSelectorList(selector);
   std::vector<Node *> results;
   ForEachMatch(parsed, root, [&](Node *match) {
     results.push_back(match);
@@ -335,14 +749,21 @@ std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector) {
 }
 
 bool ElementMatches(const Node &node, const std::string &selector) {
-  return Matches(ParseSelector(selector), node);
+  for (const Selector &parsed : ParseSelectorList(selector)) {
+    if (MatchesChain(parsed, node)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Node *Closest(Node &node, const std::string &selector) {
-  Selector parsed = ParseSelector(selector);
+  std::vector<Selector> parsed = ParseSelectorList(selector);
   for (Node *n = &node; n != nullptr; n = n->parent()) {
-    if (Matches(parsed, *n)) {
-      return n;
+    for (const Selector &selector : parsed) {
+      if (MatchesChain(selector, *n)) {
+        return n;
+      }
     }
   }
   return nullptr;
@@ -373,6 +794,67 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
   if (inlineStyle.hasBorderWidth) {
     declarations.hasBorderWidth = true;
     declarations.borderWidth = inlineStyle.borderWidth;
+  }
+  if (inlineStyle.hasWidth) {
+    declarations.hasWidth = true;
+    declarations.width = inlineStyle.width;
+    declarations.widthIsPercent = inlineStyle.widthIsPercent;
+  }
+  if (inlineStyle.hasHeight) {
+    declarations.hasHeight = true;
+    declarations.height = inlineStyle.height;
+  }
+  if (inlineStyle.hasPaddingTop) {
+    declarations.hasPaddingTop = true;
+    declarations.paddingTop = inlineStyle.paddingTop;
+  }
+  if (inlineStyle.hasPaddingRight) {
+    declarations.hasPaddingRight = true;
+    declarations.paddingRight = inlineStyle.paddingRight;
+  }
+  if (inlineStyle.hasPaddingBottom) {
+    declarations.hasPaddingBottom = true;
+    declarations.paddingBottom = inlineStyle.paddingBottom;
+  }
+  if (inlineStyle.hasPaddingLeft) {
+    declarations.hasPaddingLeft = true;
+    declarations.paddingLeft = inlineStyle.paddingLeft;
+  }
+  if (inlineStyle.hasMarginTop) {
+    declarations.hasMarginTop = true;
+    declarations.marginTop = inlineStyle.marginTop;
+  }
+  if (inlineStyle.hasMarginRight) {
+    declarations.hasMarginRight = true;
+    declarations.marginRight = inlineStyle.marginRight;
+  }
+  if (inlineStyle.hasMarginBottom) {
+    declarations.hasMarginBottom = true;
+    declarations.marginBottom = inlineStyle.marginBottom;
+  }
+  if (inlineStyle.hasMarginLeft) {
+    declarations.hasMarginLeft = true;
+    declarations.marginLeft = inlineStyle.marginLeft;
+  }
+  if (inlineStyle.hasDisplay) {
+    declarations.hasDisplay = true;
+    declarations.display = inlineStyle.display;
+  }
+  if (inlineStyle.hasFlexDirection) {
+    declarations.hasFlexDirection = true;
+    declarations.flexDirection = inlineStyle.flexDirection;
+  }
+  if (inlineStyle.hasJustifyContent) {
+    declarations.hasJustifyContent = true;
+    declarations.justifyContent = inlineStyle.justifyContent;
+  }
+  if (inlineStyle.hasAlignItems) {
+    declarations.hasAlignItems = true;
+    declarations.alignItems = inlineStyle.alignItems;
+  }
+  if (inlineStyle.hasGap) {
+    declarations.hasGap = true;
+    declarations.gap = inlineStyle.gap;
   }
 }
 
@@ -481,15 +963,7 @@ StyleSheet StyleSheet::Parse(const std::string &css) {
 
     Rule rule;
     rule.declarations = ParseDeclarations(body);
-
-    std::stringstream ss(selectorText);
-    std::string selectorPart;
-    while (std::getline(ss, selectorPart, ',')) {
-      std::string trimmed = Trim(selectorPart);
-      if (!trimmed.empty()) {
-        rule.selectors.push_back(ParseSelector(trimmed));
-      }
-    }
+    rule.selectors = ParseSelectorList(selectorText);
 
     if (!rule.selectors.empty()) {
       sheet.rules_.push_back(std::move(rule));
@@ -506,6 +980,10 @@ Declarations StyleSheet::Resolve(const Node &node,
   Declarations own;
 
   PropertyWinner colorWin, boldWin, bgWin, borderColorWin, borderWidthWin;
+  PropertyWinner widthWin, heightWin;
+  PropertyWinner paddingTopWin, paddingRightWin, paddingBottomWin, paddingLeftWin;
+  PropertyWinner marginTopWin, marginRightWin, marginBottomWin, marginLeftWin;
+  PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
     const Rule &rule = rules_[i];
@@ -513,7 +991,7 @@ Declarations StyleSheet::Resolve(const Node &node,
 
     int matchedSpecificity = -1;
     for (const Selector &selector : rule.selectors) {
-      if (Matches(selector, node)) {
+      if (MatchesChain(selector, node)) {
         matchedSpecificity = std::max(matchedSpecificity, Specificity(selector));
       }
     }
@@ -545,6 +1023,81 @@ Declarations StyleSheet::Resolve(const Node &node,
         borderWidthWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasBorderWidth = true;
       own.borderWidth = rule.declarations.borderWidth;
+    }
+    if (rule.declarations.hasWidth &&
+        widthWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasWidth = true;
+      own.width = rule.declarations.width;
+      own.widthIsPercent = rule.declarations.widthIsPercent;
+    }
+    if (rule.declarations.hasHeight &&
+        heightWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasHeight = true;
+      own.height = rule.declarations.height;
+    }
+    if (rule.declarations.hasPaddingTop &&
+        paddingTopWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasPaddingTop = true;
+      own.paddingTop = rule.declarations.paddingTop;
+    }
+    if (rule.declarations.hasPaddingRight &&
+        paddingRightWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasPaddingRight = true;
+      own.paddingRight = rule.declarations.paddingRight;
+    }
+    if (rule.declarations.hasPaddingBottom &&
+        paddingBottomWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasPaddingBottom = true;
+      own.paddingBottom = rule.declarations.paddingBottom;
+    }
+    if (rule.declarations.hasPaddingLeft &&
+        paddingLeftWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasPaddingLeft = true;
+      own.paddingLeft = rule.declarations.paddingLeft;
+    }
+    if (rule.declarations.hasMarginTop &&
+        marginTopWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasMarginTop = true;
+      own.marginTop = rule.declarations.marginTop;
+    }
+    if (rule.declarations.hasMarginRight &&
+        marginRightWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasMarginRight = true;
+      own.marginRight = rule.declarations.marginRight;
+    }
+    if (rule.declarations.hasMarginBottom &&
+        marginBottomWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasMarginBottom = true;
+      own.marginBottom = rule.declarations.marginBottom;
+    }
+    if (rule.declarations.hasMarginLeft &&
+        marginLeftWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasMarginLeft = true;
+      own.marginLeft = rule.declarations.marginLeft;
+    }
+    if (rule.declarations.hasDisplay &&
+        displayWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasDisplay = true;
+      own.display = rule.declarations.display;
+    }
+    if (rule.declarations.hasFlexDirection &&
+        flexDirectionWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasFlexDirection = true;
+      own.flexDirection = rule.declarations.flexDirection;
+    }
+    if (rule.declarations.hasJustifyContent &&
+        justifyContentWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasJustifyContent = true;
+      own.justifyContent = rule.declarations.justifyContent;
+    }
+    if (rule.declarations.hasAlignItems &&
+        alignItemsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasAlignItems = true;
+      own.alignItems = rule.declarations.alignItems;
+    }
+    if (rule.declarations.hasGap && gapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGap = true;
+      own.gap = rule.declarations.gap;
     }
   }
 

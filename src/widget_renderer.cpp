@@ -45,7 +45,29 @@ struct LayoutState {
   // testing. Left null for the table measurement/dry-run passes - their
   // coordinates are cell-relative, not real screen positions.
   std::vector<BoxRegion> *boxRegions = nullptr;
+
+  // Set (on a widget's own fresh, per-item LayoutState) by
+  // RenderFlexContainer below, right before rendering one flex item -
+  // every WidgetKind's handler normally adds kBlockSpacing before/after
+  // its own box (spacing between ordinary block-flow siblings), but a
+  // flex item is spaced from its siblings by `gap` instead, so that
+  // widget's *own* handler needs to skip it just this once. See
+  // ConsumeSuppressBlockSpacing.
+  bool suppressBlockSpacing = false;
 };
+
+// Reads and resets suppressBlockSpacing - every handler that adds
+// kBlockSpacing calls this once, at the very top of its own Render(),
+// so the suppression only ever applies to that one widget's own outer
+// spacing, never propagating to whatever it goes on to recurse into
+// (e.g. a flex item that's itself an ordinary block container still
+// spaces *its own* children normally - only its own top/bottom spacing,
+// relative to its flex siblings, is suppressed).
+bool ConsumeSuppressBlockSpacing(LayoutState &state) {
+  bool suppress = state.suppressBlockSpacing;
+  state.suppressBlockSpacing = false;
+  return suppress;
+}
 
 void FlushLine(LayoutState &state) {
   if (state.pendingLine.empty()) {
@@ -202,6 +224,219 @@ void RenderContentAt(const Widget &widget, IRenderer &renderer, float x,
   FlushLine(state);
 }
 
+// Like MeasureNaturalWidth/MeasureHeightAt above, but measures `widget`
+// itself as a single item (dispatching it through RenderWidget exactly
+// once), not its children collectively - what a flex item needs (see
+// RenderFlexContainer below): a flex child can be any widget kind (a
+// <div>, but just as easily a <span>/<p>/<button>/kText leaf), not
+// reliably a container whose own content lives in `.children` the way a
+// kTableCell always is (which is what lets TableWidgetHandler get away
+// with MeasureNaturalWidth/MeasureHeightAt directly on each cell).
+float MeasureItemNaturalWidth(const Widget &widget, const IRenderer &renderer,
+                               float cap) {
+  NullRenderer nullRenderer(renderer);
+  LayoutState dryRun{nullRenderer, 0.0f, 0.0f, cap};
+  // Measuring a flex item's *natural* size must see the same suppressed
+  // spacing the real paint call will use (see RenderFlexContainer) -
+  // otherwise every item's measured size would include a phantom extra
+  // kBlockSpacing above and below it that never actually renders,
+  // inflating the whole container's cross size for nothing.
+  dryRun.suppressBlockSpacing = true;
+  RenderWidget(widget, dryRun);
+  FlushLine(dryRun);
+  return nullRenderer.naturalWidth();
+}
+
+float MeasureItemHeightAt(const Widget &widget, const IRenderer &renderer,
+                           float width) {
+  NullRenderer nullRenderer(renderer);
+  LayoutState dryRun{nullRenderer, 0.0f, 0.0f, width};
+  dryRun.suppressBlockSpacing = true; // See MeasureItemNaturalWidth above.
+  RenderWidget(widget, dryRun);
+  FlushLine(dryRun);
+  return dryRun.y;
+}
+
+// A first, deliberately minimal flexbox: no flex-wrap, no flex-grow/
+// shrink/basis (every item just uses its own natural measured size) and
+// no `order` (items lay out in DOM order). Two-pass, reusing the same
+// NullRenderer dry-run idiom TableWidgetHandler already established for
+// its own grid columns/rows: measure every child's natural size first,
+// then distribute/position/paint. Lays children out into state.x/
+// state.y/state.maxWidth (the caller - ContainerWidgetHandler::Render -
+// has already applied this container's own margin/padding/width to
+// those by the time it calls this), advancing state.y by however much
+// cross-axis (row) or main-axis (column) extent the children consumed -
+// the same contract the ordinary block-flow child loop it replaces has.
+void RenderFlexContainer(const Widget &widget, LayoutState &state) {
+  int n = widget.childCount;
+  if (n == 0) {
+    return;
+  }
+  bool isRow = widget.flexDirection == FlexDirection::kRow;
+  float gap = widget.gap;
+
+  // Pass 1: each child's own natural size, in isolation - width capped
+  // to this container's available width (a flex item's text still
+  // wraps against the container, same as any other child would), height
+  // measured at that natural width.
+  std::vector<float> naturalWidth(n);
+  std::vector<float> naturalHeight(n);
+  for (int i = 0; i < n; ++i) {
+    naturalWidth[i] =
+        MeasureItemNaturalWidth(widget.children[i], state.renderer, state.maxWidth);
+    naturalHeight[i] =
+        MeasureItemHeightAt(widget.children[i], state.renderer, naturalWidth[i]);
+  }
+
+  std::vector<float> mainSize(n);
+  std::vector<float> crossSize(n);
+  for (int i = 0; i < n; ++i) {
+    mainSize[i] = isRow ? naturalWidth[i] : naturalHeight[i];
+    crossSize[i] = isRow ? naturalHeight[i] : naturalWidth[i];
+  }
+
+  float totalMain = static_cast<float>(n - 1) * gap;
+  for (float m : mainSize) {
+    totalMain += m;
+  }
+
+  // Row always has a fixed main-axis budget (state.maxWidth); column's
+  // main axis (height) is intrinsic here - a caller-supplied explicit
+  // CSS height (Part 2's box model) is only resolved by
+  // ContainerWidgetHandler::Render *after* this function returns, so a
+  // column flex container's justify-content has nothing to distribute
+  // against yet and degenerates to flex-start (a documented interaction
+  // between Part 2 and Part 3, not a bug).
+  bool hasMainBudget = isRow;
+  float mainAxisAvailable = isRow ? state.maxWidth : totalMain;
+  float freeSpace = hasMainBudget ? std::max(0.0f, mainAxisAvailable - totalMain) : 0.0f;
+
+  float leadingOffset = 0.0f;
+  float betweenGap = gap;
+  if (hasMainBudget) {
+    switch (widget.justifyContent) {
+    case JustifyContent::kFlexStart:
+      break;
+    case JustifyContent::kCenter:
+      leadingOffset = freeSpace / 2.0f;
+      break;
+    case JustifyContent::kFlexEnd:
+      leadingOffset = freeSpace;
+      break;
+    case JustifyContent::kSpaceBetween:
+      if (n > 1) {
+        betweenGap = gap + freeSpace / static_cast<float>(n - 1);
+      }
+      break;
+    }
+  }
+
+  // The container's own cross-axis size: row's cross axis (height) is
+  // intrinsic - the tallest child (stretch grows every child to that
+  // same height, so it can't change the max); column's cross axis
+  // (width) is simply the space available.
+  float containerCrossSize;
+  if (isRow) {
+    containerCrossSize = 0.0f;
+    for (float c : crossSize) {
+      containerCrossSize = std::max(containerCrossSize, c);
+    }
+  } else {
+    containerCrossSize = state.maxWidth;
+  }
+
+  float mainCursor = leadingOffset;
+  for (int i = 0; i < n; ++i) {
+    float itemMain = mainSize[i];
+    float itemCross = crossSize[i];
+    float itemRenderWidth = naturalWidth[i];
+    // A cheap shallow copy (Widget owns no resources - same POD-like
+    // shape its own doc comment describes) - stretch, when it applies,
+    // imposes a size the child doesn't have of its own by overriding
+    // hasHeight/height on this copy before rendering it, rather than
+    // mutating the real (const, possibly shared/static) tree.
+    Widget effectiveChild = widget.children[i];
+
+    // Real CSS: stretch only takes effect when the item has no explicit
+    // cross-size of its own - one that does keeps its own size, and
+    // (this v1's simplification) is positioned as if flex-start rather
+    // than getting center/flex-end's usual offset treatment too.
+    if (widget.alignItems == AlignItems::kStretch) {
+      if (isRow && !effectiveChild.hasHeight) {
+        // Cross axis is height - unlike width (which every container
+        // child already fills via state.maxWidth by default, see the
+        // column branch below), nothing here otherwise lets a parent
+        // impose a height on a child, so this is the one case that
+        // actually needs the widget-copy override above.
+        effectiveChild.hasHeight = true;
+        effectiveChild.height = containerCrossSize;
+        itemCross = containerCrossSize;
+      } else if (!isRow && !effectiveChild.hasWidth) {
+        // Cross axis is width - a container child with no explicit
+        // width of its own already fills whatever maxWidth its own
+        // LayoutState gets (the same "block children fill their
+        // container by default" rule this renderer already has), so
+        // just handing it containerCrossSize as childState's maxWidth
+        // below achieves stretch with no widget mutation needed - but
+        // height DOES depend on width (wrapping), so it needs
+        // re-measuring at that width, unlike the row case above.
+        itemRenderWidth = containerCrossSize;
+        itemCross = containerCrossSize;
+        naturalHeight[i] =
+            MeasureItemHeightAt(effectiveChild, state.renderer, itemRenderWidth);
+        itemMain = naturalHeight[i];
+      }
+    }
+
+    float crossOffset = 0.0f;
+    if (widget.alignItems == AlignItems::kCenter) {
+      crossOffset = (containerCrossSize - itemCross) / 2.0f;
+    } else if (widget.alignItems == AlignItems::kFlexEnd) {
+      crossOffset = containerCrossSize - itemCross;
+    }
+
+    float childX = isRow ? state.x + mainCursor : state.x + crossOffset;
+    float childY = isRow ? state.y + crossOffset : state.y + mainCursor;
+
+    // A fresh LayoutState per item - flex items are always individually
+    // positioned boxes, never inline-flowed text sharing one line the
+    // way ordinary block-flow siblings can be. boxRegions must be
+    // propagated explicitly: LayoutState's own default is nullptr (see
+    // RenderContentAt above, which does *not* propagate it - a
+    // pre-existing gap for table cells, not repeated here).
+    LayoutState childState{state.renderer, childX, childY, itemRenderWidth};
+    childState.boxRegions = state.boxRegions;
+    childState.suppressBlockSpacing = true;
+    RenderWidget(effectiveChild, childState);
+    FlushLine(childState);
+
+    mainCursor += itemMain + betweenGap;
+  }
+  mainCursor -= betweenGap; // Undo the trailing gap added after the last item.
+
+  if (isRow) {
+    state.y += containerCrossSize;
+  } else {
+    state.y += mainCursor;
+  }
+}
+
+// Like MeasureHeightAt, but for a flex container's own background/
+// border box: MeasureHeightAt just loops children in plain block flow,
+// oblivious to display:flex (gap, row-vs-column, everything
+// RenderFlexContainer actually does) - a flex container's own box needs
+// its height measured the same way it actually gets laid out, not as if
+// it were an ordinary block-flow parent.
+float MeasureFlexHeightAt(const Widget &widget, const IRenderer &renderer,
+                           float width) {
+  NullRenderer nullRenderer(renderer);
+  LayoutState dryRun{nullRenderer, 0.0f, 0.0f, width};
+  RenderFlexContainer(widget, dryRun);
+  FlushLine(dryRun);
+  return dryRun.y;
+}
+
 // One WidgetHandler subclass per WidgetKind. The Widget tree itself stays
 // a plain tagged struct (so it can live as static const data with zero
 // runtime construction) - only the *behavior* per kind is isolated here.
@@ -234,12 +469,18 @@ public:
 class RuleWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
-    state.y += kBlockSpacing;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
     Color color = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
     state.renderer.DrawRect(state.x, state.y, state.maxWidth, kRuleHeight,
                              widget.borderWidth, color);
-    state.y += kRuleHeight + kBlockSpacing;
+    state.y += kRuleHeight;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
   }
 };
 
@@ -248,9 +489,11 @@ public:
 // same way a text kBox does, and advances state.y - the same
 // flush-before/register-a-hit-rect/advance-y shape BoxWidgetHandler
 // itself follows for kText, just with no label/border/caret to draw.
-void RenderCheckable(const Widget &widget, LayoutState &state) {
+void RenderCheckable(const Widget &widget, LayoutState &state, bool suppressSpacing) {
   FlushLine(state);
-  state.y += kBlockSpacing;
+  if (!suppressSpacing) {
+    state.y += kBlockSpacing;
+  }
 
   Color borderColor = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
   const float cx = state.x + kCheckableSize / 2.0f;
@@ -281,14 +524,18 @@ void RenderCheckable(const Widget &widget, LayoutState &state) {
         {widget.userData, state.x, state.y, kCheckableSize, kCheckableSize});
   }
 
-  state.y += kCheckableSize + kBlockSpacing;
+  state.y += kCheckableSize;
+  if (!suppressSpacing) {
+    state.y += kBlockSpacing;
+  }
 }
 
 class BoxWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     if (widget.boxKind != BoxKind::kText) {
-      RenderCheckable(widget, state);
+      RenderCheckable(widget, state, suppressSpacing);
       return;
     }
 
@@ -302,7 +549,9 @@ public:
     const float width = std::max(kBoxMinWidth, textWidth + 2.0f * kBoxPadding);
     const float height = lineHeight + 2.0f * kBoxPadding;
 
-    state.y += kBlockSpacing;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
 
     const float textX = state.x + kBoxPadding;
     const float textY = state.y + kBoxPadding;
@@ -354,7 +603,10 @@ public:
           {widget.userData, state.x, state.y, width, height});
     }
 
-    state.y += height + kBlockSpacing;
+    state.y += height;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
   }
 };
 
@@ -366,6 +618,7 @@ public:
 class LinkWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
 
     const std::string label = widget.text != nullptr ? widget.text : "";
@@ -373,7 +626,9 @@ public:
     const float textWidth =
         state.renderer.MeasureText(label, widget.fontSize, widget.bold);
 
-    state.y += kBlockSpacing;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
 
     if (!label.empty()) {
       Color color = widget.hasColor ? widget.color : kDefaultTextColor;
@@ -388,7 +643,10 @@ public:
           {widget.userData, state.x, state.y, textWidth, lineHeight});
     }
 
-    state.y += lineHeight + kBlockSpacing;
+    state.y += lineHeight;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
   }
 };
 
@@ -400,6 +658,7 @@ public:
 class LabelWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
 
     const std::string label = widget.text != nullptr ? widget.text : "";
@@ -407,7 +666,9 @@ public:
     const float textWidth =
         state.renderer.MeasureText(label, widget.fontSize, widget.bold);
 
-    state.y += kBlockSpacing;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
 
     if (!label.empty()) {
       Color color = widget.hasColor ? widget.color : kDefaultTextColor;
@@ -420,13 +681,17 @@ public:
           {widget.userData, state.x, state.y, textWidth, lineHeight});
     }
 
-    state.y += lineHeight + kBlockSpacing;
+    state.y += lineHeight;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
   }
 };
 
 class ImageWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
 
     // A percentage width can only be resolved here, against the current
@@ -435,11 +700,16 @@ public:
                                ? state.maxWidth * widget.imageWidth / 100.0f
                                : widget.imageWidth;
 
-    state.y += kBlockSpacing;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
     float height = state.renderer.DrawImage(
         widget.imageData, widget.imageDataSize, state.x, state.y,
         state.maxWidth, explicitWidth, widget.imageHeight);
-    state.y += height + kBlockSpacing;
+    state.y += height;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
   }
 };
 
@@ -528,6 +798,7 @@ private:
 class TableWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &table, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
 
     if (table.text != nullptr && table.text[0] != '\0') {
@@ -645,7 +916,9 @@ public:
     }
     float tableHeight = y;
 
-    state.y += kBlockSpacing;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
 
     for (int r = 0; r < table.childCount; ++r) {
       for (const PlacedCell &placed : grid.row(r)) {
@@ -677,46 +950,121 @@ public:
       }
     }
 
-    state.y += tableHeight + kBlockSpacing;
+    state.y += tableHeight;
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
   }
 };
 
 class ContainerWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
+
     // Only block-level containers break inline flow; inline ones (span,
-    // a, ...) let their children keep sharing the parent's current line.
-    if (widget.blockSpacing) {
-      FlushLine(state);
+    // a, ...) let their children keep sharing the parent's current line
+    // - and never apply box-model properties either: they have no width
+    // of their own to inset/size against in this flow model, same
+    // reasoning the background/border-box painting below already used
+    // before box-model properties existed.
+    if (!widget.blockSpacing) {
+      for (int i = 0; i < widget.childCount; ++i) {
+        RenderWidget(widget.children[i], state);
+      }
+      return;
+    }
+
+    FlushLine(state);
+    if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }
 
-    // A background/border wraps the container's own content box - only
-    // meaningful for block-level containers (div, p, ...): an inline one
-    // (span) shares its parent's line and has no width of its own to
-    // paint a tight background against in this flow model, so it's left
-    // unpainted rather than incorrectly spanning the full page width.
-    if (widget.blockSpacing &&
-        (widget.hasBackgroundColor || widget.hasBorderColor)) {
-      float contentHeight =
-          MeasureHeightAt(widget, state.renderer, state.maxWidth);
+    // Margin: outside the border box, insets from whatever space this
+    // container inherited from its own parent - resolved first, before
+    // background/border is ever painted.
+    float boxX = state.x + widget.marginLeft;
+    float boxMaxWidth =
+        std::max(0.0f, state.maxWidth - widget.marginLeft - widget.marginRight);
+    state.y += widget.marginTop;
+
+    // Explicit CSS width clamps/overrides the natural content width. A
+    // percentage resolves against state.maxWidth (the space this
+    // container's *parent* handed it, before this container's own
+    // margin - real CSS's containing-block semantics: this element's
+    // own margin doesn't change what "100%" means for its width), but
+    // the final box never gets to exceed what margin actually left
+    // available - this flow model has no scroll-within-content to fall
+    // back on the way real CSS's overflow would.
+    if (widget.hasWidth) {
+      float resolvedWidth = widget.widthIsPercent
+                                 ? state.maxWidth * widget.width / 100.0f
+                                 : widget.width;
+      boxMaxWidth = std::min(boxMaxWidth, std::max(0.0f, resolvedWidth));
+    }
+
+    bool isFlex = widget.hasDisplay && widget.display == DisplayMode::kFlex;
+
+    // A background/border wraps the container's own (margin-adjusted,
+    // width-clamped) border box.
+    if (widget.hasBackgroundColor || widget.hasBorderColor) {
+      float boxHeight;
+      if (widget.hasHeight) {
+        boxHeight = widget.height;
+      } else if (isFlex) {
+        boxHeight = MeasureFlexHeightAt(widget, state.renderer, boxMaxWidth);
+      } else {
+        boxHeight = MeasureHeightAt(widget, state.renderer, boxMaxWidth);
+      }
       if (widget.hasBackgroundColor) {
-        state.renderer.DrawFilledRect(state.x, state.y, state.maxWidth,
-                                       contentHeight, widget.backgroundColor);
+        state.renderer.DrawFilledRect(boxX, state.y, boxMaxWidth, boxHeight,
+                                       widget.backgroundColor);
       }
       if (widget.hasBorderColor) {
-        state.renderer.DrawRect(state.x, state.y, state.maxWidth,
-                                 contentHeight, widget.borderWidth,
-                                 widget.borderColor);
+        state.renderer.DrawRect(boxX, state.y, boxMaxWidth, boxHeight,
+                                 widget.borderWidth, widget.borderColor);
       }
     }
 
-    for (int i = 0; i < widget.childCount; ++i) {
-      RenderWidget(widget.children[i], state);
+    // Padding: inside the border box. Children get a further-inset x/
+    // maxWidth for the duration of this loop only - restored right
+    // after, so a widget later in the *parent's* own sibling loop isn't
+    // left seeing this container's insets.
+    float savedX = state.x;
+    float savedMaxWidth = state.maxWidth;
+    state.x = boxX + widget.paddingLeft;
+    state.maxWidth =
+        std::max(0.0f, boxMaxWidth - widget.paddingLeft - widget.paddingRight);
+    state.y += widget.paddingTop;
+
+    float contentTopY = state.y;
+    if (isFlex) {
+      RenderFlexContainer(widget, state);
+    } else {
+      for (int i = 0; i < widget.childCount; ++i) {
+        RenderWidget(widget.children[i], state);
+      }
+    }
+    FlushLine(state);
+
+    // An explicit height that's taller than what the content actually
+    // needed still reserves the full height (matching real CSS: content
+    // shorter than an explicit height doesn't shrink the box) - but
+    // never *shrinks* state.y back below where the content naturally
+    // reached, matching real CSS's overflow: visible default (content
+    // taller than an explicit height spills past it rather than being
+    // clipped, so whatever comes next still starts after the content,
+    // not after the too-small explicit height).
+    if (widget.hasHeight) {
+      state.y = std::max(state.y, contentTopY + widget.height);
     }
 
-    if (widget.blockSpacing) {
-      FlushLine(state);
+    state.y += widget.paddingBottom;
+    state.x = savedX;
+    state.maxWidth = savedMaxWidth;
+
+    state.y += widget.marginBottom;
+    if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }
   }

@@ -12,6 +12,19 @@ struct Color {
   unsigned char b = 0;
 };
 
+// A first, deliberately minimal flexbox (see widget_renderer.cpp's
+// RenderFlexContainer, and css.h's Declarations, which resolves markup's
+// display/flex-direction/justify-content/align-items down to these): no
+// flex-wrap, no flex-grow/shrink/basis (every item just uses its natural
+// measured size) - kContainer only, same as the rest of the box model.
+// Lives here rather than in css.h because css.h already includes this
+// header (for Color, above) to avoid a circular include - not the other
+// way around.
+enum class DisplayMode { kBlock, kFlex };
+enum class FlexDirection { kRow, kColumn };
+enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
+enum class AlignItems { kFlexStart, kCenter, kFlexEnd, kStretch };
+
 enum class WidgetKind {
   kContainer,  // Groups children (div, span, body, ...); no text of its own.
   kText,       // A leaf that paints `text` at `fontSize` (word-wrapped).
@@ -126,6 +139,42 @@ struct Widget {
   bool hasBorderColor = false;
   Color borderColor;
   float borderWidth = 1.0f;
+
+  // Box model (css.h's Declarations, same widget-build-time resolution)
+  // - kContainer only for now (see widget_renderer.cpp's
+  // ContainerWidgetHandler). Unlike Declarations, padding/margin carry
+  // no hasXxx flag here: by the time BuildWidgetTree copies the
+  // cascade's resolved Declarations onto a Widget, "not set by any
+  // rule" has already resolved to 0 - exactly the inset WidgetRenderer
+  // should add for an unset side, no ambiguity left to preserve.
+  // width/height keep their hasXxx flag since 0 is never a substitute
+  // for "use the natural/inherited size instead".
+  bool hasWidth = false;
+  float width = 0.0f;
+  bool widthIsPercent = false;
+  bool hasHeight = false;
+  float height = 0.0f;
+  float paddingTop = 0.0f;
+  float paddingRight = 0.0f;
+  float paddingBottom = 0.0f;
+  float paddingLeft = 0.0f;
+  float marginTop = 0.0f;
+  float marginRight = 0.0f;
+  float marginBottom = 0.0f;
+  float marginLeft = 0.0f;
+
+  // Flexbox - kContainer only. Only hasDisplay/display need a presence
+  // flag (whether display:flex is even active); flexDirection/
+  // justifyContent/alignItems/gap's own defaults (kRow/kStretch/0) are
+  // already the right value to fall back to when a rule/inline style
+  // never mentioned them - same reasoning padding/margin's Widget-level
+  // fields above don't need hasXxx either.
+  bool hasDisplay = false;
+  DisplayMode display = DisplayMode::kBlock;
+  FlexDirection flexDirection = FlexDirection::kRow;
+  JustifyContent justifyContent = JustifyContent::kFlexStart;
+  AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
+  float gap = 0.0f;
 };
 
 } // namespace artisan

@@ -329,24 +329,55 @@ A `<style>` block anywhere in a page's markup can style elements by tag,
 </div>
 ```
 
-Five properties are supported: `color`, `background-color`, `font-weight`
-(`bold`/`normal`), `border-color`, `border-width`. Colors accept `#rgb`,
-`#rrggbb`, `rgb(r, g, b)`, or a common keyword (`red`, `navy`, `gray`,
-...). Cascade and specificity work the way you'd expect - `id` beats
-`class` beats `tag`, later rules win ties, and each property resolves
-independently (a tag rule's `color` and a later class rule's
-`background-color` on the same element both apply). `color`/`font-weight`
-inherit to children that don't set their own; `background-color`/`border`
-never do.
+Selectors can chain with combinators - `div p` (descendant), `div > p`
+(child), `a + b` (adjacent sibling), `a ~ b` (general sibling) - and a
+compound can carry attribute selectors (`[href]`, `[type="text"]`) and
+structural pseudo-classes (`:first-child`, `:last-child`,
+`:nth-child(2)`, `:nth-child(even)`/`:nth-child(odd)` - literal
+integers and the even/odd keywords only, not the full `an+b` algebra).
+Comma-separated lists (`h1, .card`) work the same way in
+`querySelector`/`querySelectorAll`/`matches`/`closest` as they do in a
+`<style>` block. Not supported: interactive pseudo-classes (`:hover`,
+`:focus` - these would need live mouse/focus state threaded into the
+cascade, a bigger change than matching structure) and anything beyond
+this bounded grammar (`:nth-of-type`, `~=`/`^=`/`$=` attribute
+operators, etc).
 
-A few things this doesn't do: no combinators (`div p`, `div > p`), no
-pseudo-classes/attribute selectors, and `<style>` only works inside
-`<body>` - a `<head><style>` never reaches the document at all, since
-`<head>` itself is discarded (see `html_document.cpp`). There's also no
-shared stylesheet across pages - each page's markup is compiled
-independently, so a `<style>` block meant for every page needs pasting
-into each one (or turned into a `components`-style fragment, see
-`artisan-cli component`).
+Properties: `color`, `background-color`, `font-weight` (`bold`/
+`normal`), `border-color`, `border-width`, and a first box model/
+flexbox pass - `width` (px or `%`), `height` (px only), `padding`/
+`margin` (single-value shorthand or the four `-top`/`-right`/`-bottom`/
+`-left` longhands), and, for `display: flex` containers,
+`flex-direction` (`row`/`column`), `justify-content` (`flex-start`/
+`center`/`flex-end`/`space-between`), `align-items` (`flex-start`/
+`center`/`flex-end`/`stretch` - `stretch` is the default, matching real
+CSS), and `gap`. Colors accept `#rgb`, `#rrggbb`, `rgb(r, g, b)`, or a
+small set of common keywords (`red`, `navy`, `gray`, ... - not the full
+~150-name CSS list, see `ParseColor` in `css.cpp` for the exact set).
+Cascade and specificity work the way you'd expect - `id` beats `class`
+beats `tag`, a combinator chain's specificity sums across every compound
+in it, later rules win ties, and each property resolves independently.
+`color`/`font-weight` inherit to children that don't set their own;
+every other property (including the whole box model/flexbox set) never
+does.
+
+The box model and flexbox are `kContainer`-only for now (a `<div>`,
+`<p>`, `<span>`, etc. - not yet `<input>`/`<table>`/text directly).
+Flexbox itself is deliberately minimal: no `flex-wrap`, no `flex-grow`/
+`flex-shrink`/`flex-basis` (every item uses its own natural size), no
+CSS Grid - each is a meaningfully bigger increment on its own, not
+attempted here. No margin collapsing (adjacent vertical margins simply
+sum, rather than collapsing to the larger one). Explicit `width`/
+`height` clamp to whatever space is actually available rather than
+overflowing/scrolling - there's no scroll-within-content concept beyond
+the page-level scroll `main.cpp` already has.
+
+`<style>` only works inside `<body>` - a `<head><style>` never reaches
+the document at all, since `<head>` itself is discarded (see
+`html_document.cpp`). There's also no shared stylesheet across pages -
+each page's markup is compiled independently, so a `<style>` block
+meant for every page needs pasting into each one (or turned into a
+`components`-style fragment, see `artisan-cli component`).
 
 ## Using forms
 
