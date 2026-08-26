@@ -114,10 +114,19 @@ jobs:
           cp -r ~/.aptly/public/. site/
           cp pubkey.gpg site/pubkey.gpg
 
+      # Named per run *attempt*, not just per run: a rerun (whether of just
+      # this job or the whole run) doesn't replace the previous attempt's
+      # "github-pages" artifact, it adds a second one alongside it under
+      # the same run ID - and deploy-pages fetches by run, not by attempt,
+      # so a rerun with the default fixed name fails with "Multiple
+      # artifacts named github-pages were unexpectedly found".
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
