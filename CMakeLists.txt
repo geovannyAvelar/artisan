@@ -176,16 +176,18 @@ if(ARTISAN_APP_GO_SOURCE)
     )
     add_custom_target(artisan_go_archive DEPENDS "${GENERATED_GO_ARCHIVE}")
 else()
-    # No Go app configured - ArtisanSetupApp (and the two callback hooks
-    # node_c_api.cpp's GoCallback always references, whether or not
-    # anything ends up calling ArtisanNodeSetOnClick) still need to exist
-    # so the app links, the same way GetAppScript() above always exists
-    # whether or not a script was configured.
+    # No Go app configured - ArtisanSetupApp (and the three callback
+    # hooks node_c_api.cpp's GoCallback always references, whether or
+    # not anything ends up calling ArtisanNodeSetOnClick/
+    # RequestAnimationFrame) still need to exist so the app links, the
+    # same way GetAppScript() above always exists whether or not a
+    # script was configured.
     file(WRITE "${GENERATED_GO_STUB_CPP}"
         "#include \"node_c_api.h\"\n"
         "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n"
         "extern \"C\" void ArtisanGoInvokeHandler(uintptr_t) {}\n"
-        "extern \"C\" void ArtisanGoReleaseHandler(uintptr_t) {}\n")
+        "extern \"C\" void ArtisanGoReleaseHandler(uintptr_t) {}\n"
+        "extern \"C\" void ArtisanGoInvokeAnimationFrameHandler(uintptr_t, double) {}\n")
 endif()
 
 # A project using Go (or one with no native app code at all) has nothing

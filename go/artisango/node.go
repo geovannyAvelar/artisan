@@ -439,9 +439,53 @@ func (n Node) SetData(name, value string) {
 	C.ArtisanNodeSetData(n.ptr, cname, cvalue)
 }
 
+// TimerHandle/AnimationFrameHandle identify a scheduled callback, for a
+// later ClearTimer/CancelAnimationFrame call - the ids
+// TimerQueue/AnimationFrameQueue (timer_queue.h/animation_frame_queue.h)
+// themselves hand back, not a cgo.Handle (unlike ListenerHandle above,
+// there's no "same fn" identity question here: only one call ever
+// schedules a given timer/frame).
+type TimerHandle int
+type AnimationFrameHandle int
+
+// SetTimeout schedules fn to run once, after roughly delayMs.
+func SetTimeout(fn func(), delayMs float64) TimerHandle {
+	handle := cgo.NewHandle(fn)
+	return TimerHandle(C.ArtisanSetTimeout(C.uintptr_t(handle), C.double(delayMs)))
+}
+
+// SetInterval schedules fn to run repeatedly, roughly every delayMs,
+// until ClearTimer(id).
+func SetInterval(fn func(), delayMs float64) TimerHandle {
+	handle := cgo.NewHandle(fn)
+	return TimerHandle(C.ArtisanSetInterval(C.uintptr_t(handle), C.double(delayMs)))
+}
+
+// ClearTimer cancels a SetTimeout or SetInterval - an id that's already
+// fired (a one-shot SetTimeout) or already cancelled is a safe no-op.
+func ClearTimer(id TimerHandle) {
+	C.ArtisanClearTimer(C.int(id))
+}
+
+// RequestAnimationFrame runs fn once, before the next repaint, with a
+// timestamp (the same clock the render loop itself uses) - the normal
+// way to animate is for fn to call RequestAnimationFrame again itself,
+// which schedules for the *next* repaint, never the current one.
+func RequestAnimationFrame(fn func(timestampMs float64)) AnimationFrameHandle {
+	handle := cgo.NewHandle(fn)
+	return AnimationFrameHandle(C.ArtisanRequestAnimationFrame(C.uintptr_t(handle)))
+}
+
+// CancelAnimationFrame cancels a still-pending RequestAnimationFrame - an
+// id that's already fired or already cancelled is a safe no-op.
+func CancelAnimationFrame(id AnimationFrameHandle) {
+	C.ArtisanCancelAnimationFrame(C.int(id))
+}
+
 // ArtisanGoInvokeHandler is called from C++ (node_c_api.cpp's
 // GoCallback) when a node registered via SetOnClick or AddEventListener
-// fires - not meant to be called directly from Go app code.
+// fires, or a SetTimeout/SetInterval comes due - not meant to be called
+// directly from Go app code.
 //
 //export ArtisanGoInvokeHandler
 func ArtisanGoInvokeHandler(handle C.uintptr_t) {
@@ -449,10 +493,21 @@ func ArtisanGoInvokeHandler(handle C.uintptr_t) {
 	fn()
 }
 
+// ArtisanGoInvokeAnimationFrameHandler is called from C++ when a
+// RequestAnimationFrame handle fires - separate from
+// ArtisanGoInvokeHandler above because it carries a timestamp argument;
+// not meant to be called directly from Go app code.
+//
+//export ArtisanGoInvokeAnimationFrameHandler
+func ArtisanGoInvokeAnimationFrameHandler(handle C.uintptr_t, timestampMs C.double) {
+	fn := cgo.Handle(handle).Value().(func(float64))
+	fn(float64(timestampMs))
+}
+
 // ArtisanGoReleaseHandler is called from C++ when a handler is replaced
 // or its node destroyed, to release the handle SetOnClick/
-// AddEventListener created - not meant to be called directly from Go app
-// code.
+// AddEventListener/SetTimeout/SetInterval/RequestAnimationFrame created -
+// not meant to be called directly from Go app code.
 //
 //export ArtisanGoReleaseHandler
 func ArtisanGoReleaseHandler(handle C.uintptr_t) {

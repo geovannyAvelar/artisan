@@ -198,6 +198,21 @@ char *ArtisanNodeGetData(ArtisanNode *node, const char *name);
 void ArtisanNodeSetData(ArtisanNode *node, const char *name,
                          const char *value);
 
+// setTimeout/setInterval/requestAnimationFrame for a Go app - see
+// TimerQueue (timer_queue.h) and AnimationFrameQueue
+// (animation_frame_queue.h). A no-op (returns 0, an id no real timer/
+// frame ever has - both queues' ids start at 1) if called before the
+// document is ready to schedule into (see node_c_api_bridge.h's
+// SetGoTimerContext, called by main.cpp before ArtisanSetupApp runs -
+// this should never actually happen from within SetupApp itself).
+// ArtisanClearTimer cancels either a setTimeout or a setInterval id -
+// same single entry point real clearTimeout/clearInterval each are.
+int ArtisanSetTimeout(uintptr_t handle, double delayMs);
+int ArtisanSetInterval(uintptr_t handle, double delayMs);
+void ArtisanClearTimer(int id);
+int ArtisanRequestAnimationFrame(uintptr_t handle);
+void ArtisanCancelAnimationFrame(int id);
+
 // Releases a string ArtisanNodeTagName/TextContent/GetAttribute returned.
 void ArtisanFreeString(char *str);
 
@@ -217,6 +232,13 @@ void ArtisanSetupApp(ArtisanNode *document);
 // configured, since nothing can produce a handle in that case.
 void ArtisanGoInvokeHandler(uintptr_t handle);
 void ArtisanGoReleaseHandler(uintptr_t handle);
+
+// Implemented by the Go archive - called from a
+// requestAnimationFrame handle's registered callback. Distinct from
+// ArtisanGoInvokeHandler because rAF passes a timestamp; every other Go
+// handler (SetOnClick/AddEventListener/setTimeout/setInterval) stays
+// zero-arg and goes through ArtisanGoInvokeHandler above.
+void ArtisanGoInvokeAnimationFrameHandler(uintptr_t handle, double timestampMs);
 
 #ifdef __cplusplus
 }

@@ -4,6 +4,7 @@
 #include "dom_node.h"
 #include "js_engine.h"
 #include "node_c_api.h"
+#include "node_c_api_bridge.h"
 #include "skia_renderer.h"
 #include "widget.h"
 #include "widget_renderer.h"
@@ -325,10 +326,11 @@ int main(int argc, char *argv[]) {
     jsEngine.reset();
 
     document = page->build();
-    artisan::SetupApp(*document);
-    ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     timerQueue = TimerQueue{};
     animationFrameQueue = AnimationFrameQueue{};
+    artisan::SetGoTimerContext(timerQueue, animationFrameQueue);
+    artisan::SetupApp(*document);
+    ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue,
                                                      animationFrameQueue);
     std::string appScript = artisan::GetAppScript();

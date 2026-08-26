@@ -207,6 +207,19 @@ called `preventDefault()` (JS-side only - a Go listener's `fn` is
 zero-arg, with no way to call it itself) - see `go/artisango/node.go`
 and the C ABI it wraps, `include/node_c_api.h`.
 
+Package-level (not node-scoped, like `CreateElement`):
+`artisango.SetTimeout(fn, delayMs)`/`SetInterval(fn, delayMs)`/
+`ClearTimer(handle)`, and `RequestAnimationFrame(fn)`/
+`CancelAnimationFrame(handle)` (`fn` gets a timestamp; the normal way to
+animate is for `fn` to call `RequestAnimationFrame` again itself, which
+schedules for the *next* repaint, never the current one) - the same
+`TimerQueue`/`AnimationFrameQueue` JS's `setTimeout`/
+`requestAnimationFrame` schedule into. `SetTimeout`/`SetInterval`/
+`RequestAnimationFrame` each return a handle for
+`ClearTimer`/`CancelAnimationFrame` - Go func values aren't comparable,
+so there's no "pass the same `fn` back" the way JS's `clearTimeout`
+conceptually could.
+
 `artisango.CreateElement(tag)`/`CreateTextNode(text)` create a detached
 node; `parent.AppendChild(child)`/`parent.InsertBefore(child, before)`
 attach it. A created (or removed, via `RemoveChild`/`Remove()`) node

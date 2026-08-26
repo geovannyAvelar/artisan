@@ -2,6 +2,9 @@
 
 #include "css.h"
 #include "dom_node.h"
+#include "node_c_api_bridge.h"
+
+#include <SDL2/SDL.h>
 
 #include <algorithm>
 #include <cctype>
@@ -54,6 +57,9 @@ public:
 
   void operator()() const { ArtisanGoInvokeHandler(*handle_); }
   void operator()(const artisan::Event &) const { ArtisanGoInvokeHandler(*handle_); }
+  void operator()(double timestampMs) const {
+    ArtisanGoInvokeAnimationFrameHandler(*handle_, timestampMs);
+  }
 
   // Whether `handle` is the exact value this GoCallback was constructed
   // with - what ArtisanNodeRemoveEventListener's "same handler" matching
@@ -149,7 +155,24 @@ std::unique_ptr<Node> TakePending(Node *child) {
   return owned;
 }
 
+// What ArtisanSetTimeout/SetInterval/RequestAnimationFrame schedule
+// into - set by SetGoTimerContext (node_c_api_bridge.h) before
+// ArtisanSetupApp runs, same "one instance at a time" precedent
+// g_pendingNodes above already establishes. nullptr (the pre-SetupApp
+// default) makes those three functions safe, id-0-returning no-ops.
+artisan::TimerQueue *g_timerQueue = nullptr;
+artisan::AnimationFrameQueue *g_animationFrames = nullptr;
+
 } // namespace
+
+namespace artisan {
+
+void SetGoTimerContext(TimerQueue &timers, AnimationFrameQueue &animationFrames) {
+  g_timerQueue = &timers;
+  g_animationFrames = &animationFrames;
+}
+
+} // namespace artisan
 
 extern "C" {
 
@@ -382,6 +405,43 @@ char *ArtisanNodeGetData(ArtisanNode *node, const char *name) {
 void ArtisanNodeSetData(ArtisanNode *node, const char *name,
                          const char *value) {
   ToNode(node)->SetAttribute(DataNameToAttribute(name), value);
+}
+
+int ArtisanSetTimeout(uintptr_t handle, double delayMs) {
+  if (g_timerQueue == nullptr) {
+    return 0;
+  }
+  return g_timerQueue->Schedule(
+      GoCallback(handle), SDL_GetTicks(),
+      delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/false);
+}
+
+int ArtisanSetInterval(uintptr_t handle, double delayMs) {
+  if (g_timerQueue == nullptr) {
+    return 0;
+  }
+  return g_timerQueue->Schedule(
+      GoCallback(handle), SDL_GetTicks(),
+      delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/true);
+}
+
+void ArtisanClearTimer(int id) {
+  if (g_timerQueue != nullptr) {
+    g_timerQueue->Cancel(id);
+  }
+}
+
+int ArtisanRequestAnimationFrame(uintptr_t handle) {
+  if (g_animationFrames == nullptr) {
+    return 0;
+  }
+  return g_animationFrames->Schedule(GoCallback(handle));
+}
+
+void ArtisanCancelAnimationFrame(int id) {
+  if (g_animationFrames != nullptr) {
+    g_animationFrames->Cancel(id);
+  }
 }
 
 void ArtisanFreeString(char *str) { free(str); }
