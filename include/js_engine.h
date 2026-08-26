@@ -78,11 +78,9 @@ namespace artisan {
 // mechanism a C++ or Go caller would ultimately go through too (see
 // dom_node.h; SetOnClick/Click() are thin wrappers over it).
 //
-// A few real gaps, not just missing bindings: node.classList/style/
-// getData/setData are JS-only for now (Go's node_c_api.h doesn't have
-// them yet - a natural follow-up, not attempted here). classList/style
-// cover exactly what the rest of this Node model already covers (the
-// "class" attribute's tokens; the same five properties a <style> block
+// A few real gaps, not just missing bindings: classList/style cover
+// exactly what the rest of this Node model already covers (the "class"
+// attribute's tokens; the same five properties a <style> block
 // supports) - not real CSS's full surface. And every wrapped node is a
 // fresh JS object per call (WrapExistingNode, js_engine.cpp) - `===`
 // between two references to the same underlying node is always false

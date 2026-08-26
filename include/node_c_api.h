@@ -29,9 +29,17 @@ extern "C" {
 
 typedef struct ArtisanNode ArtisanNode;
 
+// See Node::type()/NodeType (dom_node.h) - what ArtisanNodeType returns.
+#define ARTISAN_NODE_TYPE_ELEMENT 1
+#define ARTISAN_NODE_TYPE_TEXT 3
+
 // Depth-first search of `root`'s subtree for an element with this id.
 // nullptr if none match - see Node::FindById.
 ArtisanNode *ArtisanNodeFindById(ArtisanNode *root, const char *id);
+
+// ARTISAN_NODE_TYPE_ELEMENT or ARTISAN_NODE_TYPE_TEXT above - see
+// Node::type().
+int ArtisanNodeType(ArtisanNode *node);
 
 // "" for a text node, e.g. "div"/"button" for an element.
 char *ArtisanNodeTagName(ArtisanNode *node);
@@ -59,6 +67,13 @@ ArtisanNode *ArtisanNodePreviousSibling(ArtisanNode *node);
 // without Go's own bounds check backing it up across the C boundary.
 size_t ArtisanNodeChildCount(ArtisanNode *node);
 ArtisanNode *ArtisanNodeChildAt(ArtisanNode *node, size_t index);
+
+// Whether `node` itself matches `selector`, and `node`/its nearest
+// matching ancestor (inclusive) - same bounded grammar as
+// ArtisanQuerySelector below. nullptr if neither `node` nor anything
+// above it matches. See css.h's ElementMatches/Closest.
+bool ArtisanNodeMatches(ArtisanNode *node, const char *selector);
+ArtisanNode *ArtisanNodeClosest(ArtisanNode *node, const char *selector);
 
 // css.h's QuerySelector/QuerySelectorAll - same bounded selector grammar
 // documented there (one compound selector, no combinators/comma-lists).
@@ -96,14 +111,52 @@ ArtisanNode *ArtisanNodeAppendChild(ArtisanNode *parent, ArtisanNode *child);
 ArtisanNode *ArtisanNodeInsertBefore(ArtisanNode *parent, ArtisanNode *child,
                                       ArtisanNode *before);
 
+// Detaches `child`/this node from its parent and re-registers it as a
+// pending node - the same ownership state ArtisanCreateElement's result
+// starts in (see its doc comment: alive but leaked if never re-appended
+// via AppendChild/InsertBefore). nullptr if `child` isn't actually a
+// child of `parent` (ArtisanNodeRemoveChild), or if `node` has no parent
+// (ArtisanNodeRemove) - see Node::RemoveChild/Remove.
+ArtisanNode *ArtisanNodeRemoveChild(ArtisanNode *parent, ArtisanNode *child);
+ArtisanNode *ArtisanNodeRemove(ArtisanNode *node);
+
+// A new, detached, pending node (same ownership state as
+// ArtisanCreateElement's result) - same tag/text/attributes as `node`,
+// never event listeners. `deep`: also clones every descendant. See
+// Node::CloneNode.
+ArtisanNode *ArtisanNodeCloneNode(ArtisanNode *node, bool deep);
+
 // Registers `handle` (a Go closure's cgo.Handle) for `eventType` -
 // alongside, not replacing, any other handler already registered for
 // that type or any other, matching Node::AddEventListener/real
-// addEventListener. The closure itself is invoked through
-// ArtisanGoInvokeHandler below, same mechanism ArtisanNodeSetOnClick
-// uses (see it for that comparison).
+// addEventListener. `capture`: fires during the capturing phase instead
+// of the bubbling phase - see Node::AddEventListener/DispatchEvent. The
+// closure itself is invoked through ArtisanGoInvokeHandler below, same
+// mechanism ArtisanNodeSetOnClick uses (see it for that comparison).
 void ArtisanNodeAddEventListener(ArtisanNode *node, const char *eventType,
-                                  uintptr_t handle);
+                                  uintptr_t handle, bool capture);
+
+// Removes every listener registered for `eventType`/`capture` whose
+// handle equals `handle` (the exact value passed to the
+// ArtisanNodeAddEventListener call that registered it) - see
+// Node::RemoveEventListener. A handle that matches nothing is a safe
+// no-op.
+void ArtisanNodeRemoveEventListener(ArtisanNode *node, const char *eventType,
+                                     uintptr_t handle, bool capture);
+
+// Fires `eventType` at `node` through the usual capturing/target/
+// bubbling walk (see Node::DispatchEvent) - every listener registered
+// for it, Go or otherwise (see js_engine.h - the same underlying Node
+// can have both JS- and Go-registered listeners), runs exactly as it
+// would for an internally-fired click/change/input. `bubbles = false`
+// skips the ancestor phases; `cancelable = false` makes any listener's
+// preventDefault() (JS-side; a Go listener registered here has no way
+// to call it - see ArtisanNodeAddEventListener above, whose handler is
+// always zero-arg) a no-op. Returns false if the event was cancelable
+// and some listener called preventDefault(), true otherwise - the same
+// convention real dispatchEvent()'s return value has.
+bool ArtisanNodeDispatchEvent(ArtisanNode *node, const char *eventType,
+                               bool bubbles, bool cancelable);
 
 // Registers the handler Click() invokes (see Node::SetOnClick), given as
 // a Go closure's cgo.Handle rather than a function pointer - the closure
@@ -113,6 +166,37 @@ void ArtisanNodeAddEventListener(ArtisanNode *node, const char *eventType,
 // previous std::function would - unlike ArtisanNodeAddEventListener
 // above, which never replaces anything.
 void ArtisanNodeSetOnClick(ArtisanNode *node, uintptr_t handle);
+
+// The "class" attribute's space-separated tokens - see
+// Node::GetAttribute("class") and js_engine.h's classList doc comment
+// (same scope: just the tokens, no CSS selector matching here).
+// ArtisanNodeClassListToggle: `hasForce == false` toggles membership;
+// `hasForce == true` pins it to `force` instead (real
+// classList.toggle(name, force) semantics). Returns the resulting
+// membership (true = now present).
+void ArtisanNodeClassListAdd(ArtisanNode *node, const char *name);
+void ArtisanNodeClassListRemove(ArtisanNode *node, const char *name);
+bool ArtisanNodeClassListContains(ArtisanNode *node, const char *name);
+bool ArtisanNodeClassListToggle(ArtisanNode *node, const char *name,
+                                 bool hasForce, bool force);
+
+// `node`'s inline `style="..."` attribute, one property at a time -
+// exactly the five properties a <style> block supports (color/
+// backgroundColor/fontWeight/borderColor/borderWidth), same as
+// js_engine.h's style doc comment. ArtisanNodeStyleGet: nullptr if
+// unset. ArtisanNodeStyleSet: an empty `value` removes the property. See
+// css.h's GetInlineStyleProperty/SetInlineStyleProperty.
+char *ArtisanNodeStyleGet(ArtisanNode *node, const char *property);
+void ArtisanNodeStyleSet(ArtisanNode *node, const char *property,
+                          const char *value);
+
+// dataset's data-* convention, method-based rather than true
+// dataset.fooBar property syntax (no such syntax to mirror in C either
+// way) - "fooBar" <-> "data-foo-bar". ArtisanNodeGetData: nullptr if
+// unset.
+char *ArtisanNodeGetData(ArtisanNode *node, const char *name);
+void ArtisanNodeSetData(ArtisanNode *node, const char *name,
+                         const char *value);
 
 // Releases a string ArtisanNodeTagName/TextContent/GetAttribute returned.
 void ArtisanFreeString(char *str);

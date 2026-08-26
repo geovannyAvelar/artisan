@@ -183,21 +183,37 @@ func main() {}
 
 `artisan-cli build` auto-discovers `goapp/` the same way it discovers
 `app.js` - no flag needed. `artisango.Node` mirrors the same `Node` API
-C++/JS get: `FindById`, `TagName`, `TextContent`/`SetTextContent`,
+C++/JS get: `FindById`, `NodeType()` (`artisango.ElementNode`/
+`TextNode`), `TagName`, `TextContent`/`SetTextContent`,
 `GetAttribute`/`SetAttribute`/`HasAttribute`/`RemoveAttribute`,
 `ParentNode`/`NextSibling`/`PreviousSibling`/`Children`,
+`Matches(selector)`/`Closest(selector)`,
 `QuerySelector`/`QuerySelectorAll` (same bounded selector grammar as
-[Using CSS](#using-css) below), `SetOnClick`, `AddEventListener(type,
-fn)` (any type string works, but only `"click"`, `"change"`
-(checkbox/radio), and `"input"` (text fields) actually fire today) - see
-`go/artisango/node.go` and the C ABI it wraps, `include/node_c_api.h`.
+[Using CSS](#using-css) below), `RemoveChild`/`Remove()` (the removed
+node stays alive and re-appendable), `CloneNode(deep)`, `ClassList()`
+(`Add`/`Remove`/`Contains`/`Toggle`/`ToggleForce`), `Style()`
+(`Get`/`Set`, the same five properties [Using CSS](#using-css) supports),
+`GetData`/`SetData` (`fooBar` <-> `data-foo-bar`), `SetOnClick`,
+`AddEventListener(type, fn, capture)` (any type string works; `"click"`,
+`"change"` (checkbox/radio), and `"input"` (text fields) fire on their
+own, and `DispatchEvent` below fires any other type) plus
+`RemoveEventListener(type, handle, capture)` - `AddEventListener` returns
+a `ListenerHandle` token for this (Go func values aren't comparable the
+way JS passes the same function reference to both calls, so removal
+keys off this instead), and `DispatchEvent(type, bubbles, cancelable)`
+fires the same capturing/target/bubbling walk internally-fired events
+use, returning `false` if the event was cancelable and some listener
+called `preventDefault()` (JS-side only - a Go listener's `fn` is
+zero-arg, with no way to call it itself) - see `go/artisango/node.go`
+and the C ABI it wraps, `include/node_c_api.h`.
 
 `artisango.CreateElement(tag)`/`CreateTextNode(text)` create a detached
 node; `parent.AppendChild(child)`/`parent.InsertBefore(child, before)`
-attach it. A created node that's never appended anywhere leaks until
-process exit - there's no garbage collector on the Go side to catch an
-abandoned one the way JS's engine does, so always append (or just don't
-create) rather than let one go unused.
+attach it. A created (or removed, via `RemoveChild`/`Remove()`) node
+that's never (re-)appended anywhere leaks until process exit - there's
+no garbage collector on the Go side to catch an abandoned one the way
+JS's engine does, so always append (or just don't create) rather than
+let one go unused.
 
 If moving this checkout later breaks the build, update the `replace` line
 in `goapp/go.mod` to point at the new location (same underlying constraint
@@ -270,8 +286,7 @@ bubbling phases. `element.dispatchEvent(event)` fires a script-built
 ms - a callback that calls `requestAnimationFrame` again, the normal way
 to animate, schedules for the *next* one, never the current call).
 
-A few real gaps: `classList`/`style`/`getData`/`setData` are JS-only for
-now (Go doesn't have them yet). `children`/`querySelectorAll` return a
+A few real gaps: `children`/`querySelectorAll` return a
 plain array, a snapshot at call time, not a live list - and every
 wrapped node is a fresh JS object per call, so `===` between two
 references to the same underlying node is always `false` (this includes

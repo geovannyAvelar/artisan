@@ -54,6 +54,17 @@ type Node struct {
 	ptr *C.ArtisanNode
 }
 
+// NodeType values - see Node.NodeType.
+const (
+	ElementNode = C.ARTISAN_NODE_TYPE_ELEMENT
+	TextNode    = C.ARTISAN_NODE_TYPE_TEXT
+)
+
+// NodeType is ElementNode or TextNode above.
+func (n Node) NodeType() int {
+	return int(C.ArtisanNodeType(n.ptr))
+}
+
 // WrapNode turns the raw pointer ArtisanSetupApp receives into a Node.
 func WrapNode(ptr unsafe.Pointer) Node {
 	return Node{ptr: (*C.ArtisanNode)(ptr)}
@@ -182,6 +193,22 @@ func (n Node) QuerySelectorAll(selector string) []Node {
 	return found
 }
 
+// Matches reports whether n itself matches selector - same bounded
+// grammar as QuerySelector above.
+func (n Node) Matches(selector string) bool {
+	cselector := C.CString(selector)
+	defer C.free(unsafe.Pointer(cselector))
+	return bool(C.ArtisanNodeMatches(n.ptr, cselector))
+}
+
+// Closest is n, or its nearest ancestor (inclusive), that matches
+// selector - nil if neither does.
+func (n Node) Closest(selector string) *Node {
+	cselector := C.CString(selector)
+	defer C.free(unsafe.Pointer(cselector))
+	return wrapOrNil(C.ArtisanNodeClosest(n.ptr, cselector))
+}
+
 // wrapOrNil turns a possibly-nullptr ArtisanNode* into a possibly-nil
 // *Node - the shared "found nothing" shape FindById/ParentNode/
 // NextSibling/PreviousSibling/QuerySelector all return.
@@ -200,16 +227,53 @@ func (n Node) SetOnClick(fn func()) {
 	C.ArtisanNodeSetOnClick(n.ptr, C.uintptr_t(handle))
 }
 
+// ListenerHandle identifies one AddEventListener registration, for a
+// later RemoveEventListener call - Go func values aren't comparable the
+// way JS function references are (real addEventListener/
+// removeEventListener pass the same fn to both), so removal instead
+// keys off of this token, the same cgo.Handle node_c_api.h's
+// ArtisanNodeAddEventListener/RemoveEventListener already use for
+// identity underneath.
+type ListenerHandle uintptr
+
 // AddEventListener registers fn for eventType, alongside (not replacing)
 // any other handler already registered for that type or any other -
 // unlike SetOnClick above, matching real addEventListener. Any type
-// string works, but only "click", "change" (checkbox/radio), and
-// "input" (text fields) actually fire today (see main.cpp).
-func (n Node) AddEventListener(eventType string, fn func()) {
+// string works; "click", "change" (checkbox/radio), and "input" (text
+// fields) fire on their own (see main.cpp), and DispatchEvent below
+// fires any other type. capture: fires during the capturing phase
+// instead of the bubbling phase - see DispatchEvent. The returned handle
+// is only needed if you plan to RemoveEventListener this fn later.
+func (n Node) AddEventListener(eventType string, fn func(), capture bool) ListenerHandle {
 	ceventType := C.CString(eventType)
 	defer C.free(unsafe.Pointer(ceventType))
 	handle := cgo.NewHandle(fn)
-	C.ArtisanNodeAddEventListener(n.ptr, ceventType, C.uintptr_t(handle))
+	C.ArtisanNodeAddEventListener(n.ptr, ceventType, C.uintptr_t(handle), C.bool(capture))
+	return ListenerHandle(handle)
+}
+
+// RemoveEventListener removes the listener AddEventListener registered
+// and returned handle for - eventType/capture must match the original
+// AddEventListener call. A handle that matches nothing (already
+// removed, or from a different node) is a safe no-op.
+func (n Node) RemoveEventListener(eventType string, handle ListenerHandle, capture bool) {
+	ceventType := C.CString(eventType)
+	defer C.free(unsafe.Pointer(ceventType))
+	C.ArtisanNodeRemoveEventListener(n.ptr, ceventType, C.uintptr_t(handle), C.bool(capture))
+}
+
+// DispatchEvent fires eventType at n through the usual capturing/target/
+// bubbling walk - every listener registered for it runs, whether
+// registered from Go (AddEventListener/SetOnClick) or JS
+// (addEventListener) on the same node. bubbles = false skips the
+// ancestor phases; cancelable = false makes any listener's
+// preventDefault() (JS-side only - a Go listener's fn is zero-arg, so it
+// has no way to call it) a no-op. Returns false if the event was
+// cancelable and some listener called preventDefault(), true otherwise.
+func (n Node) DispatchEvent(eventType string, bubbles, cancelable bool) bool {
+	ceventType := C.CString(eventType)
+	defer C.free(unsafe.Pointer(ceventType))
+	return bool(C.ArtisanNodeDispatchEvent(n.ptr, ceventType, C.bool(bubbles), C.bool(cancelable)))
 }
 
 // CreateElement/CreateTextNode create a detached element/text node - not
@@ -253,6 +317,126 @@ func (n Node) InsertBefore(child Node, before *Node) Node {
 	}
 	C.ArtisanNodeInsertBefore(n.ptr, child.ptr, cbefore)
 	return child
+}
+
+// RemoveChild detaches child (still alive and re-appendable, in the same
+// pending state CreateElement/CreateTextNode's result starts in - see
+// their doc comment) and returns it, or nil if child isn't actually a
+// child of n.
+func (n Node) RemoveChild(child Node) *Node {
+	return wrapOrNil(C.ArtisanNodeRemoveChild(n.ptr, child.ptr))
+}
+
+// Remove detaches n from its parent and returns it in that same pending
+// state, or nil if it had no parent.
+func (n Node) Remove() *Node {
+	return wrapOrNil(C.ArtisanNodeRemove(n.ptr))
+}
+
+// CloneNode is a new, detached, pending copy of n - same tag/text/
+// attributes, never event listeners. deep also clones every descendant.
+func (n Node) CloneNode(deep bool) Node {
+	return Node{ptr: C.ArtisanNodeCloneNode(n.ptr, C.bool(deep))}
+}
+
+// ClassList is a live view over n's "class" attribute tokens - each
+// method re-reads/re-writes the attribute directly, so it can't drift
+// from it.
+type ClassList struct {
+	node Node
+}
+
+func (n Node) ClassList() ClassList {
+	return ClassList{node: n}
+}
+
+func (c ClassList) Add(name string) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.ArtisanNodeClassListAdd(c.node.ptr, cname)
+}
+
+func (c ClassList) Remove(name string) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	C.ArtisanNodeClassListRemove(c.node.ptr, cname)
+}
+
+func (c ClassList) Contains(name string) bool {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	return bool(C.ArtisanNodeClassListContains(c.node.ptr, cname))
+}
+
+// Toggle adds name if absent, removes it if present, and returns the
+// resulting membership.
+func (c ClassList) Toggle(name string) bool {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	return bool(C.ArtisanNodeClassListToggle(c.node.ptr, cname, C.bool(false), C.bool(false)))
+}
+
+// ToggleForce pins name's membership to force instead of toggling it -
+// real classList.toggle(name, force) semantics.
+func (c ClassList) ToggleForce(name string, force bool) bool {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	return bool(C.ArtisanNodeClassListToggle(c.node.ptr, cname, C.bool(true), C.bool(force)))
+}
+
+// Style is a live view over n's inline style="..." attribute - exactly
+// the five properties [Using CSS] in the README supports (color/
+// backgroundColor/fontWeight/borderColor/borderWidth).
+type Style struct {
+	node Node
+}
+
+func (n Node) Style() Style {
+	return Style{node: n}
+}
+
+// Get reports one property's raw value and whether it's set at all.
+func (s Style) Get(property string) (value string, ok bool) {
+	cproperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cproperty))
+	cvalue := C.ArtisanNodeStyleGet(s.node.ptr, cproperty)
+	if cvalue == nil {
+		return "", false
+	}
+	defer C.ArtisanFreeString(cvalue)
+	return C.GoString(cvalue), true
+}
+
+// Set assigns one property - an empty value removes it instead, matching
+// real element.style.color = "".
+func (s Style) Set(property, value string) {
+	cproperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cproperty))
+	cvalue := C.CString(value)
+	defer C.free(unsafe.Pointer(cvalue))
+	C.ArtisanNodeStyleSet(s.node.ptr, cproperty, cvalue)
+}
+
+// GetData/SetData are dataset's data-* convention, method-based rather
+// than true dataset.fooBar property syntax - "fooBar" <-> "data-foo-bar".
+// GetData reports the value and whether it's set at all.
+func (n Node) GetData(name string) (value string, ok bool) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	cvalue := C.ArtisanNodeGetData(n.ptr, cname)
+	if cvalue == nil {
+		return "", false
+	}
+	defer C.ArtisanFreeString(cvalue)
+	return C.GoString(cvalue), true
+}
+
+func (n Node) SetData(name, value string) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	cvalue := C.CString(value)
+	defer C.free(unsafe.Pointer(cvalue))
+	C.ArtisanNodeSetData(n.ptr, cname, cvalue)
 }
 
 // ArtisanGoInvokeHandler is called from C++ (node_c_api.cpp's
