@@ -322,7 +322,15 @@ install(DIRECTORY third_party/skia/out/Debug/
     FILES_MATCHING PATTERN "*.a")
 
 set(CPACK_PACKAGE_NAME "artisan-cli")
-set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}" CACHE STRING
+# Appended to CPACK_PACKAGE_VERSION's default only (not PROJECT_VERSION), so
+# CI's unstable pipeline (.github/workflows/unstable.yml) can give each
+# rebuild a distinct, monotonically increasing version, e.g.
+# "+unstable.20260826180000.abc1234" - without it every unstable build
+# would carry the same version as the last tagged release, and apt would
+# never see a newer one to upgrade to.
+set(ARTISAN_PACKAGE_VERSION_SUFFIX "" CACHE STRING
+    "Appended to CPACK_PACKAGE_VERSION, e.g. for CI's unstable/rolling build")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}${ARTISAN_PACKAGE_VERSION_SUFFIX}" CACHE STRING
     "Overridden by package/build_deb.sh with a git-commit-derived version")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
     "Build native desktop apps from HTML-like markup")

@@ -1,0 +1,73 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      # Threaded through to the .deb's CPack version (see the
+      # ARTISAN_PACKAGE_VERSION_SUFFIX cache variable in CMakeLists.txt).
+      # Left empty, .deb versioning is untouched - only unstable.yml sets
+      # this, so its rebuilds get a version apt recognizes as newer each
+      # time instead of colliding with the last tagged release's.
+      package_version_suffix:
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build g++ pkg-config python3 \
+            libfreetype-dev libfontconfig-dev libsdl2-dev
+
+      - name: Determine Skia cache key
+        id: skia-sha
+        run: echo "sha=$(git rev-parse HEAD:third_party/skia)" >> "$GITHUB_OUTPUT"
+
+      # Skia is the dominant cost of this build - a from-source build takes
+      # tens of minutes (see build_skia.sh) - so it's the only submodule
+      # worth caching separately; lexbor/quickjs are small enough to just
+      # rebuild inline as part of the normal `cmake --build` below. Keyed on
+      # the pinned submodule commit, so bumping the submodule invalidates
+      # it. Cached paths mirror exactly what CMakeLists.txt's install()
+      # step keeps for packaging (the .a libs and generated headers) rather
+      # than the full out/Debug intermediate build tree, which also holds a
+      # large pile of .o/.ninja files nothing downstream needs.
+      - name: Cache Skia build
+        id: skia-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/skia/out/Debug/*.a
+            third_party/skia/out/Debug/gen
+          key: skia-${{ runner.os }}-${{ steps.skia-sha.outputs.sha }}-${{ hashFiles('build_skia.sh') }}
+
+      - name: Build Skia
+        if: steps.skia-cache.outputs.cache-hit != 'true'
+        run: ./build_skia.sh
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DARTISAN_PACKAGE_VERSION_SUFFIX="${{ inputs.package_version_suffix }}"
+
+      - name: Build
+        run: cmake --build build --target artisan_cli
+
+      - name: Package .deb
+        run: cd build && cpack -G DEB
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artisan-cli-deb
+          path: build/*.deb
+          if-no-files-found: error

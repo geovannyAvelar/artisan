@@ -215,7 +215,34 @@ independently, so a `<style>` block meant for every page needs pasting
 into each one (or turned into a `components`-style fragment, see
 `artisan-cli component`).
 
-## Building a .deb
+## APT repository (Debian / Ubuntu)
+
+Every tagged release also publishes to an APT repository, updated
+automatically:
+
+```bash
+curl -fsSL https://geovannyavelar.github.io/artisan/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/artisan.gpg
+echo "deb [signed-by=/usr/share/keyrings/artisan.gpg] https://geovannyavelar.github.io/artisan stable main" | sudo tee /etc/apt/sources.list.d/artisan.list
+sudo apt update
+sudo apt install artisan-cli
+```
+
+There's also an `unstable` distribution, rebuilt from the latest commit on
+`main` on every push (see the "Unstable (latest main)" release) — always a
+single package, no version history, and may be broken. Use the same key,
+pointed at `unstable` instead of `stable`:
+
+```bash
+curl -fsSL https://geovannyavelar.github.io/artisan/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/artisan.gpg
+echo "deb [signed-by=/usr/share/keyrings/artisan.gpg] https://geovannyavelar.github.io/artisan unstable main" | sudo tee /etc/apt/sources.list.d/artisan-unstable.list
+sudo apt update
+sudo apt install artisan-cli
+```
+
+Don't add both `.list` files at once — they publish the same package name at
+different, conflicting versions, and apt will just pick whichever it prefers.
+
+## Building a .deb (manual, local)
 
 ```bash
 ./package/build_deb.sh

@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  # Reusable workflows (apt-repo.yml's "uses:" below) get the *intersection*
+  # of the caller's and callee's permissions, not just what the callee
+  # declares -- so pages/id-token have to be granted here too, or its Pages
+  # deploy step silently loses them despite requesting them itself.
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            artifacts/artisan-cli-deb/*.deb \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+  # See apt-repo.yml: rebuilds both the "stable" (every tagged release) and
+  # "unstable" (see unstable.yml) APT distributions together and republishes
+  # them to GitHub Pages, so a stable release also refreshes the unstable
+  # distribution's copy of the site rather than only unstable.yml's own runs
+  # doing so.
+  apt-repo:
+    needs: [release]
+    uses: ./.github/workflows/apt-repo.yml
+    secrets: inherit
