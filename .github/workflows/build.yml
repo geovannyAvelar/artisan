@@ -57,6 +57,7 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
+            -DARTISAN_PROJECT_SOURCE_DIR_OVERRIDE=/usr/lib/artisan \
             -DARTISAN_PACKAGE_VERSION_SUFFIX="${{ inputs.package_version_suffix }}"
 
       - name: Build
