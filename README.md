@@ -1,6 +1,6 @@
-# artisan
+# ARTISAN
 
-A framework for building native desktop apps from HTML-like markup. Markup
+a framework for building native desktop apps from HTML-like markup. Markup
 is compiled ahead-of-time (by `artisanc`) into a widget tree baked straight
 into the binary, and rendered with Skia - no browser, no webview. App
 behavior can be plain C++ (`SetupApp(Node&)`), a compiled Go app, or an
