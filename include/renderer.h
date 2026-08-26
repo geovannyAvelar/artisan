@@ -38,6 +38,13 @@ public:
   virtual void DrawFilledRect(float x, float y, float width, float height,
                                const Color &color) = 0;
 
+  // Strokes/fills a circle - a radio button's indicator (checkbox reuses
+  // the square DrawRect/DrawFilledRect above instead).
+  virtual void DrawCircle(float cx, float cy, float radius,
+                           float strokeWidth, const Color &color) = 0;
+  virtual void DrawFilledCircle(float cx, float cy, float radius,
+                                 const Color &color) = 0;
+
   // Decodes `data` (raw encoded image bytes) and paints it at (x, y).
   // `explicitWidth`/`explicitHeight` (0 = unspecified) come from the
   // markup's width/height attributes: with both set, the image is painted

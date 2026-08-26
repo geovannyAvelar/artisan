@@ -95,6 +95,27 @@ void SkiaRenderer::DrawFilledRect(float x, float y, float width, float height,
   canvas_->drawRect(SkRect::MakeXYWH(x, y, width, height), paint);
 }
 
+void SkiaRenderer::DrawCircle(float cx, float cy, float radius,
+                               float strokeWidth, const Color &color) {
+  SkPaint paint;
+  paint.setColor(SkColorSetRGB(color.r, color.g, color.b));
+  paint.setAntiAlias(true);
+  paint.setStyle(SkPaint::kStroke_Style);
+  paint.setStrokeWidth(strokeWidth);
+
+  canvas_->drawCircle(cx, cy, radius, paint);
+}
+
+void SkiaRenderer::DrawFilledCircle(float cx, float cy, float radius,
+                                     const Color &color) {
+  SkPaint paint;
+  paint.setColor(SkColorSetRGB(color.r, color.g, color.b));
+  paint.setAntiAlias(true);
+  paint.setStyle(SkPaint::kFill_Style);
+
+  canvas_->drawCircle(cx, cy, radius, paint);
+}
+
 float SkiaRenderer::DrawImage(const unsigned char *data, int dataSize,
                                float x, float y, float maxWidth,
                                float explicitWidth, float explicitHeight) {

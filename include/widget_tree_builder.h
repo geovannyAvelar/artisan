@@ -69,4 +69,12 @@ struct InputFocus {
 std::unique_ptr<WidgetTree> BuildWidgetTree(const Node &root,
                                              const InputFocus &focus = {});
 
+// An <input>'s `type` attribute picks checkbox/radio's small fixed-size
+// indicator over the default single-line text box - anything else
+// (including a missing `type`) keeps the text behavior. Exposed so a
+// caller handling clicks (main.cpp) can make the same distinction
+// BuildWidgetTree already makes when it decides which kind of kBox to
+// build.
+bool IsCheckableInputType(const Node &node);
+
 } // namespace artisan

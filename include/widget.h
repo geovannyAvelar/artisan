@@ -28,7 +28,19 @@ enum class WidgetKind {
                // same hit-testing shape as kBox (userData holds the
                // Node*), but painted without a border, since navigating
                // isn't "boxy" the way a button/input is.
+  kLabel,      // <label>: same shape as kLink (flattened single-line
+               // clickable text, userData holds the Node*) but painted
+               // without an underline - see BoxKind::kCheckbox/kRadio
+               // below for what a <label for="..."> actually activates.
 };
+
+// kBox only - what kind of box this is. kText is everything kBox already
+// did before checkbox/radio existed (a single-line text box, sized to fit
+// its label - <input> and <button> both still use this); kCheckbox/kRadio
+// are a small fixed-size toggle indicator instead, with no label of their
+// own (the human-readable label is a separate <label for="..."> element -
+// see kLabel above).
+enum class BoxKind { kText, kCheckbox, kRadio };
 
 // A single node of a paintable UI tree - what WidgetRenderer actually
 // walks. Always materialized at runtime by BuildWidgetTree
@@ -78,10 +90,11 @@ struct Widget {
   int colSpan;
   int rowSpan;
 
-  // kBox, kLink only: the Node this widget was materialized from - lets a
-  // hit-test find which live DOM node the user clicked, to focus/edit or
-  // click it (or, for kLink, read its href and navigate). Opaque here so
-  // widget.h doesn't need to know about Node.
+  // kBox, kLink, kLabel only: the Node this widget was materialized from -
+  // lets a hit-test find which live DOM node the user clicked, to
+  // focus/edit or click it (or, for kLink, read its href and navigate; for
+  // kLabel, read its `for` and activate the target it points at).
+  // Opaque here so widget.h doesn't need to know about Node.
   const void *userData = nullptr;
 
   // kBox only, and only meaningful when this is the focused <input>: the
@@ -91,6 +104,13 @@ struct Widget {
   // range between them instead of just drawing a caret line.
   int cursorPos = -1;
   int selectionAnchor = -1;
+
+  // kBox only. See BoxKind above; boxKind stays kText for every kBox this
+  // struct held before checkbox/radio existed. checked only means
+  // anything when boxKind != kText - whether that indicator paints
+  // filled, from the source <input>'s `checked` attribute.
+  BoxKind boxKind = BoxKind::kText;
+  bool checked = false;
 
   // CSS (css.h), resolved once at widget-build time - see
   // widget_tree_builder.cpp. color/bold inherit to descendants that don't

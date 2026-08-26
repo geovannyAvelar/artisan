@@ -17,6 +17,18 @@
 
 namespace artisan {
 
+// An <input>'s `type` attribute picks checkbox/radio's small fixed-size
+// indicator over the default single-line text box - anything else
+// (including a missing `type`) keeps today's text behavior. Exposed (not
+// anonymous-namespace-local like the rest of this file's tag-classification
+// helpers) since main.cpp's click handling needs the same check to decide
+// what a click on an <input> does - kept as one source of truth rather than
+// two copies of the same string comparison.
+bool IsCheckableInputType(const Node &node) {
+  const std::string *type = node.GetAttribute("type");
+  return type != nullptr && (*type == "checkbox" || *type == "radio");
+}
+
 namespace {
 
 // Copies a resolved CSS declaration set onto the widget it produced -
@@ -69,6 +81,7 @@ bool IsSkippedTag(const std::string &tag) {
   return tag == "head" || tag == "script" || tag == "style" ||
          tag == "title" || tag == "meta" || tag == "link";
 }
+
 
 // Concatenates the text content of every <style> element anywhere in
 // `node`'s subtree, depth-first - a document can have more than one, and
@@ -181,6 +194,57 @@ Widget MakeLink(WidgetTree &tree, const Node &node, float fontSize,
                 1,
                 1};
   widget.userData = &node;
+  ApplyStyle(widget, style);
+  return widget;
+}
+
+// <label for="...">: same flattened-single-line-clickable-text shape as
+// MakeLink, just a different WidgetKind so WidgetRenderer paints it
+// without an underline (see LabelWidgetHandler).
+Widget MakeLabel(WidgetTree &tree, const Node &node, float fontSize,
+                  const Declarations &style) {
+  Widget widget{WidgetKind::kLabel,
+                false,
+                fontSize,
+                tree.StoreString(FlattenText(node)),
+                nullptr,
+                0,
+                nullptr,
+                0,
+                0.0f,
+                0.0f,
+                false,
+                1,
+                1};
+  widget.userData = &node;
+  ApplyStyle(widget, style);
+  return widget;
+}
+
+// <input type="checkbox"|"radio">: a small fixed-size toggle indicator,
+// not a text box - no label of its own (see BoxKind in widget.h). `boxKind`
+// picks square vs. circle in WidgetRenderer; `checked` is read straight
+// from the source Node's `checked` attribute (presence, regardless of
+// value, means checked - matching HTML boolean-attribute convention).
+Widget MakeCheckable(WidgetTree &tree, const void *userData,
+                      const Declarations &style, BoxKind boxKind,
+                      bool checked) {
+  Widget widget{WidgetKind::kBox,
+                false,
+                0.0f,
+                nullptr,
+                nullptr,
+                0,
+                nullptr,
+                0,
+                0.0f,
+                0.0f,
+                false,
+                1,
+                1};
+  widget.userData = userData;
+  widget.boxKind = boxKind;
+  widget.checked = checked;
   ApplyStyle(widget, style);
   return widget;
 }
@@ -492,6 +556,11 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
       inits.push_back(MakeImage(child));
     } else if (tag == "table") {
       inits.push_back(MakeTable(child, tree, fontSize, focus, sheet, style));
+    } else if (tag == "input" && IsCheckableInputType(child)) {
+      const std::string *type = child.GetAttribute("type");
+      BoxKind boxKind = *type == "radio" ? BoxKind::kRadio : BoxKind::kCheckbox;
+      bool checked = child.GetAttribute("checked") != nullptr;
+      inits.push_back(MakeCheckable(tree, &child, style, boxKind, checked));
     } else if (tag == "input") {
       if (&child == focus.node) {
         // The rendered label falls back to the placeholder when `value`
@@ -520,6 +589,8 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
           MakeBox(tree, FlattenText(child), fontSize, &child, style));
     } else if (tag == "a") {
       inits.push_back(MakeLink(tree, child, fontSize, style));
+    } else if (tag == "label") {
+      inits.push_back(MakeLabel(tree, child, fontSize, style));
     } else {
       inits.push_back(MakeContainer(child, tree, FontSizeForTag(tag),
                                      IsBlockTag(tag), focus, sheet, style));

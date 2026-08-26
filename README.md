@@ -215,6 +215,44 @@ independently, so a `<style>` block meant for every page needs pasting
 into each one (or turned into a `components`-style fragment, see
 `artisan-cli component`).
 
+## Using forms
+
+`<input type="checkbox">` and `<input type="radio">` render as a small
+toggle indicator (a square for checkbox, a circle for radio) - checked
+state comes from (and clicking one toggles) the `checked` attribute, read
+via the same `GetAttribute`/`SetAttribute` every other element uses:
+
+```html
+<input type="checkbox" id="agree">
+<label for="agree">I agree</label>
+
+<input type="radio" name="color" id="red" checked>
+<label for="red">Red</label>
+<input type="radio" name="color" id="blue">
+<label for="blue">Blue</label>
+```
+
+```cpp
+Node *agree = document.FindById("agree");
+bool checked = agree->GetAttribute("checked") != nullptr;
+```
+
+Radios sharing a `name` attribute are mutually exclusive - checking one
+unchecks the others in that group automatically. `<label for="...">`
+makes its target clickable too (toggle a checkbox/radio, focus a text
+input, or click a button) - useful since checkbox/radio have no label
+text of their own.
+
+A few things this doesn't do yet: `<label>` only works via `for="id"` -
+wrapping an input directly (`<label><input ...> text</label>`) isn't
+supported. Every box-type widget (`<input>`, `<button>`, checkbox/radio,
+`<label>`) is block-level, same as it's always been for input/button - a
+label doesn't yet sit on the same visual line as the control it labels.
+If markup marks more than one radio in the same `name` group as `checked`,
+all of them render checked until the user actually clicks one (a real
+browser resolves this at parse time; this doesn't). `<select>` and
+`<textarea>` aren't supported yet.
+
 ## APT repository (Debian / Ubuntu)
 
 Every tagged release also publishes to an APT repository, updated

@@ -35,6 +35,32 @@ std::string GetValue(const Node *node) {
   return value != nullptr ? *value : std::string();
 }
 
+// Unchecks every other <input type="radio"> under `subtree` that shares
+// `justChecked`'s `name` attribute - real radio-group semantics (only one
+// checked per group), enforced here at click time rather than via any
+// generic "query all matching" API, since nothing else in this codebase
+// needs one yet (Node::FindById is the only lookup primitive - see
+// dom_node.h).
+void UncheckOtherRadiosInGroup(Node &subtree, Node *justChecked) {
+  const std::string *groupName = justChecked->GetAttribute("name");
+  if (groupName == nullptr) {
+    return;
+  }
+
+  for (const auto &childPtr : subtree.children()) {
+    Node *child = childPtr.get();
+    if (child != justChecked && child->tagName() == "input") {
+      const std::string *type = child->GetAttribute("type");
+      const std::string *name = child->GetAttribute("name");
+      if (type != nullptr && *type == "radio" && name != nullptr &&
+          *name == *groupName) {
+        child->RemoveAttribute("checked");
+      }
+    }
+    UncheckOtherRadiosInGroup(*child, justChecked);
+  }
+}
+
 // The document is compiled from whatever markup bundle the build was
 // configured with (ARTISAN_UI_SOURCES / repeatable --html) by artisanc at
 // build time (CompiledPages(), in the generated translation unit) - the
@@ -294,6 +320,47 @@ int main(int argc, char *argv[]) {
     needsRedraw = true;
   };
 
+  // What clicking `target` actually does, dispatched by its tag/type -
+  // shared between a direct click on a box/button and a <label for="...">
+  // click forwarded to whatever it points at (see the "label" branch in
+  // SDL_MOUSEBUTTONDOWN below). No-op if `target` is nullptr (an unresolved
+  // `for`) or isn't one of these element/type combinations.
+  auto activateControl = [&](Node *target) {
+    if (target == nullptr) {
+      return;
+    }
+
+    if (target->tagName() == "input" && artisan::IsCheckableInputType(*target)) {
+      const std::string *type = target->GetAttribute("type");
+      bool alreadyChecked = target->GetAttribute("checked") != nullptr;
+      if (*type == "radio") {
+        // Matches real <input type=radio> behavior: clicking the already-
+        // checked radio in a group is a no-op, only clicking a *different*
+        // one changes the selection.
+        if (!alreadyChecked) {
+          target->SetAttribute("checked", "checked");
+          UncheckOtherRadiosInGroup(*document, target);
+        }
+      } else if (alreadyChecked) {
+        target->RemoveAttribute("checked");
+      } else {
+        target->SetAttribute("checked", "checked");
+      }
+      target->Click();
+    } else if (target->tagName() == "input") {
+      // A plain text <input> - the path a <label for="..."> pointing at
+      // one takes, same as clicking it directly would (focus, caret at
+      // the end of its current value).
+      std::string value = GetValue(target);
+      focus.node = target;
+      focus.cursorPos = static_cast<int>(value.size());
+      focus.selectionAnchor = focus.cursorPos;
+      isSelecting = false;
+    } else if (target->tagName() == "button") {
+      target->Click();
+    }
+  };
+
   navigate(pages.front().name);
 
   SDL_Texture *texture =
@@ -492,7 +559,8 @@ int main(int argc, char *argv[]) {
                                  const_cast<void *>(region->userData))
                            : nullptr;
 
-          if (node != nullptr && node->tagName() == "input") {
+          if (node != nullptr && node->tagName() == "input" &&
+              !artisan::IsCheckableInputType(*node)) {
             int index = CharIndexAt(measuringRenderer, *region, node,
                                      static_cast<float>(event.button.x));
             focus.node = node;
@@ -500,19 +568,27 @@ int main(int argc, char *argv[]) {
             focus.selectionAnchor = index;
             isSelecting = true;
           } else {
-            // Clicking a button/link (or anything else) blurs whatever
-            // input was focused, same as a real page - do that before
-            // Click()/navigate() runs, so a handler that edits the
-            // just-blurred input's value isn't fighting a stale
+            // Clicking a button/checkbox/radio/label/link (or anything
+            // else) blurs whatever input was focused, same as a real page
+            // - do that before Click()/navigate() runs, so a handler that
+            // edits the just-blurred input's value isn't fighting a stale
             // focus/cursor still pointing at it.
             focus = InputFocus{};
             isSelecting = false;
-            if (node != nullptr && node->tagName() == "button") {
-              node->Click();
+            if (node != nullptr &&
+                (node->tagName() == "button" ||
+                 (node->tagName() == "input" &&
+                  artisan::IsCheckableInputType(*node)))) {
+              activateControl(node);
             } else if (node != nullptr && node->tagName() == "a") {
               const std::string *href = node->GetAttribute("href");
               if (href != nullptr) {
                 navigate(*href);
+              }
+            } else if (node != nullptr && node->tagName() == "label") {
+              const std::string *forId = node->GetAttribute("for");
+              if (forId != nullptr) {
+                activateControl(document->FindById(*forId));
               }
             }
           }

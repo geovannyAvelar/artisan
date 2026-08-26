@@ -18,6 +18,12 @@ constexpr float kCellMinWidth = 24.0f;
 constexpr float kCellMinHeight = 20.0f;
 constexpr float kCaretWidth = 1.5f;
 constexpr float kLinkUnderlineHeight = 1.5f;
+// kCheckbox/kRadio's fixed indicator size (a checkbox's side length, a
+// radio's diameter) and how far the filled checked-mark insets from that
+// outer edge - unlike a text kBox, neither scales with fontSize/label
+// text, since neither has a label of its own (see BoxKind in widget.h).
+constexpr float kCheckableSize = 16.0f;
+constexpr float kCheckableInset = 4.0f;
 
 struct LayoutState {
   IRenderer &renderer;
@@ -128,6 +134,16 @@ public:
     naturalWidth_ = std::max(naturalWidth_, x + width);
   }
 
+  void DrawCircle(float cx, float /*cy*/, float radius,
+                   float /*strokeWidth*/, const Color & /*color*/) override {
+    naturalWidth_ = std::max(naturalWidth_, cx + radius);
+  }
+
+  void DrawFilledCircle(float cx, float /*cy*/, float radius,
+                         const Color & /*color*/) override {
+    naturalWidth_ = std::max(naturalWidth_, cx + radius);
+  }
+
   // Real image dimensions are only known after decoding, which is a
   // rendering-backend concern this dry run deliberately skips - an image
   // inside a table cell contributes no size to a measurement pass. Rare
@@ -227,9 +243,55 @@ public:
   }
 };
 
+// Draws a kCheckbox/kRadio's fixed-size indicator (square or circle,
+// filled when checked) at (state.x, state.y), registers its BoxRegion the
+// same way a text kBox does, and advances state.y - the same
+// flush-before/register-a-hit-rect/advance-y shape BoxWidgetHandler
+// itself follows for kText, just with no label/border/caret to draw.
+void RenderCheckable(const Widget &widget, LayoutState &state) {
+  FlushLine(state);
+  state.y += kBlockSpacing;
+
+  Color borderColor = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
+  const float cx = state.x + kCheckableSize / 2.0f;
+  const float cy = state.y + kCheckableSize / 2.0f;
+
+  if (widget.boxKind == BoxKind::kRadio) {
+    state.renderer.DrawCircle(cx, cy, kCheckableSize / 2.0f,
+                               widget.borderWidth, borderColor);
+    if (widget.checked) {
+      Color fillColor = widget.hasColor ? widget.color : kDefaultTextColor;
+      state.renderer.DrawFilledCircle(
+          cx, cy, kCheckableSize / 2.0f - kCheckableInset, fillColor);
+    }
+  } else {
+    state.renderer.DrawRect(state.x, state.y, kCheckableSize, kCheckableSize,
+                             widget.borderWidth, borderColor);
+    if (widget.checked) {
+      Color fillColor = widget.hasColor ? widget.color : kDefaultTextColor;
+      state.renderer.DrawFilledRect(
+          state.x + kCheckableInset, state.y + kCheckableInset,
+          kCheckableSize - 2.0f * kCheckableInset,
+          kCheckableSize - 2.0f * kCheckableInset, fillColor);
+    }
+  }
+
+  if (state.boxRegions != nullptr) {
+    state.boxRegions->push_back(
+        {widget.userData, state.x, state.y, kCheckableSize, kCheckableSize});
+  }
+
+  state.y += kCheckableSize + kBlockSpacing;
+}
+
 class BoxWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
+    if (widget.boxKind != BoxKind::kText) {
+      RenderCheckable(widget, state);
+      return;
+    }
+
     FlushLine(state);
 
     const std::string label = widget.text != nullptr ? widget.text : "";
@@ -319,6 +381,38 @@ public:
                                widget.fontSize, widget.bold, color);
       state.renderer.DrawFilledRect(state.x, state.y + lineHeight - kLinkUnderlineHeight,
                                      textWidth, kLinkUnderlineHeight, color);
+    }
+
+    if (state.boxRegions != nullptr) {
+      state.boxRegions->push_back(
+          {widget.userData, state.x, state.y, textWidth, lineHeight});
+    }
+
+    state.y += lineHeight + kBlockSpacing;
+  }
+};
+
+// <label for="...">: identical to LinkWidgetHandler, minus the underline -
+// clickable text, but a label isn't a navigation affordance the way a
+// link is, so nothing marks it as such visually. main.cpp resolves
+// userData's `for` attribute and activates whatever it points at (focus a
+// text input, toggle a checkbox/radio, click a button).
+class LabelWidgetHandler final : public WidgetHandler {
+public:
+  void Render(const Widget &widget, LayoutState &state) const override {
+    FlushLine(state);
+
+    const std::string label = widget.text != nullptr ? widget.text : "";
+    const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
+    const float textWidth =
+        state.renderer.MeasureText(label, widget.fontSize, widget.bold);
+
+    state.y += kBlockSpacing;
+
+    if (!label.empty()) {
+      Color color = widget.hasColor ? widget.color : kDefaultTextColor;
+      state.renderer.DrawText(label, state.x, state.y + widget.fontSize,
+                               widget.fontSize, widget.bold, color);
     }
 
     if (state.boxRegions != nullptr) {
@@ -637,6 +731,7 @@ const WidgetHandler &HandlerFor(WidgetKind kind) {
   static const TableWidgetHandler kTable;
   static const ContainerWidgetHandler kContainer;
   static const LinkWidgetHandler kLink;
+  static const LabelWidgetHandler kLabel;
 
   switch (kind) {
   case WidgetKind::kText:
@@ -653,6 +748,8 @@ const WidgetHandler &HandlerFor(WidgetKind kind) {
     return kTable;
   case WidgetKind::kLink:
     return kLink;
+  case WidgetKind::kLabel:
+    return kLabel;
   case WidgetKind::kTableCell:
     // Never reached in practice - kTableCell widgets only appear as row
     // children inside a table's own array, which TableWidgetHandler reads

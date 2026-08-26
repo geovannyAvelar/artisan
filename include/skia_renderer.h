@@ -26,6 +26,10 @@ public:
                 float strokeWidth, const Color &color) override;
   void DrawFilledRect(float x, float y, float width, float height,
                        const Color &color) override;
+  void DrawCircle(float cx, float cy, float radius, float strokeWidth,
+                   const Color &color) override;
+  void DrawFilledCircle(float cx, float cy, float radius,
+                         const Color &color) override;
   float DrawImage(const unsigned char *data, int dataSize, float x, float y,
                    float maxWidth, float explicitWidth,
                    float explicitHeight) override;
