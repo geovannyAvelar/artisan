@@ -86,6 +86,19 @@ void EventFinalizer(JSRuntime * /*rt*/, JSValueConst val) {
   delete static_cast<EventHandle *>(JS_GetOpaque(val, g_eventClassId));
 }
 
+// What artisan::Event::detail (an untyped const void*) actually points
+// at whenever this binding sets it: a script-supplied JSValue, plus the
+// context that owns it, so a listener's per-callback Event object (see
+// JsCallback::operator() below) can dup a live reference to it without
+// dom_node.h/.cpp needing to know QuickJS exists. Always stack-local for
+// the duration of a single synchronous DispatchEvent call (see
+// JsNodeDispatchEvent) - dispatch never outlives the frame that builds
+// this, so there's no lifetime issue in reading it back mid-walk.
+struct ScriptEventDetail {
+  JSContext *ctx;
+  JSValueConst value;
+};
+
 Event *GetEventPtr(JSContext *ctx, JSValueConst val) {
   EventHandle *handle =
       static_cast<EventHandle *>(JS_GetOpaque2(ctx, val, g_eventClassId));
@@ -208,6 +221,76 @@ const JSCFunctionListEntry kEventProto[] = {
     JS_CGETSET_DEF("defaultPrevented", JsEventGetDefaultPrevented, nullptr),
 };
 
+// `new CustomEvent(type, {detail, bubbles, cancelable})` / `new
+// Event(type, {bubbles, cancelable})` - registered as both global names
+// under the same function (real Event's init dict just never has a
+// `detail` key, so reading one that isn't there below already produces
+// the right "no detail" result for a plain `new Event(...)`, same as
+// real DOM where CustomEvent is the only one of the two with a detail).
+//
+// Produces a class-g_eventClassId object exactly like the ones
+// JsCallback builds for a listener callback, except its EventHandle
+// starts out (and stays) detached (ptr == nullptr) - this object isn't
+// live-bound to any in-flight C++ Event the way a listener's callback
+// argument is, it's just a data carrier a script can pass to
+// node.dispatchEvent(...) (see JsNodeDispatchEvent below), which reads
+// type/detail/bubbles/cancelable back off of it. preventDefault()/
+// stopPropagation() called on it directly (before or instead of ever
+// dispatching it) are therefore safe, harmless no-ops via the same
+// GetEventPtr-returns-null path already used for a post-dispatch stashed
+// event (see EventHandle's doc comment) - not a special case here.
+JSValue JsEventConstructor(JSContext *ctx, JSValueConst /*new_target*/,
+                            int argc, JSValueConst *argv) {
+  if (argc < 1) {
+    JS_ThrowTypeError(ctx, "Event/CustomEvent constructor requires a type argument");
+    return JS_EXCEPTION;
+  }
+  const char *type = JS_ToCString(ctx, argv[0]);
+  std::string eventType = type != nullptr ? type : "";
+  JS_FreeCString(ctx, type);
+
+  bool bubbles = false;
+  bool cancelable = false;
+  JSValue detail = JS_NULL;
+  if (argc >= 2 && JS_IsObject(argv[1])) {
+    JSValue bubblesVal = JS_GetPropertyStr(ctx, argv[1], "bubbles");
+    if (!JS_IsUndefined(bubblesVal)) {
+      bubbles = JS_ToBool(ctx, bubblesVal) > 0;
+    }
+    JS_FreeValue(ctx, bubblesVal);
+
+    JSValue cancelableVal = JS_GetPropertyStr(ctx, argv[1], "cancelable");
+    if (!JS_IsUndefined(cancelableVal)) {
+      cancelable = JS_ToBool(ctx, cancelableVal) > 0;
+    }
+    JS_FreeValue(ctx, cancelableVal);
+
+    // A new reference (or JS_UNDEFINED if the property truly isn't
+    // there) - normalized to JS_NULL either way so `.detail` always
+    // reads back as a value, never `undefined`, matching real
+    // CustomEvent (whose `detail` defaults to null, not absent).
+    JSValue detailVal = JS_GetPropertyStr(ctx, argv[1], "detail");
+    if (!JS_IsUndefined(detailVal)) {
+      detail = detailVal;
+    } else {
+      JS_FreeValue(ctx, detailVal);
+    }
+  }
+
+  JSValue eventObj = JS_NewObjectClass(ctx, g_eventClassId);
+  if (JS_IsException(eventObj)) {
+    JS_FreeValue(ctx, detail);
+    return eventObj;
+  }
+  JS_SetOpaque(eventObj, new EventHandle{nullptr});
+  JS_SetPropertyStr(ctx, eventObj, "type", JS_NewString(ctx, eventType.c_str()));
+  JS_SetPropertyStr(ctx, eventObj, "target", JS_NULL);
+  JS_SetPropertyStr(ctx, eventObj, "bubbles", JS_NewBool(ctx, bubbles));
+  JS_SetPropertyStr(ctx, eventObj, "cancelable", JS_NewBool(ctx, cancelable));
+  JS_SetPropertyStr(ctx, eventObj, "detail", detail);
+  return eventObj;
+}
+
 // A copyable handle to a JS function - the common lifetime/ref-counting
 // shape both JsCallback and JsTimerCallback below share (each just calls
 // the held function differently: with a constructed event object, or
@@ -272,6 +355,22 @@ public:
                        JS_NewString(ctx_, event.type.c_str()));
     JS_SetPropertyStr(ctx_, eventObj, "target",
                        WrapExistingNode(ctx_, event.target));
+    JS_SetPropertyStr(ctx_, eventObj, "bubbles",
+                       JS_NewBool(ctx_, event.Bubbles()));
+    JS_SetPropertyStr(ctx_, eventObj, "cancelable",
+                       JS_NewBool(ctx_, event.Cancelable()));
+    // Only script-dispatched CustomEvents set Event::detail (see
+    // ScriptEventDetail above) - every event this Node model fires
+    // internally leaves it null, so `.detail` reads back as null there
+    // too, matching real DOM's base Event (no detail at all, as opposed
+    // to CustomEvent which always has one, possibly null).
+    if (event.detail != nullptr) {
+      const auto *detail = static_cast<const ScriptEventDetail *>(event.detail);
+      JS_SetPropertyStr(ctx_, eventObj, "detail",
+                         JS_DupValue(detail->ctx, detail->value));
+    } else {
+      JS_SetPropertyStr(ctx_, eventObj, "detail", JS_NULL);
+    }
     JSValueConst argv[] = {eventObj};
     Invoke(1, argv);
     // See EventHandle's doc comment: `event` is only valid for this
@@ -895,6 +994,69 @@ JSValue JsNodeRemoveEventListener(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
+// node.dispatchEvent(event) - `event` must be a real Event/CustomEvent
+// object (JS_GetOpaque2 throws its own TypeError otherwise, same
+// mechanism GetNode/GetEventPtr already rely on elsewhere in this file).
+// Reads type/bubbles/cancelable/detail back off of it (own properties -
+// see JsEventConstructor above) and drives them straight into
+// Node::DispatchEvent, which does the actual capturing/target/bubbling
+// walk exactly as it does for an internally-fired click/change/input.
+// Each listener invoked during that walk gets its *own* freshly-built
+// event object (JsCallback::operator(), same as always) carrying the
+// same type/detail/bubbles/cancelable - not literally `event` itself -
+// so identity (`event === receivedEvent` inside a listener) doesn't
+// hold, consistent with this binding's existing "fresh wrapper per
+// access" tradeoff for nodes (see js_engine.h). preventDefault()/
+// stopPropagation() called by a listener still correctly affects this
+// one dispatch either way, since every one of those fresh objects is
+// backed by the same underlying C++ Event& for the duration of the walk.
+JSValue JsNodeDispatchEvent(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+  Node *node = GetNode(ctx, this_val);
+  if (node == nullptr || argc < 1) {
+    return JS_EXCEPTION;
+  }
+
+  JSValueConst eventObj = argv[0];
+  if (JS_GetOpaque2(ctx, eventObj, g_eventClassId) == nullptr) {
+    return JS_EXCEPTION; // JS_GetOpaque2 already threw a TypeError.
+  }
+
+  JSValue typeVal = JS_GetPropertyStr(ctx, eventObj, "type");
+  const char *typeStr = JS_ToCString(ctx, typeVal);
+  std::string eventType = typeStr != nullptr ? typeStr : "";
+  JS_FreeCString(ctx, typeStr);
+  JS_FreeValue(ctx, typeVal);
+
+  JSValue bubblesVal = JS_GetPropertyStr(ctx, eventObj, "bubbles");
+  bool bubbles = JS_ToBool(ctx, bubblesVal) > 0;
+  JS_FreeValue(ctx, bubblesVal);
+
+  JSValue cancelableVal = JS_GetPropertyStr(ctx, eventObj, "cancelable");
+  bool cancelable = JS_ToBool(ctx, cancelableVal) > 0;
+  JS_FreeValue(ctx, cancelableVal);
+
+  // A new reference, freed right after the (synchronous) dispatch
+  // returns - ScriptEventDetail only needs to stay valid for the walk's
+  // duration, same as `detail` itself being stack-local here.
+  JSValue detailVal = JS_GetPropertyStr(ctx, eventObj, "detail");
+  ScriptEventDetail detail{ctx, detailVal};
+
+  // Matches real dispatchEvent(): the node it's called on becomes the
+  // event's target, visible on the *original* object too (not just the
+  // per-listener ones JsCallback builds) for code that inspects it after
+  // dispatchEvent() returns.
+  JS_SetPropertyStr(ctx, eventObj, "target", WrapExistingNode(ctx, node));
+
+  bool defaultPrevented =
+      node->DispatchEvent(eventType, bubbles, cancelable, &detail);
+  JS_FreeValue(ctx, detailVal);
+
+  // Real DOM: returns false if the event is cancelable and some
+  // listener called preventDefault(), true otherwise.
+  return JS_NewBool(ctx, !defaultPrevented);
+}
+
 JSValue JsNodeGetParentNode(JSContext *ctx, JSValueConst this_val) {
   Node *node = GetNode(ctx, this_val);
   if (node == nullptr) {
@@ -977,6 +1139,7 @@ const JSCFunctionListEntry kNodeProto[] = {
     JS_CFUNC_DEF("querySelectorAll", 1, JsNodeQuerySelectorAll),
     JS_CFUNC_DEF("addEventListener", 2, JsNodeAddEventListener),
     JS_CFUNC_DEF("removeEventListener", 2, JsNodeRemoveEventListener),
+    JS_CFUNC_DEF("dispatchEvent", 1, JsNodeDispatchEvent),
     JS_CFUNC_DEF("getData", 1, JsNodeGetData),
     JS_CFUNC_DEF("setData", 2, JsNodeSetData),
     JS_CGETSET_DEF("tagName", JsNodeGetTagName, nullptr),
@@ -1272,6 +1435,15 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   JS_SetPropertyStr(impl_->ctx, global, "cancelAnimationFrame",
                      JS_NewCFunction(impl_->ctx, JsCancelAnimationFrame,
                                       "cancelAnimationFrame", 1));
+  // Same underlying constructor for both names - see JsEventConstructor's
+  // doc comment for why that's exactly right rather than a shortcut.
+  JS_SetPropertyStr(impl_->ctx, global, "Event",
+                     JS_NewCFunction2(impl_->ctx, JsEventConstructor, "Event",
+                                       2, JS_CFUNC_constructor, 0));
+  JS_SetPropertyStr(impl_->ctx, global, "CustomEvent",
+                     JS_NewCFunction2(impl_->ctx, JsEventConstructor,
+                                       "CustomEvent", 2, JS_CFUNC_constructor,
+                                       0));
   JS_FreeValue(impl_->ctx, global);
 }
 

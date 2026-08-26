@@ -46,11 +46,24 @@ namespace artisan {
 //   node.querySelector(selector) / querySelectorAll(selector)
 //   node.addEventListener(type, fn, captureOrOptions)
 //                                           -> fn(event); event has type/
-//                                            target/preventDefault()/
+//                                            target/bubbles/cancelable/
+//                                            detail/preventDefault()/
 //                                            stopPropagation()/
 //                                            stopImmediatePropagation()/
 //                                            defaultPrevented
 //   node.removeEventListener(type, fn, captureOrOptions)
+//   node.dispatchEvent(event) -> !defaultPrevented; walks the same
+//                                            capturing/target/bubbling
+//                                            phases as an internally
+//                                            fired click/change/input
+//   new Event(type, {bubbles, cancelable}) /
+//   new CustomEvent(type, {detail, bubbles, cancelable})
+//                                           -> an event object usable
+//                                            with dispatchEvent above (or
+//                                            fired standalone -
+//                                            preventDefault()/etc. on one
+//                                            that's never dispatched are
+//                                            harmless no-ops)
 //   Node.ELEMENT_NODE / Node.TEXT_NODE
 //   console.log/warn/error(...)
 //   setTimeout(fn, delayMs) / clearTimeout(id)
@@ -70,13 +83,13 @@ namespace artisan {
 // them yet - a natural follow-up, not attempted here). classList/style
 // cover exactly what the rest of this Node model already covers (the
 // "class" attribute's tokens; the same five properties a <style> block
-// supports) - not real CSS's full surface. There's no CustomEvent/
-// script-side dispatchEvent(arbitraryEvent) - only the event types
-// main.cpp already fires internally (click/change/input) go through the
-// real bubbling/capturing/preventDefault machinery; a script can't
-// construct and fire its own event. And every wrapped node is a fresh JS
-// object per call (WrapExistingNode, js_engine.cpp) - `===` between two
-// references to the same underlying node is always false, and a second,
+// supports) - not real CSS's full surface. And every wrapped node is a
+// fresh JS object per call (WrapExistingNode, js_engine.cpp) - `===`
+// between two references to the same underlying node is always false
+// (this includes a dispatched event's `.target`, and - per listener - a
+// dispatchEvent-driven event itself: every listener invoked by one
+// dispatchEvent(event) call gets its own fresh object carrying the same
+// type/detail/bubbles/cancelable, not `event` itself), and a second,
 // independently-obtained reference to a node removed (see removeChild/
 // remove above) through a *different* reference can dangle if the
 // reference that now owns it gets garbage-collected first.

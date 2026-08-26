@@ -220,39 +220,46 @@ void Node::DispatchAt(const std::string &type, Event &event,
   }
 }
 
-bool Node::DispatchEvent(const std::string &type) const {
-  Event event(type, const_cast<Node *>(this));
+bool Node::DispatchEvent(const std::string &type, bool bubbles,
+                          bool cancelable, const void *detail) const {
+  Event event(type, const_cast<Node *>(this), bubbles, cancelable);
+  event.detail = detail;
 
-  // Capturing phase: root -> this node's immediate parent, in that
-  // order (outermost ancestor first) - collect ancestors first since
-  // the walk needs to go root-to-target, the opposite direction
-  // parent_ chases.
-  std::vector<Node *> ancestors;
-  for (Node *p = parent_; p != nullptr; p = p->parent_) {
-    ancestors.push_back(p);
-  }
-  for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it) {
-    (*it)->DispatchAt(type, event, /*includeCapture=*/true,
-                       /*includeBubble=*/false);
-    if (event.PropagationStopped()) {
-      return event.DefaultPrevented();
+  if (bubbles) {
+    // Capturing phase: root -> this node's immediate parent, in that
+    // order (outermost ancestor first) - collect ancestors first since
+    // the walk needs to go root-to-target, the opposite direction
+    // parent_ chases.
+    std::vector<Node *> ancestors;
+    for (Node *p = parent_; p != nullptr; p = p->parent_) {
+      ancestors.push_back(p);
+    }
+    for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it) {
+      (*it)->DispatchAt(type, event, /*includeCapture=*/true,
+                         /*includeBubble=*/false);
+      if (event.PropagationStopped()) {
+        return event.DefaultPrevented();
+      }
     }
   }
 
   // Target phase: both capture- and non-capture-registered listeners on
   // this node fire here, in registration order - the two phases
-  // converge at the target itself.
+  // converge at the target itself, and it always runs regardless of
+  // `bubbles` (that flag only affects whether the ancestor phases do).
   DispatchAt(type, event, /*includeCapture=*/true, /*includeBubble=*/true);
   if (event.PropagationStopped()) {
     return event.DefaultPrevented();
   }
 
-  // Bubbling phase: this node's parent -> root.
-  for (Node *p = parent_; p != nullptr; p = p->parent_) {
-    p->DispatchAt(type, event, /*includeCapture=*/false,
-                  /*includeBubble=*/true);
-    if (event.PropagationStopped()) {
-      return event.DefaultPrevented();
+  if (bubbles) {
+    // Bubbling phase: this node's parent -> root.
+    for (Node *p = parent_; p != nullptr; p = p->parent_) {
+      p->DispatchAt(type, event, /*includeCapture=*/false,
+                    /*includeBubble=*/true);
+      if (event.PropagationStopped()) {
+        return event.DefaultPrevented();
+      }
     }
   }
 

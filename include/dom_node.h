@@ -20,17 +20,31 @@ class Node;
 // StopImmediatePropagation on it, and DispatchEvent's own capturing/
 // bubbling walk (see dom_node.cpp) checks those flags between each
 // ancestor/listener to decide whether to keep going - the same shape
-// real DOM's Event has, just without the bubbles/cancelable/composed
-// configuration flags real DOM lets a dispatcher set (every event this
-// Node model fires bubbles and is cancelable, unconditionally).
+// real DOM's Event has, including the bubbles/cancelable configuration a
+// dispatcher can set (DispatchEvent's own default args keep every event
+// this Node model fires internally - click/change/input - bubbling and
+// cancelable, unconditionally, exactly like before this class grew the
+// two flags).
 class Event {
 public:
-  Event(std::string type, Node *target) : type(std::move(type)), target(target) {}
+  Event(std::string type, Node *target, bool bubbles = true,
+        bool cancelable = true)
+      : type(std::move(type)), target(target), bubbles_(bubbles),
+        cancelable_(cancelable) {}
 
   std::string type;
   Node *target;
 
-  void PreventDefault() { defaultPrevented_ = true; }
+  bool Bubbles() const { return bubbles_; }
+  bool Cancelable() const { return cancelable_; }
+
+  // A no-op when Cancelable() is false, matching real DOM (preventDefault
+  // on a non-cancelable event has no effect).
+  void PreventDefault() {
+    if (cancelable_) {
+      defaultPrevented_ = true;
+    }
+  }
   bool DefaultPrevented() const { return defaultPrevented_; }
 
   void StopPropagation() { propagationStopped_ = true; }
@@ -47,7 +61,18 @@ public:
     return immediatePropagationStopped_;
   }
 
+  // Opaque payload for a script-constructed CustomEvent's `detail` -
+  // meaningless to Node/DispatchEvent/DispatchAt themselves (never read
+  // or interpreted anywhere in dom_node.h/.cpp), just carried through the
+  // dispatch walk so whichever binding built this Event from a script-
+  // supplied object (see dispatchEvent in js_engine.cpp) can hand it back
+  // to each listener however that binding represents events. nullptr for
+  // every event this Node model fires internally.
+  const void *detail = nullptr;
+
 private:
+  bool bubbles_;
+  bool cancelable_;
   bool defaultPrevented_ = false;
   bool propagationStopped_ = false;
   bool immediatePropagationStopped_ = false;
@@ -202,13 +227,20 @@ public:
   // only), target (both capture- and non-capture-registered listeners on
   // this node itself, in registration order), then bubbling (this node's
   // parent -> root, non-capture listeners only) - same shape real DOM's
-  // dispatchEvent uses, just without a way to opt an individual dispatch
-  // out of bubbling (every event fired here bubbles). A handler calling
-  // event.StopPropagation()/StopImmediatePropagation() halts the walk
-  // early, checked between each ancestor/listener. Returns whether any
-  // handler called PreventDefault() - main.cpp uses this to decide
-  // whether e.g. a <a href> click should actually navigate.
-  bool DispatchEvent(const std::string &type) const;
+  // dispatchEvent uses. `bubbles = false` skips both ancestor phases,
+  // running only the target phase. `cancelable = false` makes the
+  // dispatched Event's PreventDefault() a no-op (see Event above).
+  // `detail` is carried onto the constructed Event unexamined - see
+  // Event::detail. A handler calling event.StopPropagation()/
+  // StopImmediatePropagation() halts the walk early, checked between
+  // each ancestor/listener. Returns whether any handler called
+  // PreventDefault() - main.cpp uses this to decide whether e.g. a <a
+  // href> click should actually navigate. The defaults (bubbles=true,
+  // cancelable=true, detail=nullptr) match every event this Node model
+  // fires internally (click/change/input) - unchanged from before this
+  // gained parameters.
+  bool DispatchEvent(const std::string &type, bool bubbles = true,
+                      bool cancelable = true, const void *detail = nullptr) const;
 
 private:
   Node(NodeType type, std::string tagName, std::string text);

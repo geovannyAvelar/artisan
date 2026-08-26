@@ -251,11 +251,18 @@ re-appendable), `cloneNode(deep)`, `matches(selector)`/
 `children`, `querySelector`/`querySelectorAll` (same bounded selector
 grammar as Using CSS - one compound selector, no combinators),
 `addEventListener(type, fn, captureOrOptions)`/`removeEventListener` -
-any type string works, but only `"click"`, `"change"` (checkbox/radio),
-and `"input"` (text fields) actually fire today; `fn` receives a real
-event object (`type`/`target`/`preventDefault()`/`stopPropagation()`/
-`stopImmediatePropagation()`/`defaultPrevented`), dispatched through the
-usual capturing/target/bubbling phases. `document` has
+any type string works; `"click"`, `"change"` (checkbox/radio), and
+`"input"` (text fields) fire on their own, and a script can fire any
+other type itself with `dispatchEvent` below. `fn` receives a real event
+object (`type`/`target`/`bubbles`/`cancelable`/`detail`/
+`preventDefault()`/`stopPropagation()`/`stopImmediatePropagation()`/
+`defaultPrevented`), dispatched through the usual capturing/target/
+bubbling phases. `element.dispatchEvent(event)` fires a script-built
+`new Event(type, {bubbles, cancelable})` or `new CustomEvent(type,
+{detail, bubbles, cancelable})` (both default `bubbles`/`cancelable` to
+`false`, matching real DOM) through that same machinery, returning
+`false` if the event was cancelable and some listener called
+`preventDefault()`, `true` otherwise. `document` has
 `getElementById`/`querySelector`/`querySelectorAll`/`createElement`/
 `createTextNode`. Globals: `console.log`/`warn`/`error`, `setTimeout`/
 `setInterval`/`clearTimeout`/`clearInterval`, `requestAnimationFrame`/
@@ -263,19 +270,19 @@ usual capturing/target/bubbling phases. `document` has
 ms - a callback that calls `requestAnimationFrame` again, the normal way
 to animate, schedules for the *next* one, never the current call).
 
-A few real gaps: no `CustomEvent`/script-constructed
-`element.dispatchEvent(...)` - only the three event types above, fired
-internally, go through the real dispatch machinery. `classList`/`style`/
-`getData`/`setData` are JS-only for now (Go doesn't have them yet).
-`children`/`querySelectorAll` return a plain array, a snapshot at call
-time, not a live list - and every wrapped node is a fresh JS object per
-call, so `===` between two references to the same underlying node is
-always `false`; compare `tagName`/`getAttribute` values, or hold onto
-one reference, instead of relying on identity. That also means a
-*second*, independently-obtained reference to a node removed through a
-different reference can dangle if the reference that now owns it gets
-garbage-collected first - hold onto the reference `removeChild`/
-`remove()` actually returned if you plan to keep using the node.
+A few real gaps: `classList`/`style`/`getData`/`setData` are JS-only for
+now (Go doesn't have them yet). `children`/`querySelectorAll` return a
+plain array, a snapshot at call time, not a live list - and every
+wrapped node is a fresh JS object per call, so `===` between two
+references to the same underlying node is always `false` (this includes
+a dispatched event's `.target`, and - within one `dispatchEvent(event)`
+call - `event` itself vs. what each listener actually receives); compare
+`tagName`/`getAttribute` values, or hold onto one reference, instead of
+relying on identity. That also means a *second*, independently-obtained
+reference to a node removed through a different reference can dangle if
+the reference that now owns it gets garbage-collected first - hold onto
+the reference `removeChild`/`remove()` actually returned if you plan to
+keep using the node.
 
 ## Using CSS
 
