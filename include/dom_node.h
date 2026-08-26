@@ -13,6 +13,19 @@ enum class NodeType {
   kText,
 };
 
+class Node;
+
+// Passed to an EventHandler when DispatchEvent fires it - deliberately
+// minimal (no bubbling/capturing, no preventDefault): direct dispatch on
+// the target only, the same reach Click() already had before it became a
+// thin wrapper over this.
+struct Event {
+  std::string type;
+  Node *target;
+};
+
+using EventHandler = std::function<void(const Event &)>;
+
 // A single node of the mutable DOM tree a future scripting layer will
 // manipulate at runtime - create/append/remove children, set attributes,
 // change text. Unlike Widget (the compiled tree artisanc bakes into the
@@ -50,6 +63,9 @@ public:
 
   // kElement only. Returns nullptr if the attribute isn't set.
   const std::string *GetAttribute(const std::string &name) const;
+  bool HasAttribute(const std::string &name) const {
+    return GetAttribute(name) != nullptr;
+  }
   void SetAttribute(const std::string &name, const std::string &value);
   void RemoveAttribute(const std::string &name);
 
@@ -68,6 +84,13 @@ public:
     return children_;
   }
 
+  // nullptr if this is the last/first child, or has no parent at all
+  // (found by identity in parent()->children(), same as a real DOM would
+  // track via prev/next pointers - this tree just doesn't keep those, so
+  // it's a linear scan instead).
+  Node *nextSibling() const;
+  Node *previousSibling() const;
+
   // Depth-first search of this subtree (including this node itself) for
   // an element whose "id" attribute equals `id`. nullptr if none match -
   // the lookup a future scripting layer's getElementById would use, and
@@ -77,6 +100,13 @@ public:
   // Takes ownership of `child`, appending it after any existing children.
   // Returns a non-owning pointer to it.
   Node *AppendChild(std::unique_ptr<Node> child);
+
+  // Takes ownership of `child`, inserting it directly before `before` (a
+  // no-op search failure - `before` not actually a child of this node -
+  // falls back to appending, same as AppendChild). `before == nullptr`
+  // means append at the end, matching real DOM insertBefore(node, null).
+  // Returns a non-owning pointer to `child`.
+  Node *InsertBefore(std::unique_ptr<Node> child, Node *before);
 
   // Detaches `child` from this node and destroys it (and its subtree).
   // Does nothing if `child` isn't actually a child of this node.
@@ -88,14 +118,33 @@ public:
 
   using ClickHandler = std::function<void()>;
 
-  // kElement only. Registers the handler Click() invokes - the hook a
-  // future scripting layer's addEventListener would bind to. Typically
-  // used for <button>; harmless on other elements today since nothing
-  // else in this tree calls Click() on them.
+  // kElement only. Registers *the* click handler, replacing any previous
+  // one - same as a real DOM's `element.onclick = fn` (as opposed to
+  // AddEventListener("click", ...) below, which - like real
+  // addEventListener - accumulates independently of this and of each
+  // other). Implemented as a thin wrapper over AddEventListener; kept
+  // around (rather than folded away) since every existing caller - C++
+  // apps, the Go bridge (node_c_api.cpp) - already depends on this exact
+  // zero-argument signature.
   void SetOnClick(ClickHandler handler);
 
-  // Invokes the click handler if one is set. No-op otherwise.
+  // Invokes every registered click handler (SetOnClick's, plus any
+  // AddEventListener("click", ...) ones) - a thin wrapper over
+  // DispatchEvent("click"). No-op if none are registered.
   void Click() const;
+
+  // kElement only. Registers `handler` for `type`, alongside (not
+  // replacing) any other handler already registered for that type -
+  // "type" is an open string, not an enum: this Node model doesn't
+  // predefine which event types exist, any more than a real DOM's
+  // addEventListener does. main.cpp is what actually decides when to
+  // fire which types (DispatchEvent("click")/"change"/"input" at the
+  // points those already happen today).
+  void AddEventListener(const std::string &type, EventHandler handler);
+
+  // Invokes every handler registered for `type`, in registration order,
+  // each with Event{type, this}. No-op if none are registered.
+  void DispatchEvent(const std::string &type) const;
 
 private:
   Node(NodeType type, std::string tagName, std::string text);
@@ -104,7 +153,7 @@ private:
   std::string tagName_;
   std::string text_;
   std::map<std::string, std::string> attributes_;
-  ClickHandler onClick_;
+  std::map<std::string, std::vector<EventHandler>> listeners_;
   const unsigned char *imageData_ = nullptr;
   int imageDataSize_ = 0;
 

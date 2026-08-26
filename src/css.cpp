@@ -136,7 +136,9 @@ bool ParsePixelLength(const std::string &raw, float &out) {
 
 // Splits a compound selector ("div.card#hero", ".a.b", "*", "h1") into its
 // tag/id/class parts. The leading segment (before the first '.'/'#') is
-// the tag - absent or "*" means "any tag" (universal).
+// the tag - absent or "*" means "any tag" (universal). Used both by
+// StyleSheet::Parse's rule parsing and by QuerySelector/QuerySelectorAll
+// below (same grammar, different direction - see css.h).
 Selector ParseSelector(const std::string &raw) {
   Selector selector;
   std::string value = Trim(raw);
@@ -209,6 +211,8 @@ Declarations ParseDeclarations(const std::string &body) {
 // Every part of a compound selector must match - a tag constraint, an id
 // constraint, and every listed class, all AND'd together (an empty part
 // imposes no constraint, so a bare Selector{} - "*" - matches anything).
+// Used both by StyleSheet::Resolve's cascade and by QuerySelector/
+// QuerySelectorAll below, in the opposite direction (see css.h).
 bool Matches(const Selector &selector, const Node &node) {
   if (node.type() != NodeType::kElement) {
     return false;
@@ -281,6 +285,54 @@ struct PropertyWinner {
 };
 
 } // namespace
+
+// Depth-first walk of `root`'s subtree (not including `root` itself - a
+// real querySelector never matches the element you called it on) testing
+// each element against `selector`, calling ParseSelector/Matches above -
+// fine to call from out here despite them being anonymous-namespace-local
+// (that only restricts visibility to other translation units, not within
+// this one, and this is textually after their definitions). Shared by
+// QuerySelector (stops at the first match) and QuerySelectorAll (collects
+// every match, in document order) below. Takes/hands back mutable Node*
+// throughout despite children() only ever returning a const vector
+// reference: unique_ptr::get() doesn't propagate that constness to the
+// pointee (a standard library quirk, not one of this codebase's own
+// choices), so `childPtr.get()` is already Node*, not const Node*.
+namespace {
+template <typename Callback>
+void ForEachMatch(const Selector &selector, Node &root,
+                   const Callback &callback) {
+  for (const auto &childPtr : root.children()) {
+    Node *child = childPtr.get();
+    if (Matches(selector, *child)) {
+      if (!callback(child)) {
+        return;
+      }
+    }
+    ForEachMatch(selector, *child, callback);
+  }
+}
+} // namespace
+
+Node *QuerySelector(Node &root, const std::string &selector) {
+  Selector parsed = ParseSelector(selector);
+  Node *found = nullptr;
+  ForEachMatch(parsed, root, [&](Node *match) {
+    found = match;
+    return false; // Stop at the first match.
+  });
+  return found;
+}
+
+std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector) {
+  Selector parsed = ParseSelector(selector);
+  std::vector<Node *> results;
+  ForEachMatch(parsed, root, [&](Node *match) {
+    results.push_back(match);
+    return true; // Keep going - collect every match.
+  });
+  return results;
+}
 
 StyleSheet StyleSheet::Parse(const std::string &css) {
   StyleSheet sheet;

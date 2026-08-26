@@ -223,6 +223,7 @@ add_executable(artisan
     src/js_engine.cpp
     src/node_c_api.cpp
     src/css.cpp
+    src/timer_queue.cpp
     ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"

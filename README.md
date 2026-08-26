@@ -179,6 +179,49 @@ If moving this checkout later breaks the build, update the `replace` line
 in `goapp/go.mod` to point at the new location (same underlying constraint
 `ARTISAN_PROJECT_SOURCE_DIR` already has for the C++ path).
 
+## Using JavaScript
+
+An `app.js` at the project root is auto-discovered and embedded, same as
+`goapp/` - no flag needed. It runs against a DOM-like API, close to (but
+not) a browser's:
+
+```js
+var list = document.querySelector("#list");
+var items = document.querySelectorAll(".item");
+var item = document.createElement("li");
+item.textContent = "New";
+list.insertBefore(item, items[0]);
+
+document.getElementById("agree").addEventListener("change", function (event) {
+  console.log("checked:", event.target.hasAttribute("checked"));
+});
+
+setTimeout(function () {
+  document.getElementById("status").textContent = "ready";
+}, 500);
+```
+
+`Node` methods/properties: `tagName`, `textContent`, `getAttribute`/
+`setAttribute`/`hasAttribute`/`removeAttribute`, `appendChild`/
+`insertBefore`, `parentNode`/`nextSibling`/`previousSibling`/`children`,
+`querySelector`/`querySelectorAll` (same bounded selector grammar as
+[Using CSS](#using-css) below - one compound selector, no combinators),
+`addEventListener(type, fn)` where `fn` receives `{type, target}` - any
+type string works, but only `"click"`, `"change"` (checkbox/radio), and
+`"input"` (text fields) actually fire today. `document` has
+`getElementById`/`querySelector`/`querySelectorAll`/`createElement`/
+`createTextNode`. Globals: `console.log`/`warn`/`error`, `setTimeout`/
+`setInterval`/`clearTimeout`/`clearInterval`.
+
+A few real gaps: no `removeChild`/`remove()` (this Node model destroys a
+child on detach rather than keeping it alive-but-detached, so exposing
+removal to script safely needs that changed first) and no
+`removeEventListener`. `children`/`querySelectorAll` return a plain
+array, a snapshot at call time, not a live list - and every wrapped node
+is a fresh JS object per call, so `===` between two references to the
+same underlying node is always `false`; compare `tagName`/`getAttribute`
+values, or hold onto one reference, instead of relying on identity.
+
 ## Using CSS
 
 A `<style>` block anywhere in a page's markup can style elements by tag,

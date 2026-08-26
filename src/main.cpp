@@ -26,6 +26,7 @@
 using artisan::BoxRegion;
 using artisan::InputFocus;
 using artisan::Node;
+using artisan::TimerQueue;
 
 constexpr int kInitialWidth = 800;
 constexpr int kInitialHeight = 600;
@@ -252,20 +253,32 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  // jsEngine must outlive `document`: event listeners registered below
+  // (addEventListener, and SetOnClick/AddEventListener called from a
+  // script through it) hold QuickJS function references (JsCallback) that
+  // get released when the Node owning them is destroyed, and that release
+  // needs a live JSContext. Declared *before* `document` so that's true
+  // even on an early-return path that skips navigate()'s/main()'s own
+  // explicit teardown sequencing below and just falls through to
+  // ordinary scope-exit destruction, which runs in reverse declaration
+  // order - document's Nodes (and their JsCallbacks) destroyed first,
+  // this (now safe to go) destroyed after. A unique_ptr (rather than a
+  // stack object) additionally lets navigate() below tear down and
+  // rebuild both per page-visit, in that same safe order: release the
+  // old document (and every JsCallback it holds) before releasing the
+  // old jsEngine, then build the new page and construct a fresh jsEngine
+  // bound to it.
+  std::unique_ptr<artisan::JsEngine> jsEngine;
+
   std::unique_ptr<Node> document;
 
-  // jsEngine must outlive `document`: click handlers registered below
-  // hold QuickJS function references (JsCallback) that get released when
-  // the Node owning them is destroyed, and that release needs a live
-  // JSContext. A unique_ptr (rather than a stack object) lets Navigate()
-  // below tear down and rebuild both per page-visit, in the safe order:
-  // release the old document (and every JsCallback it holds) before
-  // releasing the old jsEngine, then build the new page and construct a
-  // fresh jsEngine bound to it. The same ordering happens once more, via
-  // the explicit document.reset() right before main returns: it destroys
-  // the final Node tree while jsEngine/its JSContext are still alive,
-  // before jsEngine's own (now safe) destructor runs implicitly after.
-  std::unique_ptr<artisan::JsEngine> jsEngine;
+  // setTimeout/setInterval's backing store - a runtime-loop concern (see
+  // timer_queue.h), so it lives here alongside focus/scrollY/etc. rather
+  // than inside JsEngine, which only ever schedules/cancels into it.
+  // Reset on every navigate() (below), same as focus/scrollY - a timer
+  // from a previous page firing into a torn-down Node tree would be a
+  // use-after-free.
+  TimerQueue timerQueue;
 
   InputFocus focus;
   bool isSelecting = false;
@@ -308,7 +321,8 @@ int main(int argc, char *argv[]) {
     document = page->build();
     artisan::SetupApp(*document);
     ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
-    jsEngine = std::make_unique<artisan::JsEngine>(*document);
+    timerQueue = TimerQueue{};
+    jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue);
     std::string appScript = artisan::GetAppScript();
     if (!appScript.empty() && !jsEngine->RunScript(appScript, "app.js")) {
       std::cerr << "main: the app script failed to run\n";
@@ -333,11 +347,13 @@ int main(int argc, char *argv[]) {
     if (target->tagName() == "input" && artisan::IsCheckableInputType(*target)) {
       const std::string *type = target->GetAttribute("type");
       bool alreadyChecked = target->GetAttribute("checked") != nullptr;
+      bool stateChanged = true;
       if (*type == "radio") {
         // Matches real <input type=radio> behavior: clicking the already-
-        // checked radio in a group is a no-op, only clicking a *different*
-        // one changes the selection.
-        if (!alreadyChecked) {
+        // checked radio in a group is a no-op (no state change, no
+        // "change" event), only clicking a *different* one does anything.
+        stateChanged = !alreadyChecked;
+        if (stateChanged) {
           target->SetAttribute("checked", "checked");
           UncheckOtherRadiosInGroup(*document, target);
         }
@@ -345,6 +361,11 @@ int main(int argc, char *argv[]) {
         target->RemoveAttribute("checked");
       } else {
         target->SetAttribute("checked", "checked");
+      }
+      // Real checkbox/radio fire both - "change" first (state already
+      // updated above), then "click".
+      if (stateChanged) {
+        target->DispatchEvent("change");
       }
       target->Click();
     } else if (target->tagName() == "input") {
@@ -529,6 +550,7 @@ int main(int argc, char *argv[]) {
 
         if (valueChanged) {
           focus.node->SetAttribute("value", value);
+          focus.node->DispatchEvent("input");
           needsRedraw = true;
         }
         break;
@@ -542,6 +564,7 @@ int main(int argc, char *argv[]) {
           focus.cursorPos += static_cast<int>(std::string(event.text.text).size());
           focus.selectionAnchor = focus.cursorPos;
           focus.node->SetAttribute("value", value);
+          focus.node->DispatchEvent("input");
           needsRedraw = true;
         }
         break;
@@ -643,6 +666,15 @@ int main(int argc, char *argv[]) {
       default:
         break;
       }
+    }
+
+    // Checked once per iteration of this otherwise event-driven loop -
+    // there's no separate timer thread/signal, so a due setTimeout/
+    // setInterval only actually runs when the loop happens to come back
+    // around to this point. The loop is uncapped (no SDL_Delay anywhere),
+    // so in practice that's effectively immediately.
+    if (timerQueue.FireDue(SDL_GetTicks())) {
+      needsRedraw = true;
     }
 
     if (needsRedraw) {

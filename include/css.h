@@ -68,4 +68,16 @@ private:
   std::vector<Rule> rules_;
 };
 
+// The other direction from StyleSheet::Resolve: given a selector string
+// (the same bounded grammar Selector documents - one compound selector,
+// no comma-lists/combinators) rather than a node, find node(s) it matches
+// within `root`'s subtree (not including `root` itself), in document
+// order. QuerySelector stops at the first match (nullptr if none);
+// QuerySelectorAll collects every match. Backs document/node's
+// querySelector(All) JS bindings (js_engine.cpp) - a snapshot at call
+// time, not a live view, same simplification WidgetTree's own "one-shot,
+// not a live view" comment already documents for a different tree.
+Node *QuerySelector(Node &root, const std::string &selector);
+std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector);
+
 } // namespace artisan
