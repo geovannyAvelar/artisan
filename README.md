@@ -48,7 +48,19 @@ Scaffolds:
 my-app/
   pages/index.html   # starter markup - the page the app opens on
   src/main.cpp        # SetupApp(Node&) - native startup code
+  CMakeLists.txt      # builds this project directly, no artisan-cli needed
 ```
+
+A C++ project (not `--lang go`) also gets its own `CMakeLists.txt`, so
+`cmake -S my-app -B my-app/build && cmake --build my-app/build --target
+artisan` works on its own - no `artisan-cli` involved at build time. It
+discovers `pages/**/*.html`/`src/**/*.cpp`/`app.js` itself (same
+conventions as `artisan-cli build`, just re-implemented in CMake) and
+`add_subdirectory()`s this checkout to pull in the real build - so Skia
+still needs to be built there first (`./build_skia.sh`), same
+prerequisite either way. If this checkout moves, update the
+`ARTISAN_CHECKOUT_DIR` cache variable at the top of the generated file
+(same constraint `goapp/go.mod`'s `replace` line has for a Go project).
 
 Add more pages under `pages/` - nested folders become nested routes,
 Next.js-style (`pages/settings/profile.html` becomes the route

@@ -410,6 +410,101 @@ std::string GoModTemplate() {
   return out.str();
 }
 
+// Lets a C++ project build directly with plain cmake/ninja - no
+// artisan-cli involved - by discovering the same pages/**/*.html,
+// src/**/*.cpp, and app.js this project's own artisan-cli build already
+// would, in CMake itself, then add_subdirectory()-ing the artisan
+// checkout with those computed as CACHE variables (the exact mechanism
+// ConfigureAndBuild already drives via -D flags - a CACHE variable set
+// here before add_subdirectory() seeds the subdirectory's own `set(...
+// CACHE ...)` calls the same way a command-line -D would).
+//
+// This is a second implementation of DiscoverProject/DiscoverPages
+// (src/cli/main.cpp) in CMake's own glob/string/regex vocabulary, not a
+// call back into artisan-cli - keep the two in sync if that discovery
+// logic ever changes. One simplification versus DiscoverPages: only the
+// index page's position is functionally significant (main.cpp opens on
+// pages.front()), so this doesn't bother fully replicating its
+// alphabetical re-sort for the rest - just a plain list(SORT) for
+// reasonable determinism, with the index entry (if any) forced to the
+// front afterward.
+std::string CMakeListsTemplate() {
+  fs::path artisanCheckout = fs::path(ARTISAN_PROJECT_SOURCE_DIR);
+  std::ostringstream out;
+  out << R"cmake(cmake_minimum_required(VERSION 3.20)
+
+get_filename_component(ARTISAN_PROJECT_NAME "${CMAKE_CURRENT_SOURCE_DIR}" NAME)
+project(${ARTISAN_PROJECT_NAME} LANGUAGES CXX)
+
+# Path to the artisan framework checkout this project was scaffolded
+# from - update this if that checkout moves (same constraint
+# goapp/go.mod's `replace` line has for a Go project - see README).
+# Needs Skia already built there (./build_skia.sh) - this file only
+# builds this project, it doesn't build Skia itself.
+set(ARTISAN_CHECKOUT_DIR ")cmake"
+      << artisanCheckout.string() << R"cmake(" CACHE PATH
+    "Path to the artisan framework checkout")
+
+# --- Page discovery: pages/**/*.html -> route=path, Next.js-style
+# nested routes (pages/settings/profile.html -> "settings/profile"; a
+# folder's own index.html stands for that folder's route, e.g.
+# pages/settings/index.html -> "settings"). The top-level pages/index.html
+# stays "index" and is forced to the front below, since it's the page
+# the app opens on.
+file(GLOB_RECURSE ARTISAN_PAGE_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/pages/*.html")
+
+set(ARTISAN_UI_SOURCES_LIST "")
+set(ARTISAN_INDEX_ENTRY "")
+foreach(page_file ${ARTISAN_PAGE_FILES})
+    file(RELATIVE_PATH route_name "${CMAKE_CURRENT_SOURCE_DIR}/pages" "${page_file}")
+    string(REGEX REPLACE "\\.html$" "" route_name "${route_name}")
+    string(REGEX REPLACE "^(.+)/index$" "\\1" route_name "${route_name}")
+    set(entry "${route_name}=${page_file}")
+    if(route_name STREQUAL "index")
+        set(ARTISAN_INDEX_ENTRY "${entry}")
+    else()
+        list(APPEND ARTISAN_UI_SOURCES_LIST "${entry}")
+    endif()
+endforeach()
+list(SORT ARTISAN_UI_SOURCES_LIST)
+if(NOT ARTISAN_INDEX_ENTRY STREQUAL "")
+    list(PREPEND ARTISAN_UI_SOURCES_LIST "${ARTISAN_INDEX_ENTRY}")
+endif()
+
+if(ARTISAN_UI_SOURCES_LIST STREQUAL "")
+    message(FATAL_ERROR "No pages/**/*.html found - a project needs at least one page")
+endif()
+
+# --- Native C++ source discovery: every src/**/*.cpp - a .cpp's
+# location is just organization, no route logic needed.
+file(GLOB_RECURSE ARTISAN_APP_CPP_SOURCES_LIST CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+list(SORT ARTISAN_APP_CPP_SOURCES_LIST)
+
+set(ARTISAN_APP_JS_SOURCE_VALUE "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.js")
+    set(ARTISAN_APP_JS_SOURCE_VALUE "${CMAKE_CURRENT_SOURCE_DIR}/app.js")
+endif()
+
+set(ARTISAN_UI_SOURCES "${ARTISAN_UI_SOURCES_LIST}" CACHE STRING "" FORCE)
+set(ARTISAN_APP_CPP_SOURCES "${ARTISAN_APP_CPP_SOURCES_LIST}" CACHE STRING "" FORCE)
+set(ARTISAN_APP_JS_SOURCE "${ARTISAN_APP_JS_SOURCE_VALUE}" CACHE STRING "" FORCE)
+set(ARTISAN_APP_GO_SOURCE "" CACHE STRING "" FORCE)
+
+# Pulls in the real `artisan` executable target (and everything else the
+# checkout's own CMakeLists.txt defines - artisanc, artisan_cli, ...) -
+# `cmake --build build --target artisan` builds just this project's
+# binary; a plain `cmake --build build` (no --target) builds those too.
+# Via the ARTISAN_CHECKOUT_DIR cache variable (not the literal path
+# above again) so overriding it - e.g. `cmake -B build
+# -DARTISAN_CHECKOUT_DIR=...` after moving the checkout - actually takes
+# effect, rather than only updating a comment nobody re-reads.
+add_subdirectory("${ARTISAN_CHECKOUT_DIR}" artisan_build)
+)cmake";
+  return out.str();
+}
+
 // ArtisanSetupApp is the Go counterpart to SetupApp above - see
 // go/artisango's own doc comment for the full picture. The trampoline
 // (ArtisanSetupApp/unsafe.Pointer) is boilerplate every Go app needs
@@ -509,6 +604,7 @@ int RunNew(int argc, char *argv[]) {
   } else {
     CreateDirectory(projectDir / "src");
     WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
+    WriteFile(projectDir / "CMakeLists.txt", CMakeListsTemplate());
   }
 
   std::cout << "artisan-cli: created a new " << (lang == "go" ? "Go" : "C++")

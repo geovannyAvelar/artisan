@@ -184,8 +184,8 @@ else()
     file(WRITE "${GENERATED_GO_STUB_CPP}"
         "#include \"node_c_api.h\"\n"
         "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n"
-        "extern \"C\" void ArtisanGoInvokeClickHandler(uintptr_t) {}\n"
-        "extern \"C\" void ArtisanGoReleaseClickHandler(uintptr_t) {}\n")
+        "extern \"C\" void ArtisanGoInvokeHandler(uintptr_t) {}\n"
+        "extern \"C\" void ArtisanGoReleaseHandler(uintptr_t) {}\n")
 endif()
 
 # A project using Go (or one with no native app code at all) has nothing
