@@ -23,6 +23,10 @@ on:
 
 permissions:
   contents: write
+  # See release.yml's permissions comment: apt-repo.yml (called below) needs
+  # these too, and a reusable workflow only gets the *intersection* of the
+  # caller's and callee's declared permissions.
+  actions: write
   pages: write
   id-token: write
 

@@ -9,8 +9,10 @@ permissions:
   contents: write
   # Reusable workflows (apt-repo.yml's "uses:" below) get the *intersection*
   # of the caller's and callee's permissions, not just what the callee
-  # declares -- so pages/id-token have to be granted here too, or its Pages
-  # deploy step silently loses them despite requesting them itself.
+  # declares -- so actions/pages/id-token have to be granted here too, or
+  # apt-repo.yml's own steps silently lose them despite requesting them
+  # themselves.
+  actions: write
   pages: write
   id-token: write
 
