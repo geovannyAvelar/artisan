@@ -1288,4 +1288,24 @@ bool JsEngine::RunScript(const std::string &source, const std::string &name) {
   return ok;
 }
 
+bool JsEngine::PumpJobQueue() {
+  bool ranAny = false;
+  for (;;) {
+    JSContext *jobCtx = nullptr;
+    int status = JS_ExecutePendingJob(impl_->rt, &jobCtx);
+    if (status == 0) {
+      return ranAny; // No more pending jobs.
+    }
+    ranAny = true;
+    if (status < 0) {
+      // jobCtx is whichever context the failing job actually ran
+      // against - always impl_->ctx here (this process only ever has
+      // the one JSContext this JsEngine created), but PrintException
+      // takes whatever JS_ExecutePendingJob reports rather than
+      // assuming that.
+      PrintException(jobCtx);
+    }
+  }
+}
+
 } // namespace artisan

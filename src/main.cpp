@@ -705,6 +705,19 @@ int main(int argc, char *argv[]) {
       needsRedraw = true;
     }
 
+    // Drains QuickJS's own job queue (every pending Promise .then()/
+    // async-function continuation) once per iteration, after the above -
+    // so a continuation queued by an SDL event handler, a due timer, or
+    // an animation frame this same iteration gets a chance to run before
+    // the render below, rather than sitting queued until some future
+    // iteration. Not per-macrotask-precise (real engines drain
+    // microtasks after *every single* callback, not once per batch) -
+    // see JsEngine::PumpJobQueue's own doc comment for why that's an
+    // accepted simplification here, not a bug.
+    if (jsEngine && jsEngine->PumpJobQueue()) {
+      needsRedraw = true;
+    }
+
     if (needsRedraw) {
       SDL_Texture *newTexture =
           RenderFrame(renderer, measuringWidgetRenderer, *document, focus,

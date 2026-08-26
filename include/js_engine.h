@@ -102,6 +102,24 @@ public:
   // evaluation threw.
   bool RunScript(const std::string &source, const std::string &name);
 
+  // Drains QuickJS's job queue - every pending Promise .then()/.catch()/
+  // async-function continuation - running each to completion (printing
+  // and swallowing an exception the same way every other script entry
+  // point here does, rather than letting one throw take down the rest of
+  // the queue). Without this, a script's Promises/async functions would
+  // parse and start running fine but their continuations would just
+  // never fire - QuickJS doesn't drive its own job queue, an embedder
+  // has to (see JS_ExecutePendingJob in quickjs.h). Expected to be
+  // called once per event-loop iteration (main.cpp), the same footing
+  // as TimerQueue::FireDue/AnimationFrameQueue::FireAll - not a per-
+  // macrotask-precise drain (real engines flush microtasks after *every*
+  // callback, not once per loop iteration), but enough for a
+  // continuation to actually run, within the same iteration or the next
+  // one rather than never. Returns whether anything actually ran, same
+  // reason FireDue/FireAll do - a continuation mutating the DOM should
+  // trigger a redraw.
+  bool PumpJobQueue();
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
