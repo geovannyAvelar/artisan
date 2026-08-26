@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+using artisan::AnimationFrameQueue;
 using artisan::BoxRegion;
 using artisan::InputFocus;
 using artisan::Node;
@@ -280,6 +281,11 @@ int main(int argc, char *argv[]) {
   // use-after-free.
   TimerQueue timerQueue;
 
+  // requestAnimationFrame's backing store - same reasoning/lifetime as
+  // timerQueue above, just a different firing rule (see
+  // animation_frame_queue.h).
+  AnimationFrameQueue animationFrameQueue;
+
   InputFocus focus;
   bool isSelecting = false;
 
@@ -322,7 +328,9 @@ int main(int argc, char *argv[]) {
     artisan::SetupApp(*document);
     ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     timerQueue = TimerQueue{};
-    jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue);
+    animationFrameQueue = AnimationFrameQueue{};
+    jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue,
+                                                     animationFrameQueue);
     std::string appScript = artisan::GetAppScript();
     if (!appScript.empty() && !jsEngine->RunScript(appScript, "app.js")) {
       std::cerr << "main: the app script failed to run\n";
@@ -604,9 +612,16 @@ int main(int argc, char *argv[]) {
                   artisan::IsCheckableInputType(*node)))) {
               activateControl(node);
             } else if (node != nullptr && node->tagName() == "a") {
-              const std::string *href = node->GetAttribute("href");
-              if (href != nullptr) {
-                navigate(*href);
+              // Dispatches "click" first (previously an <a> never fired
+              // any event at all - this both fixes that and gives
+              // preventDefault() real teeth: a handler calling it
+              // suppresses the navigation below, same as a real <a>.
+              bool defaultPrevented = node->DispatchEvent("click");
+              if (!defaultPrevented) {
+                const std::string *href = node->GetAttribute("href");
+                if (href != nullptr) {
+                  navigate(*href);
+                }
               }
             } else if (node != nullptr && node->tagName() == "label") {
               const std::string *forId = node->GetAttribute("for");
@@ -674,6 +689,19 @@ int main(int argc, char *argv[]) {
     // around to this point. The loop is uncapped (no SDL_Delay anywhere),
     // so in practice that's effectively immediately.
     if (timerQueue.FireDue(SDL_GetTicks())) {
+      needsRedraw = true;
+    }
+
+    // requestAnimationFrame callbacks fire every iteration too, not just
+    // when needsRedraw is already true for some other reason - real rAF
+    // drives its own animation loop (a callback that calls
+    // requestAnimationFrame again is the normal way to animate
+    // continuously), it doesn't wait for an unrelated redraw to piggyback
+    // on. SDL_RenderPresent below already runs every iteration regardless
+    // (only the texture regen is conditional on needsRedraw), so "before
+    // the next repaint" and "this iteration" are effectively the same
+    // point here.
+    if (animationFrameQueue.FireAll(static_cast<double>(SDL_GetTicks()))) {
       needsRedraw = true;
     }
 

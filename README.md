@@ -216,35 +216,66 @@ var item = document.createElement("li");
 item.textContent = "New";
 list.insertBefore(item, items[0]);
 
+var removed = list.removeChild(items[items.length - 1]); // still alive - re-appendable
+list.appendChild(removed);
+
 document.getElementById("agree").addEventListener("change", function (event) {
   console.log("checked:", event.target.hasAttribute("checked"));
 });
 
-setTimeout(function () {
-  document.getElementById("status").textContent = "ready";
-}, 500);
+document.getElementById("link").addEventListener("click", function (event) {
+  event.preventDefault(); // suppresses the <a>'s navigation
+});
+
+item.classList.add("highlight");
+item.style.color = "red";
+
+requestAnimationFrame(function (timestampMs) {
+  document.getElementById("status").textContent = "frame at " + timestampMs;
+});
 ```
 
-`Node` methods/properties: `tagName`, `textContent`, `getAttribute`/
-`setAttribute`/`hasAttribute`/`removeAttribute`, `appendChild`/
-`insertBefore`, `parentNode`/`nextSibling`/`previousSibling`/`children`,
-`querySelector`/`querySelectorAll` (same bounded selector grammar as
-[Using CSS](#using-css) below - one compound selector, no combinators),
-`addEventListener(type, fn)` where `fn` receives `{type, target}` - any
-type string works, but only `"click"`, `"change"` (checkbox/radio), and
-`"input"` (text fields) actually fire today. `document` has
+`Node` methods/properties: `tagName`, `nodeType` (1 element / 3 text -
+also `Node.ELEMENT_NODE`/`Node.TEXT_NODE`), `textContent`,
+`getAttribute`/`setAttribute`/`hasAttribute`/`removeAttribute`,
+`classList.add`/`remove`/`toggle`/`contains`/`length`, `style.color`/
+`backgroundColor`/`fontWeight`/`borderColor`/`borderWidth`/`cssText`
+(exactly the five properties [Using CSS](#using-css) below supports,
+merged into the cascade at the highest precedence, same as real inline
+style), `getData(name)`/`setData(name, value)` (a `data-*` attribute,
+`fooBar` <-> `data-foo-bar` - method-based, not true
+`dataset.fooBar` property syntax), `appendChild`/`insertBefore`/
+`removeChild`/`remove()` (the removed node stays alive and
+re-appendable), `cloneNode(deep)`, `matches(selector)`/
+`closest(selector)`, `parentNode`/`nextSibling`/`previousSibling`/
+`children`, `querySelector`/`querySelectorAll` (same bounded selector
+grammar as Using CSS - one compound selector, no combinators),
+`addEventListener(type, fn, captureOrOptions)`/`removeEventListener` -
+any type string works, but only `"click"`, `"change"` (checkbox/radio),
+and `"input"` (text fields) actually fire today; `fn` receives a real
+event object (`type`/`target`/`preventDefault()`/`stopPropagation()`/
+`stopImmediatePropagation()`/`defaultPrevented`), dispatched through the
+usual capturing/target/bubbling phases. `document` has
 `getElementById`/`querySelector`/`querySelectorAll`/`createElement`/
 `createTextNode`. Globals: `console.log`/`warn`/`error`, `setTimeout`/
-`setInterval`/`clearTimeout`/`clearInterval`.
+`setInterval`/`clearTimeout`/`clearInterval`, `requestAnimationFrame`/
+`cancelAnimationFrame` (runs once before the next repaint, timestamp in
+ms - a callback that calls `requestAnimationFrame` again, the normal way
+to animate, schedules for the *next* one, never the current call).
 
-A few real gaps: no `removeChild`/`remove()` (this Node model destroys a
-child on detach rather than keeping it alive-but-detached, so exposing
-removal to script safely needs that changed first) and no
-`removeEventListener`. `children`/`querySelectorAll` return a plain
-array, a snapshot at call time, not a live list - and every wrapped node
-is a fresh JS object per call, so `===` between two references to the
-same underlying node is always `false`; compare `tagName`/`getAttribute`
-values, or hold onto one reference, instead of relying on identity.
+A few real gaps: no `CustomEvent`/script-constructed
+`element.dispatchEvent(...)` - only the three event types above, fired
+internally, go through the real dispatch machinery. `classList`/`style`/
+`getData`/`setData` are JS-only for now (Go doesn't have them yet).
+`children`/`querySelectorAll` return a plain array, a snapshot at call
+time, not a live list - and every wrapped node is a fresh JS object per
+call, so `===` between two references to the same underlying node is
+always `false`; compare `tagName`/`getAttribute` values, or hold onto
+one reference, instead of relying on identity. That also means a
+*second*, independently-obtained reference to a node removed through a
+different reference can dangle if the reference that now owns it gets
+garbage-collected first - hold onto the reference `removeChild`/
+`remove()` actually returned if you plan to keep using the node.
 
 ## Using CSS
 

@@ -54,6 +54,26 @@ void Node::SetImageData(const unsigned char *data, int size) {
   imageDataSize_ = size;
 }
 
+std::unique_ptr<Node> Node::CloneNode(bool deep) const {
+  std::unique_ptr<Node> clone = type_ == NodeType::kElement
+                                     ? CreateElement(tagName_)
+                                     : CreateText(text_);
+  clone->attributes_ = attributes_;
+  // imageData_ is deliberately not copied - it's either a pointer into
+  // artisanc-embedded .rodata (fine to alias) or something the app set
+  // programmatically and may not want the clone silently sharing;
+  // real DOM's cloneNode doesn't have a direct analog here either way,
+  // so this stays unset on the clone like any other newly created node.
+
+  if (deep) {
+    for (const std::unique_ptr<Node> &child : children_) {
+      clone->AppendChild(child->CloneNode(true));
+    }
+  }
+
+  return clone;
+}
+
 Node *Node::AppendChild(std::unique_ptr<Node> child) {
   child->parent_ = this;
   Node *ptr = child.get();
@@ -104,23 +124,26 @@ Node *Node::previousSibling() const {
   return std::prev(it)->get();
 }
 
-void Node::RemoveChild(Node *child) {
+std::unique_ptr<Node> Node::RemoveChild(Node *child) {
   auto it = std::find_if(
       children_.begin(), children_.end(),
       [child](const std::unique_ptr<Node> &n) { return n.get() == child; });
 
   if (it == children_.end()) {
-    return;
+    return nullptr;
   }
 
-  (*it)->parent_ = nullptr;
-  children_.erase(it); // Destroys `child` (and its subtree).
+  std::unique_ptr<Node> owned = std::move(*it);
+  children_.erase(it);
+  owned->parent_ = nullptr;
+  return owned;
 }
 
-void Node::Remove() {
-  if (parent_ != nullptr) {
-    parent_->RemoveChild(this);
+std::unique_ptr<Node> Node::Remove() {
+  if (parent_ == nullptr) {
+    return nullptr;
   }
+  return parent_->RemoveChild(this);
 }
 
 Node *Node::FindById(const std::string &id) {
@@ -146,29 +169,94 @@ void Node::SetOnClick(ClickHandler handler) {
   // AddEventListener, which - like real addEventListener - never
   // replaces anything already registered).
   listeners_["click"].clear();
-  listeners_["click"].push_back(
-      [handler = std::move(handler)](const Event & /*event*/) { handler(); });
+  AddEventListener(
+      "click", [handler = std::move(handler)](Event & /*event*/) { handler(); });
 }
 
 void Node::Click() const { DispatchEvent("click"); }
 
-void Node::AddEventListener(const std::string &type, EventHandler handler) {
-  listeners_[type].push_back(std::move(handler));
+void Node::AddEventListener(const std::string &type, EventHandler handler,
+                             bool capture) {
+  listeners_[type].push_back(Listener{std::move(handler), capture});
 }
 
-void Node::DispatchEvent(const std::string &type) const {
+int Node::RemoveEventListener(
+    const std::string &type, bool capture,
+    const std::function<bool(const EventHandler &)> &predicate) {
+  auto it = listeners_.find(type);
+  if (it == listeners_.end()) {
+    return 0;
+  }
+  std::vector<Listener> &entries = it->second;
+  size_t before = entries.size();
+  entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                [&](const Listener &l) {
+                                  return l.capture == capture &&
+                                         predicate(l.handler);
+                                }),
+                entries.end());
+  return static_cast<int>(before - entries.size());
+}
+
+void Node::DispatchAt(const std::string &type, Event &event,
+                       bool includeCapture, bool includeBubble) const {
   auto it = listeners_.find(type);
   if (it == listeners_.end()) {
     return;
   }
-  Event event{type, const_cast<Node *>(this)};
   // Copy the list before iterating: a handler that calls
-  // SetOnClick/AddEventListener/RemoveAttribute etc. on this same node
-  // could otherwise invalidate listeners_'s iterators mid-dispatch.
-  std::vector<EventHandler> handlers = it->second;
-  for (const EventHandler &handler : handlers) {
-    handler(event);
+  // AddEventListener/RemoveEventListener/RemoveAttribute etc. on this
+  // same node could otherwise invalidate listeners_'s iterators
+  // mid-dispatch.
+  std::vector<Listener> entries = it->second;
+  for (const Listener &entry : entries) {
+    if (event.ImmediatePropagationStopped()) {
+      return;
+    }
+    if ((entry.capture && includeCapture) ||
+        (!entry.capture && includeBubble)) {
+      entry.handler(event);
+    }
   }
+}
+
+bool Node::DispatchEvent(const std::string &type) const {
+  Event event(type, const_cast<Node *>(this));
+
+  // Capturing phase: root -> this node's immediate parent, in that
+  // order (outermost ancestor first) - collect ancestors first since
+  // the walk needs to go root-to-target, the opposite direction
+  // parent_ chases.
+  std::vector<Node *> ancestors;
+  for (Node *p = parent_; p != nullptr; p = p->parent_) {
+    ancestors.push_back(p);
+  }
+  for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it) {
+    (*it)->DispatchAt(type, event, /*includeCapture=*/true,
+                       /*includeBubble=*/false);
+    if (event.PropagationStopped()) {
+      return event.DefaultPrevented();
+    }
+  }
+
+  // Target phase: both capture- and non-capture-registered listeners on
+  // this node fire here, in registration order - the two phases
+  // converge at the target itself.
+  DispatchAt(type, event, /*includeCapture=*/true, /*includeBubble=*/true);
+  if (event.PropagationStopped()) {
+    return event.DefaultPrevented();
+  }
+
+  // Bubbling phase: this node's parent -> root.
+  for (Node *p = parent_; p != nullptr; p = p->parent_) {
+    p->DispatchAt(type, event, /*includeCapture=*/false,
+                  /*includeBubble=*/true);
+    if (event.PropagationStopped()) {
+      return event.DefaultPrevented();
+    }
+  }
+
+  return event.DefaultPrevented();
 }
 
 } // namespace artisan

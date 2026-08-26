@@ -334,6 +334,133 @@ std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector) {
   return results;
 }
 
+bool ElementMatches(const Node &node, const std::string &selector) {
+  return Matches(ParseSelector(selector), node);
+}
+
+Node *Closest(Node &node, const std::string &selector) {
+  Selector parsed = ParseSelector(selector);
+  for (Node *n = &node; n != nullptr; n = n->parent()) {
+    if (Matches(parsed, *n)) {
+      return n;
+    }
+  }
+  return nullptr;
+}
+
+void MergeInlineStyle(const Node &node, Declarations &declarations) {
+  const std::string *styleAttr = node.GetAttribute("style");
+  if (styleAttr == nullptr) {
+    return;
+  }
+  Declarations inlineStyle = ParseDeclarations(*styleAttr);
+  if (inlineStyle.hasColor) {
+    declarations.hasColor = true;
+    declarations.color = inlineStyle.color;
+  }
+  if (inlineStyle.hasBold) {
+    declarations.hasBold = true;
+    declarations.bold = inlineStyle.bold;
+  }
+  if (inlineStyle.hasBackgroundColor) {
+    declarations.hasBackgroundColor = true;
+    declarations.backgroundColor = inlineStyle.backgroundColor;
+  }
+  if (inlineStyle.hasBorderColor) {
+    declarations.hasBorderColor = true;
+    declarations.borderColor = inlineStyle.borderColor;
+  }
+  if (inlineStyle.hasBorderWidth) {
+    declarations.hasBorderWidth = true;
+    declarations.borderWidth = inlineStyle.borderWidth;
+  }
+}
+
+namespace {
+
+// Parses "prop: value; prop2: value2" into an ordered list (not a map) -
+// order is preserved so SerializeStyleText below round-trips a style
+// attribute's property order the way a browser would, rather than
+// reshuffling it alphabetically on every write.
+std::vector<std::pair<std::string, std::string>>
+ParseStyleProperties(const std::string &text) {
+  std::vector<std::pair<std::string, std::string>> result;
+  std::stringstream ss(text);
+  std::string statement;
+  while (std::getline(ss, statement, ';')) {
+    size_t colon = statement.find(':');
+    if (colon == std::string::npos) {
+      continue;
+    }
+    std::string property = ToLower(Trim(statement.substr(0, colon)));
+    std::string value = Trim(statement.substr(colon + 1));
+    if (!property.empty()) {
+      result.emplace_back(std::move(property), std::move(value));
+    }
+  }
+  return result;
+}
+
+std::string
+SerializeStyleProperties(const std::vector<std::pair<std::string, std::string>> &props) {
+  std::string out;
+  for (const auto &[property, value] : props) {
+    if (!out.empty()) {
+      out += ' ';
+    }
+    out += property;
+    out += ": ";
+    out += value;
+    out += ';';
+  }
+  return out;
+}
+
+} // namespace
+
+std::optional<std::string> GetInlineStyleProperty(const Node &node,
+                                                    const std::string &property) {
+  const std::string *styleAttr = node.GetAttribute("style");
+  if (styleAttr == nullptr) {
+    return std::nullopt;
+  }
+  std::string wanted = ToLower(property);
+  for (const auto &[name, value] : ParseStyleProperties(*styleAttr)) {
+    if (name == wanted) {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+void SetInlineStyleProperty(Node &node, const std::string &property,
+                             const std::string &value) {
+  const std::string *styleAttr = node.GetAttribute("style");
+  std::vector<std::pair<std::string, std::string>> props =
+      styleAttr != nullptr ? ParseStyleProperties(*styleAttr)
+                            : std::vector<std::pair<std::string, std::string>>{};
+
+  std::string name = ToLower(property);
+  auto it = std::find_if(props.begin(), props.end(),
+                          [&](const auto &p) { return p.first == name; });
+
+  if (value.empty()) {
+    if (it != props.end()) {
+      props.erase(it);
+    }
+  } else if (it != props.end()) {
+    it->second = value;
+  } else {
+    props.emplace_back(name, value);
+  }
+
+  if (props.empty()) {
+    node.RemoveAttribute("style");
+  } else {
+    node.SetAttribute("style", SerializeStyleProperties(props));
+  }
+}
+
 StyleSheet StyleSheet::Parse(const std::string &css) {
   StyleSheet sheet;
   std::string text = StripComments(css);

@@ -547,6 +547,10 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
     // take inheritedStyle directly, since they have no tag/class/id of
     // their own to match a selector against.
     Declarations style = sheet.Resolve(child, inheritedStyle);
+    // An inline style="..." attribute wins over the stylesheet cascade
+    // regardless of what matched above - same precedence real CSS gives
+    // inline style, above even an #id selector.
+    MergeInlineStyle(child, style);
 
     if (tag == "br") {
       inits.push_back(MakeLineBreak(fontSize, style));

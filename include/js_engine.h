@@ -1,5 +1,6 @@
 #pragma once
 
+#include "animation_frame_queue.h"
 #include "dom_node.h"
 #include "timer_queue.h"
 
@@ -15,21 +16,46 @@ namespace artisan {
 //   document.querySelector(selector) / querySelectorAll(selector)
 //   document.createElement(tagName)
 //   document.createTextNode(text)
-//   node.tagName                          (read-only)
-//   node.textContent                      (read/write)
+//   node.tagName / nodeType                (read-only; nodeType is 1 for
+//                                            an element, 3 for text - see
+//                                            also the ELEMENT_NODE/
+//                                            TEXT_NODE constants below)
+//   node.textContent                       (read/write)
 //   node.parentNode / nextSibling / previousSibling / children
-//                                          (read-only; snapshots, not a
-//                                           live view - see QuerySelector
-//                                           in css.h for what that means)
-//   node.getAttribute(name)               -> string or null
+//                                           (read-only; snapshots, not a
+//                                            live view - see QuerySelector
+//                                            in css.h for what that means)
+//   node.getAttribute(name)                -> string or null
 //   node.setAttribute(name, value)
 //   node.hasAttribute(name) / removeAttribute(name)
+//   node.classList.add/remove/toggle/contains(...)
+//   node.style.color/backgroundColor/fontWeight/borderColor/borderWidth
+//                                           (read/write; exactly the five
+//                                            properties a <style> block
+//                                            supports - see css.h)
+//   node.getData(name) / setData(name, value)
+//                                           (dataset's data-* attributes,
+//                                            but method-based rather than
+//                                            true dataset.foo property
+//                                            syntax - see js_engine.cpp)
 //   node.appendChild(child) / insertBefore(child, referenceOrNull)
+//   node.removeChild(child) / remove()     -> the removed node, still
+//                                            alive and re-appendable
+//   node.cloneNode(deep)
+//   node.matches(selector) / closest(selector)
 //   node.querySelector(selector) / querySelectorAll(selector)
-//   node.addEventListener(type, fn)       -> fn(event), event = {type, target}
+//   node.addEventListener(type, fn, captureOrOptions)
+//                                           -> fn(event); event has type/
+//                                            target/preventDefault()/
+//                                            stopPropagation()/
+//                                            stopImmediatePropagation()/
+//                                            defaultPrevented
+//   node.removeEventListener(type, fn, captureOrOptions)
+//   Node.ELEMENT_NODE / Node.TEXT_NODE
 //   console.log/warn/error(...)
 //   setTimeout(fn, delayMs) / clearTimeout(id)
 //   setInterval(fn, delayMs) / clearInterval(id)
+//   requestAnimationFrame(fn) -> fn(timestampMs) / cancelAnimationFrame(id)
 //
 // This is the runtime counterpart to artisanc: where artisanc turns
 // markup into Node-construction C++ at build time, JsEngine lets an
@@ -39,25 +65,33 @@ namespace artisan {
 // mechanism a C++ or Go caller would ultimately go through too (see
 // dom_node.h; SetOnClick/Click() are thin wrappers over it).
 //
-// Deliberately not exposed: removeChild/remove. This Node model destroys
-// a node when it's detached from its parent (see dom_node.h) rather than
-// keeping it alive-but-detached the way a real DOM does, so a script
-// holding a reference to a since-removed node and then touching it would
-// be a use-after-free. Safely supporting removal needs that DOM-style
-// detach-not-destroy model first. Also not exposed: removeEventListener -
-// a QuickJS JSValue isn't cheaply comparable for identity the way a
-// faithful removeEventListener(type, fn) needs, and a token-based
-// alternative wouldn't match a real browser's actual signature.
+// A few real gaps, not just missing bindings: node.classList/style/
+// getData/setData are JS-only for now (Go's node_c_api.h doesn't have
+// them yet - a natural follow-up, not attempted here). classList/style
+// cover exactly what the rest of this Node model already covers (the
+// "class" attribute's tokens; the same five properties a <style> block
+// supports) - not real CSS's full surface. There's no CustomEvent/
+// script-side dispatchEvent(arbitraryEvent) - only the event types
+// main.cpp already fires internally (click/change/input) go through the
+// real bubbling/capturing/preventDefault machinery; a script can't
+// construct and fire its own event. And every wrapped node is a fresh JS
+// object per call (WrapExistingNode, js_engine.cpp) - `===` between two
+// references to the same underlying node is always false, and a second,
+// independently-obtained reference to a node removed (see removeChild/
+// remove above) through a *different* reference can dangle if the
+// reference that now owns it gets garbage-collected first.
 class JsEngine {
 public:
-  // `document` and `timers` must both outlive this JsEngine: scripts run
-  // through `document`, and any addEventListener(...) handlers registered
-  // on nodes in it - or any pending setTimeout/setInterval scheduled into
-  // `timers` - can only safely run while this object (and its underlying
-  // JSContext) is alive. `timers` is not owned here - the caller (the
-  // event loop, main.cpp) is expected to call TimerQueue::FireDue itself
-  // once per iteration; JsEngine only ever schedules/cancels into it.
-  JsEngine(Node &document, TimerQueue &timers);
+  // `document`, `timers`, and `animationFrames` must all outlive this
+  // JsEngine: scripts run through `document`, and any addEventListener/
+  // setTimeout/setInterval/requestAnimationFrame registrations can only
+  // safely fire while this object (and its underlying JSContext) is
+  // alive. Neither queue is owned here - the caller (the event loop,
+  // main.cpp) is expected to call TimerQueue::FireDue/
+  // AnimationFrameQueue::FireAll itself once per iteration; JsEngine only
+  // ever schedules/cancels into them.
+  JsEngine(Node &document, TimerQueue &timers,
+           AnimationFrameQueue &animationFrames);
   ~JsEngine();
 
   JsEngine(const JsEngine &) = delete;

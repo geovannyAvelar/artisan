@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -79,5 +80,44 @@ private:
 // not a live view" comment already documents for a different tree.
 Node *QuerySelector(Node &root, const std::string &selector);
 std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector);
+
+// Whether `node` itself (not its subtree) matches `selector` - same
+// bounded grammar as QuerySelector above. Backs the JS/Go `matches`
+// binding, and is what Closest below is built from.
+bool ElementMatches(const Node &node, const std::string &selector);
+
+// `node`, or its nearest ancestor (inclusive - `node` itself counts, per
+// real DOM's closest()) that matches `selector`. nullptr if neither
+// `node` nor anything above it matches.
+Node *Closest(Node &node, const std::string &selector);
+
+// Folds `node`'s own inline `style="..."` attribute (if any) into
+// `declarations`, parsed with the same ParseDeclarations a <style>
+// block's rules use - so an inline style accepts exactly the same five
+// properties (color/background-color/font-weight/border-color/
+// border-width) and nothing more. Overrides whatever the stylesheet
+// cascade already resolved: inline style is the highest-precedence
+// layer in real CSS too, above even an #id selector. Called once per
+// element by BuildWidgetTree (widget_tree_builder.cpp), right after
+// StyleSheet::Resolve.
+void MergeInlineStyle(const Node &node, Declarations &declarations);
+
+// The raw string value of one property in `node`'s inline style
+// attribute - std::nullopt if the attribute is unset or doesn't mention
+// `property` (case-insensitive, matching <style> block property names).
+// Backs the JS `style.color` etc. getters (js_engine.cpp) - deliberately
+// returns the original text, not a re-serialized/normalized form (e.g.
+// "RED" stays "RED"), same as a real CSSStyleDeclaration getter would
+// for a value it can't be sure how to canonicalize.
+std::optional<std::string> GetInlineStyleProperty(const Node &node,
+                                                    const std::string &property);
+
+// Sets one property in `node`'s inline style attribute to `value`
+// (empty `value` removes it instead - matching real
+// `element.style.color = ""`), preserving every other property already
+// there and their original order. Read-modify-write on the attribute's
+// raw "prop: value; prop2: value2" text.
+void SetInlineStyleProperty(Node &node, const std::string &property,
+                             const std::string &value);
 
 } // namespace artisan

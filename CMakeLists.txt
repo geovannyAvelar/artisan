@@ -224,6 +224,7 @@ add_executable(artisan
     src/node_c_api.cpp
     src/css.cpp
     src/timer_queue.cpp
+    src/animation_frame_queue.cpp
     ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"
