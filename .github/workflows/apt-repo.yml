@@ -90,15 +90,21 @@ jobs:
         run: |
           echo "$GPG_PASSPHRASE" > /tmp/passphrase
 
+          # -architectures=amd64 explicitly: CPACK_DEBIAN_PACKAGE_ARCHITECTURE
+          # is amd64-only, but aptly normally infers the list from the
+          # packages it's publishing - which fails outright on an empty
+          # source (e.g. the very first stable publish, before any tagged
+          # release exists yet) with "unable to figure out list of
+          # architectures".
           aptly repo create -distribution=stable -component=main artisan-stable
           aptly repo add artisan-stable debs-stable
           aptly snapshot create artisan-stable-snapshot from repo artisan-stable
-          aptly publish snapshot -batch -passphrase-file=/tmp/passphrase -gpg-key="$GPG_KEY_ID" artisan-stable-snapshot
+          aptly publish snapshot -batch -passphrase-file=/tmp/passphrase -gpg-key="$GPG_KEY_ID" -architectures=amd64 artisan-stable-snapshot
 
           aptly repo create -distribution=unstable -component=main artisan-unstable
           aptly repo add artisan-unstable debs-unstable
           aptly snapshot create artisan-unstable-snapshot from repo artisan-unstable
-          aptly publish snapshot -batch -passphrase-file=/tmp/passphrase -gpg-key="$GPG_KEY_ID" artisan-unstable-snapshot
+          aptly publish snapshot -batch -passphrase-file=/tmp/passphrase -gpg-key="$GPG_KEY_ID" -architectures=amd64 artisan-unstable-snapshot
 
           rm -f /tmp/passphrase
 
