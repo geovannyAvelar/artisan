@@ -12,6 +12,13 @@ on:
   push:
     branches:
       - main
+    # Doc-only changes don't affect the .deb - skip the Skia build /
+    # release / APT republish for these rather than burning ~2-20min of CI
+    # on a README edit. Widen this list if other non-code paths show up
+    # (docs/, LICENSE, etc.) - keep it to things that provably can't affect
+    # the build output.
+    paths-ignore:
+      - "**.md"
   workflow_dispatch: {}
 
 permissions:
