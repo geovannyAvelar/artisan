@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // A plain C ABI over Node (dom_node.h) - the bridge a Go app (which can't
@@ -40,16 +42,76 @@ void ArtisanNodeSetTextContent(ArtisanNode *node, const char *text);
 
 // nullptr if the attribute isn't set. See Node::GetAttribute.
 char *ArtisanNodeGetAttribute(ArtisanNode *node, const char *name);
+bool ArtisanNodeHasAttribute(ArtisanNode *node, const char *name);
 void ArtisanNodeSetAttribute(ArtisanNode *node, const char *name,
                               const char *value);
 void ArtisanNodeRemoveAttribute(ArtisanNode *node, const char *name);
 
+// nullptr if there's no parent/no such sibling - see the matching Node
+// methods (dom_node.h).
+ArtisanNode *ArtisanNodeParentNode(ArtisanNode *node);
+ArtisanNode *ArtisanNodeNextSibling(ArtisanNode *node);
+ArtisanNode *ArtisanNodePreviousSibling(ArtisanNode *node);
+
+// See Node::children. ArtisanNodeChildAt is undefined behavior if `index`
+// isn't `< ArtisanNodeChildCount(node)` - same "caller keeps the count it
+// already fetched in range" contract a Go slice index would have, just
+// without Go's own bounds check backing it up across the C boundary.
+size_t ArtisanNodeChildCount(ArtisanNode *node);
+ArtisanNode *ArtisanNodeChildAt(ArtisanNode *node, size_t index);
+
+// css.h's QuerySelector/QuerySelectorAll - same bounded selector grammar
+// documented there (one compound selector, no combinators/comma-lists).
+// ArtisanQuerySelector: nullptr if no match. ArtisanQuerySelectorAll:
+// `*outCount` matches, in document order, in a malloc'd array the caller
+// must release with ArtisanFreeNodeArray - the array itself is owned by
+// the caller, but every ArtisanNode* inside it is the usual non-owning
+// handle (freeing the array doesn't touch the nodes themselves, same as
+// ArtisanFreeString never touches whatever a node's attribute pointed
+// into).
+ArtisanNode *ArtisanQuerySelector(ArtisanNode *root, const char *selector);
+ArtisanNode **ArtisanQuerySelectorAll(ArtisanNode *root, const char *selector,
+                                       size_t *outCount);
+void ArtisanFreeNodeArray(ArtisanNode **nodes);
+
+// Creates a detached element/text node, exactly like Node::CreateElement/
+// CreateText - not yet part of any tree. Ownership lives entirely on the
+// C++ side (see node_c_api.cpp's pending-node registry) until it's passed
+// to ArtisanNodeAppendChild/InsertBefore below, which transfers it into
+// the tree; a node created and never appended is never freed (leaks
+// until process exit) - there's no Go-side finalizer to catch that the
+// way a garbage-collected JS wrapper would (see js_engine.h's NodeHandle
+// for that comparison). Passing the same not-yet-appended ArtisanNode* to
+// AppendChild/InsertBefore twice, or passing an ArtisanNode* that isn't a
+// currently-pending created node (e.g. one already in the tree, found via
+// FindById), is a safe no-op, not an error - there's no exception
+// mechanism to report it across a C ABI, so this mirrors the restriction
+// the JS binding enforces (there, by throwing) without a way to signal
+// failure back to the caller.
+ArtisanNode *ArtisanCreateElement(const char *tag);
+ArtisanNode *ArtisanCreateTextNode(const char *text);
+ArtisanNode *ArtisanNodeAppendChild(ArtisanNode *parent, ArtisanNode *child);
+// `before == nullptr` means append at the end, matching
+// Node::InsertBefore(child, nullptr).
+ArtisanNode *ArtisanNodeInsertBefore(ArtisanNode *parent, ArtisanNode *child,
+                                      ArtisanNode *before);
+
+// Registers `handle` (a Go closure's cgo.Handle) for `eventType` -
+// alongside, not replacing, any other handler already registered for
+// that type or any other, matching Node::AddEventListener/real
+// addEventListener. The closure itself is invoked through
+// ArtisanGoInvokeHandler below, same mechanism ArtisanNodeSetOnClick
+// uses (see it for that comparison).
+void ArtisanNodeAddEventListener(ArtisanNode *node, const char *eventType,
+                                  uintptr_t handle);
+
 // Registers the handler Click() invokes (see Node::SetOnClick), given as
 // a Go closure's cgo.Handle rather than a function pointer - the closure
-// itself is invoked through ArtisanGoInvokeClickHandler below. Replaces
+// itself is invoked through ArtisanGoInvokeHandler below. Replaces
 // any handler already set on this node, releasing its handle first (via
-// ArtisanGoReleaseClickHandler), same as Node::SetOnClick replacing the
-// previous std::function would.
+// ArtisanGoReleaseHandler), same as Node::SetOnClick replacing the
+// previous std::function would - unlike ArtisanNodeAddEventListener
+// above, which never replaces anything.
 void ArtisanNodeSetOnClick(ArtisanNode *node, uintptr_t handle);
 
 // Releases a string ArtisanNodeTagName/TextContent/GetAttribute returned.
@@ -66,11 +128,11 @@ void ArtisanFreeString(char *str);
 void ArtisanSetupApp(ArtisanNode *document);
 
 // Implemented by the Go archive (//export'ed from go/artisango), called
-// from ArtisanNodeSetOnClick's registered handler / its replacement or
-// release. Never called if no Go app is configured, since nothing can
-// produce a handle in that case.
-void ArtisanGoInvokeClickHandler(uintptr_t handle);
-void ArtisanGoReleaseClickHandler(uintptr_t handle);
+// from ArtisanNodeSetOnClick's/ArtisanNodeAddEventListener's registered
+// handlers / their replacement or release. Never called if no Go app is
+// configured, since nothing can produce a handle in that case.
+void ArtisanGoInvokeHandler(uintptr_t handle);
+void ArtisanGoReleaseHandler(uintptr_t handle);
 
 #ifdef __cplusplus
 }

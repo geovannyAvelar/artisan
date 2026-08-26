@@ -65,11 +65,7 @@ func WrapNode(ptr unsafe.Pointer) Node {
 func (n Node) FindById(id string) *Node {
 	cid := C.CString(id)
 	defer C.free(unsafe.Pointer(cid))
-	found := C.ArtisanNodeFindById(n.ptr, cid)
-	if found == nil {
-		return nil
-	}
-	return &Node{ptr: found}
+	return wrapOrNil(C.ArtisanNodeFindById(n.ptr, cid))
 }
 
 // TagName is "" for a text node, e.g. "div"/"button" for an element.
@@ -124,6 +120,78 @@ func (n Node) RemoveAttribute(name string) {
 	C.ArtisanNodeRemoveAttribute(n.ptr, cname)
 }
 
+// HasAttribute reports whether the named attribute is set at all,
+// regardless of its value (including "").
+func (n Node) HasAttribute(name string) bool {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	return bool(C.ArtisanNodeHasAttribute(n.ptr, cname))
+}
+
+// ParentNode, NextSibling, and PreviousSibling are nil if there's no
+// parent/no such sibling - see the matching Node methods (dom_node.h).
+func (n Node) ParentNode() *Node {
+	return wrapOrNil(C.ArtisanNodeParentNode(n.ptr))
+}
+
+func (n Node) NextSibling() *Node {
+	return wrapOrNil(C.ArtisanNodeNextSibling(n.ptr))
+}
+
+func (n Node) PreviousSibling() *Node {
+	return wrapOrNil(C.ArtisanNodePreviousSibling(n.ptr))
+}
+
+// Children is a snapshot of this node's children at call time, not a
+// live view - the same simplification document.querySelectorAll's Go/JS
+// counterparts already make (see css.h's QuerySelector doc comment).
+func (n Node) Children() []Node {
+	count := int(C.ArtisanNodeChildCount(n.ptr))
+	children := make([]Node, count)
+	for i := 0; i < count; i++ {
+		children[i] = Node{ptr: C.ArtisanNodeChildAt(n.ptr, C.size_t(i))}
+	}
+	return children
+}
+
+// QuerySelector/QuerySelectorAll search this node's subtree (not
+// including the node itself) for element(s) matching selector - the same
+// bounded grammar documented on css.h's Selector (one compound selector,
+// no combinators/comma-lists). QuerySelector is nil, and
+// QuerySelectorAll is an empty (never nil) slice, if nothing matches.
+func (n Node) QuerySelector(selector string) *Node {
+	cselector := C.CString(selector)
+	defer C.free(unsafe.Pointer(cselector))
+	return wrapOrNil(C.ArtisanQuerySelector(n.ptr, cselector))
+}
+
+func (n Node) QuerySelectorAll(selector string) []Node {
+	cselector := C.CString(selector)
+	defer C.free(unsafe.Pointer(cselector))
+	var count C.size_t
+	arr := C.ArtisanQuerySelectorAll(n.ptr, cselector, &count)
+	if arr == nil {
+		return []Node{}
+	}
+	defer C.ArtisanFreeNodeArray(arr)
+	ptrs := unsafe.Slice(arr, int(count))
+	found := make([]Node, int(count))
+	for i, ptr := range ptrs {
+		found[i] = Node{ptr: ptr}
+	}
+	return found
+}
+
+// wrapOrNil turns a possibly-nullptr ArtisanNode* into a possibly-nil
+// *Node - the shared "found nothing" shape FindById/ParentNode/
+// NextSibling/PreviousSibling/QuerySelector all return.
+func wrapOrNil(ptr *C.ArtisanNode) *Node {
+	if ptr == nil {
+		return nil
+	}
+	return &Node{ptr: ptr}
+}
+
 // SetOnClick registers the handler Click() invokes on the C++ side -
 // typically used for a <button>. Replaces (and releases) any handler
 // already set on this node.
@@ -132,21 +200,77 @@ func (n Node) SetOnClick(fn func()) {
 	C.ArtisanNodeSetOnClick(n.ptr, C.uintptr_t(handle))
 }
 
-// ArtisanGoInvokeClickHandler is called from C++ (node_c_api.cpp's
-// GoCallback) when a node registered via SetOnClick is clicked - not
-// meant to be called directly from Go app code.
+// AddEventListener registers fn for eventType, alongside (not replacing)
+// any other handler already registered for that type or any other -
+// unlike SetOnClick above, matching real addEventListener. Any type
+// string works, but only "click", "change" (checkbox/radio), and
+// "input" (text fields) actually fire today (see main.cpp).
+func (n Node) AddEventListener(eventType string, fn func()) {
+	ceventType := C.CString(eventType)
+	defer C.free(unsafe.Pointer(ceventType))
+	handle := cgo.NewHandle(fn)
+	C.ArtisanNodeAddEventListener(n.ptr, ceventType, C.uintptr_t(handle))
+}
+
+// CreateElement/CreateTextNode create a detached element/text node - not
+// yet part of any tree. Append it somewhere (AppendChild/InsertBefore
+// below) before this Node value goes out of scope: the underlying C++
+// object is only freed once actually attached, or never, if it's
+// abandoned instead - there's no Go-side finalizer to catch that the way
+// a garbage-collected JS wrapper would (see ArtisanCreateElement's doc
+// comment in node_c_api.h).
+func CreateElement(tag string) Node {
+	ctag := C.CString(tag)
+	defer C.free(unsafe.Pointer(ctag))
+	return Node{ptr: C.ArtisanCreateElement(ctag)}
+}
+
+func CreateTextNode(text string) Node {
+	ctext := C.CString(text)
+	defer C.free(unsafe.Pointer(ctext))
+	return Node{ptr: C.ArtisanCreateTextNode(ctext)}
+}
+
+// AppendChild takes ownership of a node created via CreateElement/
+// CreateTextNode, appending it after this node's existing children.
+// Passing a node that isn't currently a pending, unattached
+// CreateElement/CreateTextNode result - one already attached elsewhere,
+// say - is a safe no-op (re-parenting isn't supported, same restriction
+// the JS binding enforces, there by throwing; there's no exception
+// mechanism to report that here). Returns child back, for chaining.
+func (n Node) AppendChild(child Node) Node {
+	C.ArtisanNodeAppendChild(n.ptr, child.ptr)
+	return child
+}
+
+// InsertBefore is AppendChild's more general form: inserts child
+// directly before the given sibling instead of at the end. before == nil
+// means append at the end, matching real DOM insertBefore(node, null).
+func (n Node) InsertBefore(child Node, before *Node) Node {
+	var cbefore *C.ArtisanNode
+	if before != nil {
+		cbefore = before.ptr
+	}
+	C.ArtisanNodeInsertBefore(n.ptr, child.ptr, cbefore)
+	return child
+}
+
+// ArtisanGoInvokeHandler is called from C++ (node_c_api.cpp's
+// GoCallback) when a node registered via SetOnClick or AddEventListener
+// fires - not meant to be called directly from Go app code.
 //
-//export ArtisanGoInvokeClickHandler
-func ArtisanGoInvokeClickHandler(handle C.uintptr_t) {
+//export ArtisanGoInvokeHandler
+func ArtisanGoInvokeHandler(handle C.uintptr_t) {
 	fn := cgo.Handle(handle).Value().(func())
 	fn()
 }
 
-// ArtisanGoReleaseClickHandler is called from C++ when a click handler
-// is replaced or its node destroyed, to release the handle SetOnClick
-// created - not meant to be called directly from Go app code.
+// ArtisanGoReleaseHandler is called from C++ when a handler is replaced
+// or its node destroyed, to release the handle SetOnClick/
+// AddEventListener created - not meant to be called directly from Go app
+// code.
 //
-//export ArtisanGoReleaseClickHandler
-func ArtisanGoReleaseClickHandler(handle C.uintptr_t) {
+//export ArtisanGoReleaseHandler
+func ArtisanGoReleaseHandler(handle C.uintptr_t) {
 	cgo.Handle(handle).Delete()
 }

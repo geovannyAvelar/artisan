@@ -172,8 +172,20 @@ func main() {}
 `artisan-cli build` auto-discovers `goapp/` the same way it discovers
 `app.js` - no flag needed. `artisango.Node` mirrors the same `Node` API
 C++/JS get: `FindById`, `TagName`, `TextContent`/`SetTextContent`,
-`GetAttribute`/`SetAttribute`/`RemoveAttribute`, `SetOnClick` - see
+`GetAttribute`/`SetAttribute`/`HasAttribute`/`RemoveAttribute`,
+`ParentNode`/`NextSibling`/`PreviousSibling`/`Children`,
+`QuerySelector`/`QuerySelectorAll` (same bounded selector grammar as
+[Using CSS](#using-css) below), `SetOnClick`, `AddEventListener(type,
+fn)` (any type string works, but only `"click"`, `"change"`
+(checkbox/radio), and `"input"` (text fields) actually fire today) - see
 `go/artisango/node.go` and the C ABI it wraps, `include/node_c_api.h`.
+
+`artisango.CreateElement(tag)`/`CreateTextNode(text)` create a detached
+node; `parent.AppendChild(child)`/`parent.InsertBefore(child, before)`
+attach it. A created node that's never appended anywhere leaks until
+process exit - there's no garbage collector on the Go side to catch an
+abandoned one the way JS's engine does, so always append (or just don't
+create) rather than let one go unused.
 
 If moving this checkout later breaks the build, update the `replace` line
 in `goapp/go.mod` to point at the new location (same underlying constraint
