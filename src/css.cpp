@@ -468,6 +468,25 @@ Declarations ParseDeclarations(const std::string &body) {
       }
     } else if (property == "gap") {
       decl.hasGap = ParsePixelLength(value, decl.gap);
+    } else if (property == "flex-wrap") {
+      std::string lower = ToLower(value);
+      if (lower == "nowrap") {
+        decl.hasFlexWrap = true;
+        decl.flexWrap = FlexWrap::kNowrap;
+      } else if (lower == "wrap") {
+        decl.hasFlexWrap = true;
+        decl.flexWrap = FlexWrap::kWrap;
+      }
+    } else if (property == "flex-grow") {
+      decl.hasFlexGrow = ParsePixelLength(value, decl.flexGrow);
+    } else if (property == "flex-shrink") {
+      decl.hasFlexShrink = ParsePixelLength(value, decl.flexShrink);
+    } else if (property == "flex-basis") {
+      if (ToLower(Trim(value)) == "auto") {
+        decl.hasFlexBasis = false;
+      } else {
+        decl.hasFlexBasis = ParsePixelLength(value, decl.flexBasis);
+      }
     }
     // Any other property is silently ignored, same as a browser skipping
     // one it doesn't recognize.
@@ -856,6 +875,22 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasGap = true;
     declarations.gap = inlineStyle.gap;
   }
+  if (inlineStyle.hasFlexWrap) {
+    declarations.hasFlexWrap = true;
+    declarations.flexWrap = inlineStyle.flexWrap;
+  }
+  if (inlineStyle.hasFlexGrow) {
+    declarations.hasFlexGrow = true;
+    declarations.flexGrow = inlineStyle.flexGrow;
+  }
+  if (inlineStyle.hasFlexShrink) {
+    declarations.hasFlexShrink = true;
+    declarations.flexShrink = inlineStyle.flexShrink;
+  }
+  if (inlineStyle.hasFlexBasis) {
+    declarations.hasFlexBasis = true;
+    declarations.flexBasis = inlineStyle.flexBasis;
+  }
 }
 
 namespace {
@@ -984,6 +1019,7 @@ Declarations StyleSheet::Resolve(const Node &node,
   PropertyWinner paddingTopWin, paddingRightWin, paddingBottomWin, paddingLeftWin;
   PropertyWinner marginTopWin, marginRightWin, marginBottomWin, marginLeftWin;
   PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
+  PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
     const Rule &rule = rules_[i];
@@ -1098,6 +1134,26 @@ Declarations StyleSheet::Resolve(const Node &node,
     if (rule.declarations.hasGap && gapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGap = true;
       own.gap = rule.declarations.gap;
+    }
+    if (rule.declarations.hasFlexWrap &&
+        flexWrapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasFlexWrap = true;
+      own.flexWrap = rule.declarations.flexWrap;
+    }
+    if (rule.declarations.hasFlexGrow &&
+        flexGrowWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasFlexGrow = true;
+      own.flexGrow = rule.declarations.flexGrow;
+    }
+    if (rule.declarations.hasFlexShrink &&
+        flexShrinkWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasFlexShrink = true;
+      own.flexShrink = rule.declarations.flexShrink;
+    }
+    if (rule.declarations.hasFlexBasis &&
+        flexBasisWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasFlexBasis = true;
+      own.flexBasis = rule.declarations.flexBasis;
     }
   }
 

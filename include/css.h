@@ -131,6 +131,18 @@ struct Declarations {
   AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
   bool hasGap = false;
   float gap = 0.0f;
+  bool hasFlexWrap = false;
+  FlexWrap flexWrap = FlexWrap::kNowrap;
+
+  // Flex *item* properties - see Widget's identical fields for why
+  // these live in the same flat namespace as the container properties
+  // above rather than a separate struct.
+  bool hasFlexGrow = false;
+  float flexGrow = 0.0f;
+  bool hasFlexShrink = false;
+  float flexShrink = 1.0f;
+  bool hasFlexBasis = false;
+  float flexBasis = 0.0f;
 };
 
 struct Rule {

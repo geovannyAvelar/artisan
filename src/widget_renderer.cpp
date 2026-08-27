@@ -247,6 +247,32 @@ float MeasureItemNaturalWidth(const Widget &widget, const IRenderer &renderer,
   return nullRenderer.naturalWidth();
 }
 
+// A flex item's natural main-size, for flex-basis/cross-size purposes -
+// unlike MeasureItemNaturalWidth above (which renders the item as one
+// unit, background/border box included), a kContainer item with no
+// explicit width of its own would report that box as spanning however
+// wide `cap` happens to be: real CSS's own "a block fills its
+// container" default, exactly right for normal block-flow rendering
+// (see ContainerWidgetHandler::Render's boxMaxWidth) but not what
+// "natural width" means for an *unstretched flex item* - one of those
+// wants its *content's* preferred width instead, the same way a real
+// browser auto-sizes a flex item to fit-content rather than 100%. For a
+// kContainer, that means measuring its own children directly
+// (MeasureNaturalWidth, bypassing its own background/border box
+// entirely, straight to whatever text/grandchildren actually determine
+// a size) instead of treating the container as a single rendered unit.
+// Every other kind's own Render() already computes a genuinely
+// content-driven size on its own (e.g. BoxWidgetHandler's
+// textWidth-based width), so MeasureItemNaturalWidth is already correct
+// for those, unchanged.
+float MeasureFlexItemNaturalWidth(const Widget &widget, const IRenderer &renderer,
+                                   float cap) {
+  if (widget.kind == WidgetKind::kContainer) {
+    return MeasureNaturalWidth(widget, renderer, cap);
+  }
+  return MeasureItemNaturalWidth(widget, renderer, cap);
+}
+
 float MeasureItemHeightAt(const Widget &widget, const IRenderer &renderer,
                            float width) {
   NullRenderer nullRenderer(renderer);
@@ -257,64 +283,95 @@ float MeasureItemHeightAt(const Widget &widget, const IRenderer &renderer,
   return dryRun.y;
 }
 
-// A first, deliberately minimal flexbox: no flex-wrap, no flex-grow/
-// shrink/basis (every item just uses its own natural measured size) and
-// no `order` (items lay out in DOM order). Two-pass, reusing the same
-// NullRenderer dry-run idiom TableWidgetHandler already established for
-// its own grid columns/rows: measure every child's natural size first,
-// then distribute/position/paint. Lays children out into state.x/
-// state.y/state.maxWidth (the caller - ContainerWidgetHandler::Render -
-// has already applied this container's own margin/padding/width to
-// those by the time it calls this), advancing state.y by however much
-// cross-axis (row) or main-axis (column) extent the children consumed -
-// the same contract the ordinary block-flow child loop it replaces has.
-void RenderFlexContainer(const Widget &widget, LayoutState &state) {
-  int n = widget.childCount;
-  if (n == 0) {
-    return;
-  }
-  bool isRow = widget.flexDirection == FlexDirection::kRow;
-  float gap = widget.gap;
+// One flex line's own cross-axis extent, and the main-axis space its
+// items+gaps actually occupied after flex-grow/flex-shrink resolved
+// their final sizes - see LayoutFlexLine/RenderFlexContainer below for
+// what each is used for.
+struct FlexLineResult {
+  float crossSize;
+  float mainExtent;
+};
 
-  // Pass 1: each child's own natural size, in isolation - width capped
-  // to this container's available width (a flex item's text still
-  // wraps against the container, same as any other child would), height
-  // measured at that natural width.
-  std::vector<float> naturalWidth(n);
-  std::vector<float> naturalHeight(n);
-  for (int i = 0; i < n; ++i) {
-    naturalWidth[i] =
-        MeasureItemNaturalWidth(widget.children[i], state.renderer, state.maxWidth);
-    naturalHeight[i] =
-        MeasureItemHeightAt(widget.children[i], state.renderer, naturalWidth[i]);
-  }
+// Lays out and paints one "flex line" - every item, when
+// flex-wrap:nowrap (the only option in column direction - see
+// RenderFlexContainer); one row's worth of items when
+// flex-wrap:wrap groups a row container's items across several. Resolves
+// flex-grow/flex-shrink against `basis` (each item's starting main size)
+// to get final main sizes, then justify-content/align-items exactly as
+// this function did before flex-grow/shrink/wrap existed.
+// `crossAxisOffset` positions this line within the container's own
+// cross axis - 0 for the only line there is, unless flex-wrap:wrap
+// produced more than one (each subsequent line's own crossAxisOffset is
+// the sum of every earlier line's FlexLineResult::crossSize, plus a gap
+// between them - see the caller).
+FlexLineResult LayoutFlexLine(const Widget &widget, LayoutState &state, bool isRow,
+                               int startIndex, int count,
+                               const std::vector<float> &renderWidth,
+                               const std::vector<float> &basis,
+                               float mainAxisAvailable, float crossAxisOffset) {
+  float gap = widget.gap;
+  int n = count;
 
   std::vector<float> mainSize(n);
   std::vector<float> crossSize(n);
   for (int i = 0; i < n; ++i) {
-    mainSize[i] = isRow ? naturalWidth[i] : naturalHeight[i];
-    crossSize[i] = isRow ? naturalHeight[i] : naturalWidth[i];
+    int idx = startIndex + i;
+    mainSize[i] = basis[idx];
+    crossSize[i] = isRow
+                       ? MeasureItemHeightAt(widget.children[idx], state.renderer, renderWidth[idx])
+                       : renderWidth[idx];
   }
 
-  float totalMain = static_cast<float>(n - 1) * gap;
+  float totalBasis = static_cast<float>(n - 1) * gap;
   for (float m : mainSize) {
-    totalMain += m;
+    totalBasis += m;
   }
 
-  // Row always has a fixed main-axis budget (state.maxWidth); column's
-  // main axis (height) is intrinsic here - a caller-supplied explicit
-  // CSS height (Part 2's box model) is only resolved by
-  // ContainerWidgetHandler::Render *after* this function returns, so a
-  // column flex container's justify-content has nothing to distribute
-  // against yet and degenerates to flex-start (a documented interaction
-  // between Part 2 and Part 3, not a bug).
-  bool hasMainBudget = isRow;
-  float mainAxisAvailable = isRow ? state.maxWidth : totalMain;
-  float freeSpace = hasMainBudget ? std::max(0.0f, mainAxisAvailable - totalMain) : 0.0f;
+  // Row always has a fixed main-axis budget (mainAxisAvailable); column's
+  // main axis (height) is intrinsic - a caller-supplied explicit CSS
+  // height (Part 2's box model) is only resolved by
+  // ContainerWidgetHandler::Render *after* RenderFlexContainer returns,
+  // so a column flex container's justify-content/flex-grow/flex-shrink
+  // have no fixed budget to distribute against and are all no-ops there
+  // (a documented interaction between Part 2 and Part 3, not a bug).
+  float freeSpace = isRow ? mainAxisAvailable - totalBasis : 0.0f;
+
+  // Resolve flex-grow/flex-shrink against basis - a single pass is
+  // exact here (no iterative min/max-width clamping needed, since this
+  // engine has no min-width/max-width property to clamp against - real
+  // CSS's own algorithm only needs to iterate because of that).
+  if (isRow && freeSpace > 0.0f) {
+    float totalGrow = 0.0f;
+    for (int i = 0; i < n; ++i) {
+      totalGrow += widget.children[startIndex + i].flexGrow;
+    }
+    if (totalGrow > 0.0f) {
+      for (int i = 0; i < n; ++i) {
+        mainSize[i] += freeSpace * (widget.children[startIndex + i].flexGrow / totalGrow);
+      }
+      freeSpace = 0.0f; // Fully absorbed by growth - none left for justify-content.
+    }
+  } else if (isRow && freeSpace < 0.0f) {
+    float totalShrinkWeighted = 0.0f;
+    for (int i = 0; i < n; ++i) {
+      totalShrinkWeighted += widget.children[startIndex + i].flexShrink * mainSize[i];
+    }
+    if (totalShrinkWeighted > 0.0f) {
+      float deficit = -freeSpace;
+      for (int i = 0; i < n; ++i) {
+        float weight = widget.children[startIndex + i].flexShrink * mainSize[i];
+        mainSize[i] = std::max(0.0f, mainSize[i] - deficit * (weight / totalShrinkWeighted));
+      }
+      freeSpace = 0.0f; // Fully absorbed by shrinking.
+    }
+    // Else: nothing can shrink (every item's flex-shrink*basis is 0) -
+    // items simply overflow mainAxisAvailable, same as real CSS without
+    // a shrinkable item either.
+  }
 
   float leadingOffset = 0.0f;
   float betweenGap = gap;
-  if (hasMainBudget) {
+  if (isRow) {
     switch (widget.justifyContent) {
     case JustifyContent::kFlexStart:
       break;
@@ -332,31 +389,75 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
     }
   }
 
-  // The container's own cross-axis size: row's cross axis (height) is
-  // intrinsic - the tallest child (stretch grows every child to that
-  // same height, so it can't change the max); column's cross axis
-  // (width) is simply the space available.
-  float containerCrossSize;
+  // This line's own cross-axis size: row's cross axis (height) is
+  // intrinsic - the tallest item (stretch grows every item to that same
+  // height, so it can't change the max); column's cross axis (width) is
+  // simply the space available.
+  float lineCrossSize;
   if (isRow) {
-    containerCrossSize = 0.0f;
+    lineCrossSize = 0.0f;
     for (float c : crossSize) {
-      containerCrossSize = std::max(containerCrossSize, c);
+      lineCrossSize = std::max(lineCrossSize, c);
     }
   } else {
-    containerCrossSize = state.maxWidth;
+    lineCrossSize = state.maxWidth;
   }
 
   float mainCursor = leadingOffset;
   for (int i = 0; i < n; ++i) {
+    int idx = startIndex + i;
     float itemMain = mainSize[i];
     float itemCross = crossSize[i];
-    float itemRenderWidth = naturalWidth[i];
+    // renderWidth[idx] already prioritizes the item's own explicit
+    // width over its measured natural/content width (see
+    // MeasureFlexItemNaturalWidth and RenderFlexContainer's own
+    // renderWidth computation) - the right default main-axis (row) or
+    // cross-axis (column) render width before any grow/shrink/stretch
+    // below has a chance to override it.
+    float itemRenderWidth = renderWidth[idx];
     // A cheap shallow copy (Widget owns no resources - same POD-like
-    // shape its own doc comment describes) - stretch, when it applies,
-    // imposes a size the child doesn't have of its own by overriding
-    // hasHeight/height on this copy before rendering it, rather than
-    // mutating the real (const, possibly shared/static) tree.
-    Widget effectiveChild = widget.children[i];
+    // shape its own doc comment describes) - grow/shrink and stretch,
+    // when either applies, impose a size the child doesn't have of its
+    // own by overriding hasWidth/hasHeight on this copy before
+    // rendering it, rather than mutating the real (const, possibly
+    // shared/static) tree. The two never conflict: grow/shrink only
+    // ever touches the *main*-axis field (width for row, height for
+    // column); stretch only ever touches the *cross*-axis one.
+    Widget effectiveChild = widget.children[idx];
+
+    if (isRow) {
+      // Compared against renderWidth[idx] (what would render *without*
+      // any flex resolution - the item's own width, or its natural size
+      // absent one), not basis[idx]: those two can already differ
+      // before grow/shrink ever runs, whenever flex-basis overrides an
+      // item's width outright (basis takes flex-basis; renderWidth
+      // never does - see RenderFlexContainer) - comparing against basis
+      // would miss exactly that case, since itemMain starts equal to
+      // basis by construction and grow/shrink might never touch it.
+      if (std::abs(itemMain - renderWidth[idx]) > 0.01f) {
+        // Width affects wrapping, so the item needs re-measuring at its
+        // new width, not just a bigger/smaller box around the same text
+        // layout.
+        effectiveChild.hasWidth = true;
+        effectiveChild.widthIsPercent = false;
+        effectiveChild.width = itemMain;
+        itemRenderWidth = itemMain;
+        itemCross = MeasureItemHeightAt(effectiveChild, state.renderer, itemRenderWidth);
+      }
+    } else if (std::abs(itemMain - basis[idx]) > 0.01f) {
+      // Column: main axis is height, which (unlike width) has no
+      // separate "renderHeight" default to diverge from basis the way
+      // renderWidth can for row - itemMain already starts at basis[idx]
+      // unconditionally (see mainSize[i] above), so this only ever
+      // fires if something between basis and here changed it (nothing
+      // does yet, column never grows/shrinks - kept for symmetry and in
+      // case that changes). No re-measurement needed either way: height
+      // (unlike width) doesn't affect anything else in this model, so
+      // just an explicit height override, same mechanism
+      // align-items:stretch already uses for a row item's height below.
+      effectiveChild.hasHeight = true;
+      effectiveChild.height = itemMain;
+    }
 
     // Real CSS: stretch only takes effect when the item has no explicit
     // cross-size of its own - one that does keeps its own size, and
@@ -364,40 +465,32 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
     // than getting center/flex-end's usual offset treatment too.
     if (widget.alignItems == AlignItems::kStretch) {
       if (isRow && !effectiveChild.hasHeight) {
-        // Cross axis is height - unlike width (which every container
-        // child already fills via state.maxWidth by default, see the
-        // column branch below), nothing here otherwise lets a parent
-        // impose a height on a child, so this is the one case that
-        // actually needs the widget-copy override above.
         effectiveChild.hasHeight = true;
-        effectiveChild.height = containerCrossSize;
-        itemCross = containerCrossSize;
+        effectiveChild.height = lineCrossSize;
+        itemCross = lineCrossSize;
       } else if (!isRow && !effectiveChild.hasWidth) {
-        // Cross axis is width - a container child with no explicit
-        // width of its own already fills whatever maxWidth its own
-        // LayoutState gets (the same "block children fill their
-        // container by default" rule this renderer already has), so
-        // just handing it containerCrossSize as childState's maxWidth
-        // below achieves stretch with no widget mutation needed - but
-        // height DOES depend on width (wrapping), so it needs
-        // re-measuring at that width, unlike the row case above.
-        itemRenderWidth = containerCrossSize;
-        itemCross = containerCrossSize;
-        naturalHeight[i] =
-            MeasureItemHeightAt(effectiveChild, state.renderer, itemRenderWidth);
-        itemMain = naturalHeight[i];
+        // A container child with no explicit width of its own already
+        // fills whatever maxWidth its own LayoutState gets (the same
+        // "block children fill their container by default" rule this
+        // renderer already has), so just handing it lineCrossSize as
+        // childState's maxWidth below achieves stretch with no widget
+        // mutation needed - but height DOES depend on width, so it
+        // needs re-measuring at that width, unlike the row case above.
+        itemRenderWidth = lineCrossSize;
+        itemCross = lineCrossSize;
+        itemMain = MeasureItemHeightAt(effectiveChild, state.renderer, itemRenderWidth);
       }
     }
 
     float crossOffset = 0.0f;
     if (widget.alignItems == AlignItems::kCenter) {
-      crossOffset = (containerCrossSize - itemCross) / 2.0f;
+      crossOffset = (lineCrossSize - itemCross) / 2.0f;
     } else if (widget.alignItems == AlignItems::kFlexEnd) {
-      crossOffset = containerCrossSize - itemCross;
+      crossOffset = lineCrossSize - itemCross;
     }
 
     float childX = isRow ? state.x + mainCursor : state.x + crossOffset;
-    float childY = isRow ? state.y + crossOffset : state.y + mainCursor;
+    float childY = isRow ? state.y + crossAxisOffset + crossOffset : state.y + mainCursor;
 
     // A fresh LayoutState per item - flex items are always individually
     // positioned boxes, never inline-flowed text sharing one line the
@@ -415,11 +508,130 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
   }
   mainCursor -= betweenGap; // Undo the trailing gap added after the last item.
 
-  if (isRow) {
-    state.y += containerCrossSize;
-  } else {
-    state.y += mainCursor;
+  return {lineCrossSize, mainCursor};
+}
+
+// A flexbox: display:flex, flex-direction, justify-content, align-items
+// (including stretch), gap, flex-grow/flex-shrink/flex-basis, and
+// flex-wrap (row direction only - column's main axis has no fixed
+// budget to wrap against, same reasoning its justify-content/grow/
+// shrink already don't apply there, see LayoutFlexLine). No CSS Grid, no
+// align-content (wrapped lines just stack in DOM order along the cross
+// axis - see the class-level comment on the FlexWrap enum in widget.h),
+// no `order` (items lay out in DOM order). Reuses the same NullRenderer
+// dry-run idiom TableWidgetHandler already established for its own grid
+// columns/rows: measure every child's natural size first, then
+// distribute/position/paint, one flex line at a time (LayoutFlexLine
+// above). Lays children out into state.x/state.y/state.maxWidth (the
+// caller - ContainerWidgetHandler::Render - has already applied this
+// container's own margin/padding/width to those by the time it calls
+// this), advancing state.y by however much cross-axis (row) or
+// main-axis (column) extent the children consumed - the same contract
+// the ordinary block-flow child loop it replaces has.
+void RenderFlexContainer(const Widget &widget, LayoutState &state) {
+  int n = widget.childCount;
+  if (n == 0) {
+    return;
   }
+  bool isRow = widget.flexDirection == FlexDirection::kRow;
+  bool wrapEnabled = isRow && widget.flexWrap == FlexWrap::kWrap;
+
+  // Pass 1: each child's own natural width, in isolation - capped to
+  // this container's available width (a flex item's text still wraps
+  // against the container, same as any other child would) - and its
+  // *render* width, which prioritizes the item's own explicit width
+  // over that natural/content-driven one (see MeasureFlexItemNaturalWidth's
+  // own doc comment for why a kContainer's naturalWidth deliberately
+  // bypasses its own explicit width). renderWidth is what every later
+  // computation here actually wants; naturalWidth only still matters as
+  // one specific *fallback value* within it and within basis below.
+  std::vector<float> naturalWidth(n);
+  std::vector<float> renderWidth(n);
+  for (int i = 0; i < n; ++i) {
+    naturalWidth[i] =
+        MeasureFlexItemNaturalWidth(widget.children[i], state.renderer, state.maxWidth);
+    const Widget &child = widget.children[i];
+    renderWidth[i] = (child.hasWidth && !child.widthIsPercent) ? child.width : naturalWidth[i];
+  }
+
+  // Each item's flex basis - its starting main size before grow/shrink
+  // redistribute free space. Real CSS's flex-basis: auto falls back to
+  // the width/height property for the main axis, if the item has one of
+  // its own, else its natural content size.
+  std::vector<float> basis(n);
+  for (int i = 0; i < n; ++i) {
+    const Widget &child = widget.children[i];
+    if (child.hasFlexBasis) {
+      basis[i] = child.flexBasis;
+    } else if (isRow && child.hasWidth && !child.widthIsPercent) {
+      basis[i] = child.width;
+    } else if (!isRow && child.hasHeight) {
+      basis[i] = child.height;
+    } else if (isRow) {
+      basis[i] = naturalWidth[i];
+    } else {
+      basis[i] = MeasureItemHeightAt(child, state.renderer, renderWidth[i]);
+    }
+  }
+
+  // Greedily pack items into lines when wrapping - a new line starts
+  // whenever the next item wouldn't fit within state.maxWidth (always
+  // placing at least one item per line, even one that alone overflows,
+  // same as real CSS).
+  std::vector<std::pair<int, int>> lines;
+  if (!wrapEnabled) {
+    lines.emplace_back(0, n);
+  } else {
+    int lineStart = 0;
+    float lineTotal = basis[0];
+    for (int i = 1; i < n; ++i) {
+      float withItem = lineTotal + widget.gap + basis[i];
+      if (withItem > state.maxWidth) {
+        lines.emplace_back(lineStart, i - lineStart);
+        lineStart = i;
+        lineTotal = basis[i];
+      } else {
+        lineTotal = withItem;
+      }
+    }
+    lines.emplace_back(lineStart, n - lineStart);
+  }
+
+  // Row: accumulates each line's own cross size (+ a gap between lines,
+  // reusing the one `gap` property this engine has - no separate
+  // row-gap/column-gap) into the total cross-axis extent every line
+  // together consumed. Column: never more than one line, so this is
+  // just that single line's own main-axis extent.
+  float stateYAdvance = 0.0f;
+  float crossCursor = 0.0f;
+  for (size_t li = 0; li < lines.size(); ++li) {
+    int startIndex = lines[li].first;
+    int count = lines[li].second;
+
+    float mainAxisAvailable = state.maxWidth;
+    if (!isRow) {
+      mainAxisAvailable = static_cast<float>(count - 1) * widget.gap;
+      for (int i = 0; i < count; ++i) {
+        mainAxisAvailable += basis[startIndex + i];
+      }
+    }
+
+    FlexLineResult result = LayoutFlexLine(widget, state, isRow, startIndex, count,
+                                            renderWidth, basis, mainAxisAvailable,
+                                            crossCursor);
+
+    if (isRow) {
+      crossCursor += result.crossSize;
+      if (li + 1 < lines.size()) {
+        crossCursor += widget.gap;
+      }
+      stateYAdvance = crossCursor;
+    } else {
+      stateYAdvance = result.mainExtent;
+    }
+  }
+
+  state.y += stateYAdvance;
 }
 
 // Like MeasureHeightAt, but for a flex container's own background/

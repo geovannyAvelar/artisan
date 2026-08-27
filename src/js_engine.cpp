@@ -359,6 +359,21 @@ public:
                        JS_NewBool(ctx_, event.Bubbles()));
     JS_SetPropertyStr(ctx_, eventObj, "cancelable",
                        JS_NewBool(ctx_, event.Cancelable()));
+    // MouseEvent/KeyboardEvent data - always present (0/false/"" for an
+    // event that isn't one of those, same simplification real DOM would
+    // call "undefined" for a mismatched event type, not tracked
+    // separately here since this Node model has one Event class for
+    // everything). See Node::DispatchMouseEvent/DispatchKeyEvent
+    // (dom_node.h) for what actually populates these - main.cpp's
+    // SDL_MOUSEBUTTONDOWN/SDL_KEYDOWN handling.
+    JS_SetPropertyStr(ctx_, eventObj, "clientX", JS_NewFloat64(ctx_, event.clientX));
+    JS_SetPropertyStr(ctx_, eventObj, "clientY", JS_NewFloat64(ctx_, event.clientY));
+    JS_SetPropertyStr(ctx_, eventObj, "ctrlKey", JS_NewBool(ctx_, event.ctrlKey));
+    JS_SetPropertyStr(ctx_, eventObj, "shiftKey", JS_NewBool(ctx_, event.shiftKey));
+    JS_SetPropertyStr(ctx_, eventObj, "altKey", JS_NewBool(ctx_, event.altKey));
+    JS_SetPropertyStr(ctx_, eventObj, "metaKey", JS_NewBool(ctx_, event.metaKey));
+    JS_SetPropertyStr(ctx_, eventObj, "key", JS_NewString(ctx_, event.key.c_str()));
+    JS_SetPropertyStr(ctx_, eventObj, "code", JS_NewString(ctx_, event.code.c_str()));
     // Only script-dispatched CustomEvents set Event::detail (see
     // ScriptEventDetail above) - every event this Node model fires
     // internally leaves it null, so `.detail` reads back as null there
@@ -560,12 +575,17 @@ const JSCFunctionListEntry kClassListProto[] = {
 // --- style ---
 
 // Index into this list is the "magic" value JS_CGETSET_MAGIC_DEF passes
-// each getter/setter below - one shared pair of functions instead of
-// five near-identical ones. Exactly the five properties a <style> block
-// supports (see css.h/ParseDeclarations) - real CSS's camelCase JS name
-// mapped to its kebab-case attribute-text name.
+// each getter/setter below - one shared pair of functions instead of one
+// per property. Every property css.h's Declarations/ParseDeclarations
+// understands (css.cpp) - real CSS's camelCase JS name mapped to its
+// kebab-case attribute-text name.
 constexpr const char *kStylePropertyNames[] = {
-    "color", "background-color", "font-weight", "border-color", "border-width"};
+    "color",          "background-color", "font-weight",    "border-color",
+    "border-width",   "width",            "height",         "padding-top",
+    "padding-right",  "padding-bottom",   "padding-left",   "margin-top",
+    "margin-right",   "margin-bottom",    "margin-left",    "display",
+    "flex-direction", "justify-content",  "align-items",    "gap",
+    "flex-wrap",      "flex-grow",        "flex-shrink",    "flex-basis"};
 
 JSValue JsStyleGetProperty(JSContext *ctx, JSValueConst this_val, int magic) {
   Node *node = GetStyleNode(ctx, this_val);
@@ -621,6 +641,25 @@ const JSCFunctionListEntry kStyleProto[] = {
     JS_CGETSET_MAGIC_DEF("fontWeight", JsStyleGetProperty, JsStyleSetProperty, 2),
     JS_CGETSET_MAGIC_DEF("borderColor", JsStyleGetProperty, JsStyleSetProperty, 3),
     JS_CGETSET_MAGIC_DEF("borderWidth", JsStyleGetProperty, JsStyleSetProperty, 4),
+    JS_CGETSET_MAGIC_DEF("width", JsStyleGetProperty, JsStyleSetProperty, 5),
+    JS_CGETSET_MAGIC_DEF("height", JsStyleGetProperty, JsStyleSetProperty, 6),
+    JS_CGETSET_MAGIC_DEF("paddingTop", JsStyleGetProperty, JsStyleSetProperty, 7),
+    JS_CGETSET_MAGIC_DEF("paddingRight", JsStyleGetProperty, JsStyleSetProperty, 8),
+    JS_CGETSET_MAGIC_DEF("paddingBottom", JsStyleGetProperty, JsStyleSetProperty, 9),
+    JS_CGETSET_MAGIC_DEF("paddingLeft", JsStyleGetProperty, JsStyleSetProperty, 10),
+    JS_CGETSET_MAGIC_DEF("marginTop", JsStyleGetProperty, JsStyleSetProperty, 11),
+    JS_CGETSET_MAGIC_DEF("marginRight", JsStyleGetProperty, JsStyleSetProperty, 12),
+    JS_CGETSET_MAGIC_DEF("marginBottom", JsStyleGetProperty, JsStyleSetProperty, 13),
+    JS_CGETSET_MAGIC_DEF("marginLeft", JsStyleGetProperty, JsStyleSetProperty, 14),
+    JS_CGETSET_MAGIC_DEF("display", JsStyleGetProperty, JsStyleSetProperty, 15),
+    JS_CGETSET_MAGIC_DEF("flexDirection", JsStyleGetProperty, JsStyleSetProperty, 16),
+    JS_CGETSET_MAGIC_DEF("justifyContent", JsStyleGetProperty, JsStyleSetProperty, 17),
+    JS_CGETSET_MAGIC_DEF("alignItems", JsStyleGetProperty, JsStyleSetProperty, 18),
+    JS_CGETSET_MAGIC_DEF("gap", JsStyleGetProperty, JsStyleSetProperty, 19),
+    JS_CGETSET_MAGIC_DEF("flexWrap", JsStyleGetProperty, JsStyleSetProperty, 20),
+    JS_CGETSET_MAGIC_DEF("flexGrow", JsStyleGetProperty, JsStyleSetProperty, 21),
+    JS_CGETSET_MAGIC_DEF("flexShrink", JsStyleGetProperty, JsStyleSetProperty, 22),
+    JS_CGETSET_MAGIC_DEF("flexBasis", JsStyleGetProperty, JsStyleSetProperty, 23),
     JS_CGETSET_DEF("cssText", JsStyleGetCssText, JsStyleSetCssText),
 };
 

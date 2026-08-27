@@ -18,6 +18,7 @@
 #include <SDL2/SDL.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -27,6 +28,8 @@
 using artisan::AnimationFrameQueue;
 using artisan::BoxRegion;
 using artisan::InputFocus;
+using artisan::KeyEventInit;
+using artisan::MouseEventInit;
 using artisan::Node;
 using artisan::TimerQueue;
 
@@ -194,6 +197,101 @@ void DrawScrollbar(SDL_Renderer *renderer, int viewportWidth,
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 }
 
+// A MouseEventInit for a click at `x, y` (screen coordinates, matching
+// SDL's own mouse-event coordinates), with the current modifier keys
+// read from SDL's global keyboard state - shared by every mouse-driven
+// "click" dispatch below (a direct click, a button/checkbox/radio
+// activation, or one forwarded through a <label for="...">).
+MouseEventInit MakeMouseEventInit(float x, float y) {
+  MouseEventInit init;
+  init.clientX = x;
+  init.clientY = y;
+  SDL_Keymod mod = SDL_GetModState();
+  init.ctrlKey = (mod & KMOD_CTRL) != 0;
+  init.shiftKey = (mod & KMOD_SHIFT) != 0;
+  init.altKey = (mod & KMOD_ALT) != 0;
+  init.metaKey = (mod & KMOD_GUI) != 0;
+  return init;
+}
+
+// DOM-style key/code names for the keys SDL_KEYDOWN's own switch below
+// already recognizes - "key" is the logical key (what real DOM's
+// KeyboardEvent.key would report for the *unshifted* case; this engine
+// doesn't track shift-remapped punctuation like "1" -> "!", a known,
+// accepted imprecision), "code" is the physical key (identical to `key`
+// for every non-printable name here, matching real DOM). A printable
+// ASCII key (letters, digits, common punctuation) falls back to its own
+// character as `key`, and a matching "KeyX"/"DigitX" as `code` - close
+// enough to real DOM's actual scancode-based naming without needing a
+// full SDL_Scancode table.
+KeyEventInit MakeKeyEventInit(const SDL_Keysym &keysym) {
+  KeyEventInit init;
+  SDL_Keycode sym = keysym.sym;
+  switch (sym) {
+  case SDLK_BACKSPACE:
+    init.key = init.code = "Backspace";
+    break;
+  case SDLK_DELETE:
+    init.key = init.code = "Delete";
+    break;
+  case SDLK_LEFT:
+    init.key = init.code = "ArrowLeft";
+    break;
+  case SDLK_RIGHT:
+    init.key = init.code = "ArrowRight";
+    break;
+  case SDLK_UP:
+    init.key = init.code = "ArrowUp";
+    break;
+  case SDLK_DOWN:
+    init.key = init.code = "ArrowDown";
+    break;
+  case SDLK_HOME:
+    init.key = init.code = "Home";
+    break;
+  case SDLK_END:
+    init.key = init.code = "End";
+    break;
+  case SDLK_PAGEUP:
+    init.key = init.code = "PageUp";
+    break;
+  case SDLK_PAGEDOWN:
+    init.key = init.code = "PageDown";
+    break;
+  case SDLK_TAB:
+    init.key = init.code = "Tab";
+    break;
+  case SDLK_RETURN:
+  case SDLK_KP_ENTER:
+    init.key = init.code = "Enter";
+    break;
+  case SDLK_ESCAPE:
+    init.key = init.code = "Escape";
+    break;
+  case SDLK_SPACE:
+    init.key = " ";
+    init.code = "Space";
+    break;
+  default:
+    if (sym >= 'a' && sym <= 'z') {
+      init.key = std::string(1, static_cast<char>(sym));
+      init.code = "Key" + std::string(1, static_cast<char>(std::toupper(sym)));
+    } else if (sym >= '0' && sym <= '9') {
+      init.key = std::string(1, static_cast<char>(sym));
+      init.code = "Digit" + init.key;
+    } else if (sym >= 32 && sym < 127) {
+      init.key = init.code = std::string(1, static_cast<char>(sym));
+    }
+    break;
+  }
+  SDL_Keymod mod = SDL_GetModState();
+  init.ctrlKey = (mod & KMOD_CTRL) != 0;
+  init.shiftKey = (mod & KMOD_SHIFT) != 0;
+  init.altKey = (mod & KMOD_ALT) != 0;
+  init.metaKey = (mod & KMOD_GUI) != 0;
+  return init;
+}
+
 const BoxRegion *FindRegion(const std::vector<BoxRegion> &regions,
                              const Node *node) {
   for (const BoxRegion &region : regions) {
@@ -348,8 +446,13 @@ int main(int argc, char *argv[]) {
   // shared between a direct click on a box/button and a <label for="...">
   // click forwarded to whatever it points at (see the "label" branch in
   // SDL_MOUSEBUTTONDOWN below). No-op if `target` is nullptr (an unresolved
-  // `for`) or isn't one of these element/type combinations.
-  auto activateControl = [&](Node *target) {
+  // `for`) or isn't one of these element/type combinations. `mouseInit`
+  // carries the real click's position/modifier keys through to the
+  // dispatched "click" (DispatchMouseEvent, not Click() - reaches the
+  // exact same listeners either way, Click() being a thin wrapper over
+  // plain DispatchEvent("click"), just without anywhere to put this
+  // data).
+  auto activateControl = [&](Node *target, const MouseEventInit &mouseInit) {
     if (target == nullptr) {
       return;
     }
@@ -377,7 +480,7 @@ int main(int argc, char *argv[]) {
       if (stateChanged) {
         target->DispatchEvent("change");
       }
-      target->Click();
+      target->DispatchMouseEvent("click", mouseInit);
     } else if (target->tagName() == "input") {
       // A plain text <input> - the path a <label for="..."> pointing at
       // one takes, same as clicking it directly would (focus, caret at
@@ -388,7 +491,7 @@ int main(int argc, char *argv[]) {
       focus.selectionAnchor = focus.cursorPos;
       isSelecting = false;
     } else if (target->tagName() == "button") {
-      target->Click();
+      target->DispatchMouseEvent("click", mouseInit);
     }
   };
 
@@ -450,6 +553,14 @@ int main(int argc, char *argv[]) {
           scrollY = std::clamp(scrollY, 0.0f, maxScroll);
           break;
         }
+
+        // Informational for now - not wired to suppress the built-in
+        // editing below via preventDefault() (a bigger change: this
+        // handler mixes real key events with hardcoded shortcuts like
+        // ctrl+a/c/x/v, and untangling which of those a script should
+        // be able to override is its own follow-up, not attempted
+        // here). A listener still gets real key/code/modifier data.
+        focus.node->DispatchKeyEvent("keydown", MakeKeyEventInit(event.key.keysym));
 
         std::string value = GetValue(focus.node);
         bool valueChanged = false;
@@ -591,6 +702,11 @@ int main(int argc, char *argv[]) {
                            ? static_cast<Node *>(
                                  const_cast<void *>(region->userData))
                            : nullptr;
+          // clientX/clientY are viewport-relative, matching real DOM -
+          // the raw window coordinates, not scrolled-content-adjusted
+          // (this engine has no separate pageX/pageY for that).
+          MouseEventInit mouseInit = MakeMouseEventInit(
+              static_cast<float>(event.button.x), static_cast<float>(event.button.y));
 
           if (node != nullptr && node->tagName() == "input" &&
               !artisan::IsCheckableInputType(*node)) {
@@ -612,13 +728,13 @@ int main(int argc, char *argv[]) {
                 (node->tagName() == "button" ||
                  (node->tagName() == "input" &&
                   artisan::IsCheckableInputType(*node)))) {
-              activateControl(node);
+              activateControl(node, mouseInit);
             } else if (node != nullptr && node->tagName() == "a") {
               // Dispatches "click" first (previously an <a> never fired
               // any event at all - this both fixes that and gives
               // preventDefault() real teeth: a handler calling it
               // suppresses the navigation below, same as a real <a>.
-              bool defaultPrevented = node->DispatchEvent("click");
+              bool defaultPrevented = node->DispatchMouseEvent("click", mouseInit);
               if (!defaultPrevented) {
                 const std::string *href = node->GetAttribute("href");
                 if (href != nullptr) {
@@ -628,7 +744,7 @@ int main(int argc, char *argv[]) {
             } else if (node != nullptr && node->tagName() == "label") {
               const std::string *forId = node->GetAttribute("for");
               if (forId != nullptr) {
-                activateControl(document->FindById(*forId));
+                activateControl(document->FindById(*forId), mouseInit);
               }
             }
           }

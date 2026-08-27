@@ -29,10 +29,14 @@ namespace artisan {
 //   node.setAttribute(name, value)
 //   node.hasAttribute(name) / removeAttribute(name)
 //   node.classList.add/remove/toggle/contains(...)
-//   node.style.color/backgroundColor/fontWeight/borderColor/borderWidth
-//                                           (read/write; exactly the five
-//                                            properties a <style> block
-//                                            supports - see css.h)
+//   node.style.color/backgroundColor/fontWeight/borderColor/borderWidth/
+//        width/height/paddingTop/paddingRight/paddingBottom/paddingLeft/
+//        marginTop/marginRight/marginBottom/marginLeft/display/
+//        flexDirection/justifyContent/alignItems/gap/cssText
+//                                           (read/write; every property
+//                                            css.h's Declarations
+//                                            understands, camelCase -
+//                                            see css.h/ParseDeclarations)
 //   node.getData(name) / setData(name, value)
 //                                           (dataset's data-* attributes,
 //                                            but method-based rather than
@@ -50,7 +54,22 @@ namespace artisan {
 //                                            detail/preventDefault()/
 //                                            stopPropagation()/
 //                                            stopImmediatePropagation()/
-//                                            defaultPrevented
+//                                            defaultPrevented, plus
+//                                            MouseEvent/KeyboardEvent
+//                                            data (clientX/clientY/
+//                                            ctrlKey/shiftKey/altKey/
+//                                            metaKey/key/code - 0/false/
+//                                            "" on an event that isn't
+//                                            one of those) - populated
+//                                            on "click" (real click
+//                                            position/modifiers) and
+//                                            "keydown" (fired whenever a
+//                                            focused input gets a key
+//                                            press, informational only
+//                                            for now - preventDefault()
+//                                            on it doesn't yet suppress
+//                                            the built-in editing
+//                                            behavior)
 //   node.removeEventListener(type, fn, captureOrOptions)
 //   node.dispatchEvent(event) -> !defaultPrevented; walks the same
 //                                            capturing/target/bubbling

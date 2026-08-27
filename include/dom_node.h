@@ -70,6 +70,21 @@ public:
   // every event this Node model fires internally.
   const void *detail = nullptr;
 
+  // MouseEvent/KeyboardEvent data - see Node::DispatchMouseEvent/
+  // DispatchKeyEvent below, which are what actually populate these (a
+  // plain DispatchEvent("click")/CustomEvent leaves them at their
+  // defaults: 0/false/"", same simplification real DOM would call
+  // "undefined" for a mismatched event type, not tracked separately
+  // here since this Node model has one Event class for everything).
+  float clientX = 0.0f;
+  float clientY = 0.0f;
+  bool ctrlKey = false;
+  bool shiftKey = false;
+  bool altKey = false;
+  bool metaKey = false;
+  std::string key;
+  std::string code;
+
 private:
   bool bubbles_;
   bool cancelable_;
@@ -79,6 +94,27 @@ private:
 };
 
 using EventHandler = std::function<void(Event &)>;
+
+// Construction data for Node::DispatchMouseEvent/DispatchKeyEvent below -
+// grouped into small structs so those signatures stay readable rather
+// than each taking half a dozen loose parameters.
+struct MouseEventInit {
+  float clientX = 0.0f;
+  float clientY = 0.0f;
+  bool ctrlKey = false;
+  bool shiftKey = false;
+  bool altKey = false;
+  bool metaKey = false;
+};
+
+struct KeyEventInit {
+  std::string key;
+  std::string code;
+  bool ctrlKey = false;
+  bool shiftKey = false;
+  bool altKey = false;
+  bool metaKey = false;
+};
 
 // A single node of the mutable DOM tree a future scripting layer will
 // manipulate at runtime - create/append/remove children, set attributes,
@@ -242,6 +278,18 @@ public:
   bool DispatchEvent(const std::string &type, bool bubbles = true,
                       bool cancelable = true, const void *detail = nullptr) const;
 
+  // Same three-phase walk as DispatchEvent above, but populating
+  // MouseEvent/KeyboardEvent-shaped fields (Event::clientX etc.) on the
+  // dispatched Event instead of (or in addition to - both share the same
+  // Event class) `detail` - see main.cpp's SDL_MOUSEBUTTONDOWN/
+  // SDL_KEYDOWN handling for where real coordinates/key data actually
+  // come from. `bubbles`/`cancelable` default to true, matching
+  // DispatchEvent's own defaults.
+  bool DispatchMouseEvent(const std::string &type, const MouseEventInit &init,
+                           bool bubbles = true, bool cancelable = true) const;
+  bool DispatchKeyEvent(const std::string &type, const KeyEventInit &init,
+                        bool bubbles = true, bool cancelable = true) const;
+
 private:
   Node(NodeType type, std::string tagName, std::string text);
 
@@ -249,6 +297,13 @@ private:
     EventHandler handler;
     bool capture;
   };
+
+  // The capturing/target/bubbling walk itself, shared by DispatchEvent/
+  // DispatchMouseEvent/DispatchKeyEvent above - each just constructs
+  // and populates `event` differently before handing it here to
+  // actually run. Returns event.DefaultPrevented(), same contract
+  // DispatchEvent's own return value already has.
+  bool DispatchPrebuilt(Event &event, bool bubbles) const;
 
   // Invokes listeners_[type] (a defensive copy first - a handler that
   // adds/removes listeners on this same node mid-dispatch shouldn't

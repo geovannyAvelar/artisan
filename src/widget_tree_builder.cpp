@@ -72,6 +72,11 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.justifyContent = style.justifyContent;
   widget.alignItems = style.alignItems;
   widget.gap = style.gap;
+  widget.flexWrap = style.flexWrap;
+  widget.flexGrow = style.flexGrow;
+  widget.flexShrink = style.flexShrink;
+  widget.hasFlexBasis = style.hasFlexBasis;
+  widget.flexBasis = style.flexBasis;
 }
 
 bool IsAllWhitespace(const std::string &text) {

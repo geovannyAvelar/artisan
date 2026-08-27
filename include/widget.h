@@ -12,11 +12,16 @@ struct Color {
   unsigned char b = 0;
 };
 
-// A first, deliberately minimal flexbox (see widget_renderer.cpp's
-// RenderFlexContainer, and css.h's Declarations, which resolves markup's
-// display/flex-direction/justify-content/align-items down to these): no
-// flex-wrap, no flex-grow/shrink/basis (every item just uses its natural
-// measured size) - kContainer only, same as the rest of the box model.
+// Flexbox (see widget_renderer.cpp's RenderFlexContainer, and css.h's
+// Declarations, which resolves markup's display/flex-direction/
+// justify-content/align-items/flex-grow/flex-shrink/flex-basis/
+// flex-wrap down to these) - kContainer only, same as the rest of the
+// box model. No CSS Grid, no align-content (a wrapped flex container's
+// multiple lines just stack in DOM order along the cross axis, no extra
+// distribution control over them) and flex-wrap has no effect in column
+// direction (column's main axis - height - already has no fixed budget
+// to wrap against in this flow model, same reason justify-content
+// already degenerates to flex-start there - see RenderFlexContainer).
 // Lives here rather than in css.h because css.h already includes this
 // header (for Color, above) to avoid a circular include - not the other
 // way around.
@@ -24,6 +29,7 @@ enum class DisplayMode { kBlock, kFlex };
 enum class FlexDirection { kRow, kColumn };
 enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
 enum class AlignItems { kFlexStart, kCenter, kFlexEnd, kStretch };
+enum class FlexWrap { kNowrap, kWrap };
 
 enum class WidgetKind {
   kContainer,  // Groups children (div, span, body, ...); no text of its own.
@@ -175,6 +181,20 @@ struct Widget {
   JustifyContent justifyContent = JustifyContent::kFlexStart;
   AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
   float gap = 0.0f;
+  FlexWrap flexWrap = FlexWrap::kNowrap;
+
+  // Flex *item* properties - meaningful when this Widget is someone
+  // else's flex child, read by the parent's RenderFlexContainer, not by
+  // this widget's own Render() (same flat-namespace shape every other
+  // Widget field already has - nothing here distinguishes "container"
+  // fields from "item" fields structurally, since any Widget can be
+  // either depending on who its parent is). Defaults (grow=0, shrink=1)
+  // are real CSS flexbox's own defaults - items don't grow but do
+  // shrink to fit unless told otherwise.
+  float flexGrow = 0.0f;
+  float flexShrink = 1.0f;
+  bool hasFlexBasis = false;
+  float flexBasis = 0.0f;
 };
 
 } // namespace artisan

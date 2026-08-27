@@ -220,11 +220,7 @@ void Node::DispatchAt(const std::string &type, Event &event,
   }
 }
 
-bool Node::DispatchEvent(const std::string &type, bool bubbles,
-                          bool cancelable, const void *detail) const {
-  Event event(type, const_cast<Node *>(this), bubbles, cancelable);
-  event.detail = detail;
-
+bool Node::DispatchPrebuilt(Event &event, bool bubbles) const {
   if (bubbles) {
     // Capturing phase: root -> this node's immediate parent, in that
     // order (outermost ancestor first) - collect ancestors first since
@@ -235,7 +231,7 @@ bool Node::DispatchEvent(const std::string &type, bool bubbles,
       ancestors.push_back(p);
     }
     for (auto it = ancestors.rbegin(); it != ancestors.rend(); ++it) {
-      (*it)->DispatchAt(type, event, /*includeCapture=*/true,
+      (*it)->DispatchAt(event.type, event, /*includeCapture=*/true,
                          /*includeBubble=*/false);
       if (event.PropagationStopped()) {
         return event.DefaultPrevented();
@@ -247,7 +243,7 @@ bool Node::DispatchEvent(const std::string &type, bool bubbles,
   // this node fire here, in registration order - the two phases
   // converge at the target itself, and it always runs regardless of
   // `bubbles` (that flag only affects whether the ancestor phases do).
-  DispatchAt(type, event, /*includeCapture=*/true, /*includeBubble=*/true);
+  DispatchAt(event.type, event, /*includeCapture=*/true, /*includeBubble=*/true);
   if (event.PropagationStopped()) {
     return event.DefaultPrevented();
   }
@@ -255,7 +251,7 @@ bool Node::DispatchEvent(const std::string &type, bool bubbles,
   if (bubbles) {
     // Bubbling phase: this node's parent -> root.
     for (Node *p = parent_; p != nullptr; p = p->parent_) {
-      p->DispatchAt(type, event, /*includeCapture=*/false,
+      p->DispatchAt(event.type, event, /*includeCapture=*/false,
                     /*includeBubble=*/true);
       if (event.PropagationStopped()) {
         return event.DefaultPrevented();
@@ -264,6 +260,37 @@ bool Node::DispatchEvent(const std::string &type, bool bubbles,
   }
 
   return event.DefaultPrevented();
+}
+
+bool Node::DispatchEvent(const std::string &type, bool bubbles,
+                          bool cancelable, const void *detail) const {
+  Event event(type, const_cast<Node *>(this), bubbles, cancelable);
+  event.detail = detail;
+  return DispatchPrebuilt(event, bubbles);
+}
+
+bool Node::DispatchMouseEvent(const std::string &type, const MouseEventInit &init,
+                               bool bubbles, bool cancelable) const {
+  Event event(type, const_cast<Node *>(this), bubbles, cancelable);
+  event.clientX = init.clientX;
+  event.clientY = init.clientY;
+  event.ctrlKey = init.ctrlKey;
+  event.shiftKey = init.shiftKey;
+  event.altKey = init.altKey;
+  event.metaKey = init.metaKey;
+  return DispatchPrebuilt(event, bubbles);
+}
+
+bool Node::DispatchKeyEvent(const std::string &type, const KeyEventInit &init,
+                             bool bubbles, bool cancelable) const {
+  Event event(type, const_cast<Node *>(this), bubbles, cancelable);
+  event.key = init.key;
+  event.code = init.code;
+  event.ctrlKey = init.ctrlKey;
+  event.shiftKey = init.shiftKey;
+  event.altKey = init.altKey;
+  event.metaKey = init.metaKey;
+  return DispatchPrebuilt(event, bubbles);
 }
 
 } // namespace artisan

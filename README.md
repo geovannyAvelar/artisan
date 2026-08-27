@@ -277,16 +277,22 @@ style), `getData(name)`/`setData(name, value)` (a `data-*` attribute,
 `removeChild`/`remove()` (the removed node stays alive and
 re-appendable), `cloneNode(deep)`, `matches(selector)`/
 `closest(selector)`, `parentNode`/`nextSibling`/`previousSibling`/
-`children`, `querySelector`/`querySelectorAll` (same bounded selector
-grammar as Using CSS - one compound selector, no combinators),
-`addEventListener(type, fn, captureOrOptions)`/`removeEventListener` -
-any type string works; `"click"`, `"change"` (checkbox/radio), and
-`"input"` (text fields) fire on their own, and a script can fire any
-other type itself with `dispatchEvent` below. `fn` receives a real event
-object (`type`/`target`/`bubbles`/`cancelable`/`detail`/
-`preventDefault()`/`stopPropagation()`/`stopImmediatePropagation()`/
-`defaultPrevented`), dispatched through the usual capturing/target/
-bubbling phases. `element.dispatchEvent(event)` fires a script-built
+`children`, `querySelector`/`querySelectorAll` (same selector grammar as
+[Using CSS](#using-css) - combinators, attribute selectors, structural
+pseudo-classes, comma-lists), `addEventListener(type, fn,
+captureOrOptions)`/`removeEventListener` - any type string works;
+`"click"`, `"change"` (checkbox/radio), `"input"` (text fields), and
+`"keydown"` (whenever a focused input gets a key press) fire on their
+own, and a script can fire any other type itself with `dispatchEvent`
+below. `fn` receives a real event object (`type`/`target`/`bubbles`/
+`cancelable`/`detail`/`preventDefault()`/`stopPropagation()`/
+`stopImmediatePropagation()`/`defaultPrevented`, plus MouseEvent/
+KeyboardEvent data - `clientX`/`clientY`/`ctrlKey`/`shiftKey`/`altKey`/
+`metaKey`/`key`/`code`, `0`/`false`/`""` on an event that isn't one of
+those - populated on `"click"` and `"keydown"`; `"keydown"`'s
+`preventDefault()` doesn't yet suppress the built-in text-editing
+behavior), dispatched through the usual capturing/target/bubbling
+phases. `element.dispatchEvent(event)` fires a script-built
 `new Event(type, {bubbles, cancelable})` or `new CustomEvent(type,
 {detail, bubbles, cancelable})` (both default `bubbles`/`cancelable` to
 `false`, matching real DOM) through that same machinery, returning
@@ -344,14 +350,18 @@ this bounded grammar (`:nth-of-type`, `~=`/`^=`/`$=` attribute
 operators, etc).
 
 Properties: `color`, `background-color`, `font-weight` (`bold`/
-`normal`), `border-color`, `border-width`, and a first box model/
-flexbox pass - `width` (px or `%`), `height` (px only), `padding`/
-`margin` (single-value shorthand or the four `-top`/`-right`/`-bottom`/
-`-left` longhands), and, for `display: flex` containers,
-`flex-direction` (`row`/`column`), `justify-content` (`flex-start`/
-`center`/`flex-end`/`space-between`), `align-items` (`flex-start`/
-`center`/`flex-end`/`stretch` - `stretch` is the default, matching real
-CSS), and `gap`. Colors accept `#rgb`, `#rrggbb`, `rgb(r, g, b)`, or a
+`normal`), `border-color`, `border-width`, and a box model/flexbox pass -
+`width` (px or `%`), `height` (px only), `padding`/`margin` (single-value
+shorthand or the four `-top`/`-right`/`-bottom`/`-left` longhands), and,
+for `display: flex` containers, `flex-direction` (`row`/`column`),
+`justify-content` (`flex-start`/`center`/`flex-end`/`space-between`),
+`align-items` (`flex-start`/`center`/`flex-end`/`stretch` - `stretch` is
+the default, matching real CSS), `gap`, `flex-wrap` (`nowrap`/`wrap`),
+and, on a flex item itself, `flex-grow`/`flex-shrink` (unitless numbers;
+default `0`/`1`, matching real CSS - items don't grow but do shrink to
+fit unless told otherwise) and `flex-basis` (px, or `auto` to fall back
+to the item's own `width`/`height` for the main axis, or its natural
+content size). Colors accept `#rgb`, `#rrggbb`, `rgb(r, g, b)`, or a
 small set of common keywords (`red`, `navy`, `gray`, ... - not the full
 ~150-name CSS list, see `ParseColor` in `css.cpp` for the exact set).
 Cascade and specificity work the way you'd expect - `id` beats `class`
@@ -359,18 +369,26 @@ beats `tag`, a combinator chain's specificity sums across every compound
 in it, later rules win ties, and each property resolves independently.
 `color`/`font-weight` inherit to children that don't set their own;
 every other property (including the whole box model/flexbox set) never
-does.
+does. `node.style` (JS) exposes every one of these as a read/write
+camelCase property (`style.paddingTop`, `style.flexGrow`, ...), same as
+the original five - see [Using JavaScript](#using-javascript).
 
 The box model and flexbox are `kContainer`-only for now (a `<div>`,
 `<p>`, `<span>`, etc. - not yet `<input>`/`<table>`/text directly).
-Flexbox itself is deliberately minimal: no `flex-wrap`, no `flex-grow`/
-`flex-shrink`/`flex-basis` (every item uses its own natural size), no
-CSS Grid - each is a meaningfully bigger increment on its own, not
-attempted here. No margin collapsing (adjacent vertical margins simply
-sum, rather than collapsing to the larger one). Explicit `width`/
-`height` clamp to whatever space is actually available rather than
-overflowing/scrolling - there's no scroll-within-content concept beyond
-the page-level scroll `main.cpp` already has.
+Flexbox itself is still bounded: no CSS Grid, no `align-content` (a
+wrapped flex container's multiple lines just stack in DOM order along
+the cross axis, no extra distribution control), `flex-wrap` has no
+effect in column direction (column's main axis - height - has no fixed
+budget to wrap against, same reason its `justify-content`/`flex-grow`/
+`flex-shrink` already don't apply there), and `flex-grow`/`flex-shrink`
+resolve in a single pass, not the iterative min/max-width-clamping
+algorithm real CSS uses (this engine has no `min-width`/`max-width`
+property to clamp against, so a single pass is already exact). No margin
+collapsing (adjacent vertical margins simply sum, rather than collapsing
+to the larger one). Explicit `width`/`height` clamp to whatever space is
+actually available rather than overflowing/scrolling - there's no
+scroll-within-content concept beyond the page-level scroll `main.cpp`
+already has.
 
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see
