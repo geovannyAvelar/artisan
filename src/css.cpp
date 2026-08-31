@@ -289,6 +289,18 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
         }
         attr.name = ToLower(Trim(inner.substr(0, nameEnd)));
         std::string attrValue = Trim(inner.substr(eq + 1));
+        // The case-insensitivity flag - a trailing, whitespace-separated
+        // "i"/"I" *outside* any quotes ("[attr=value i]", not
+        // "[attr=\"value i\"]") - checked before quote-stripping below,
+        // since a quoted value ending in "i" (e.g. "[attr=\"hi\"]") still
+        // ends in a quote character at this point, not 'i'/'I', so it
+        // can never be mistaken for the flag.
+        if (attrValue.size() >= 2 &&
+            (attrValue.back() == 'i' || attrValue.back() == 'I') &&
+            std::isspace(static_cast<unsigned char>(attrValue[attrValue.size() - 2]))) {
+          attr.caseInsensitive = true;
+          attrValue = Trim(attrValue.substr(0, attrValue.size() - 1));
+        }
         if (attrValue.size() >= 2 &&
             (attrValue.front() == '"' || attrValue.front() == '\'') &&
             attrValue.back() == attrValue.front()) {
@@ -749,14 +761,19 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
   return false;
 }
 
-// Whether `value` (an attribute's actual current text) satisfies `attr`'s
-// operator against `attr.value` - only called once both are known to
-// exist (a null/absent attribute, or an attr.value-less "[name]", never
-// reach here; see CompoundMatches below). An empty `*attr.value` never
-// matches kPrefix/kSuffix/kSubstring, matching real CSS (`[href^=""]`
-// selects nothing, not everything).
-bool AttributeValueMatches(const std::string &value, const AttributeSelector &attr) {
-  const std::string &want = *attr.value;
+// Whether `rawValue` (an attribute's actual current text) satisfies
+// `attr`'s operator against `attr.value` - only called once both are
+// known to exist (a null/absent attribute, or an attr.value-less
+// "[name]", never reach here; see CompoundMatches below). An empty
+// `*attr.value` never matches kPrefix/kSuffix/kSubstring, matching real
+// CSS (`[href^=""]` selects nothing, not everything). `attr.caseInsensitive`
+// (the trailing `i` flag - "[attr=value i]") lowercases both sides first,
+// same ASCII-only case folding this file's other lowercasing (tag names,
+// pseudo-class keywords, ...) already uses - not full Unicode case
+// folding, matching this file's usual bounded-subset approach.
+bool AttributeValueMatches(const std::string &rawValue, const AttributeSelector &attr) {
+  std::string value = attr.caseInsensitive ? ToLower(rawValue) : rawValue;
+  std::string want = attr.caseInsensitive ? ToLower(*attr.value) : *attr.value;
   switch (attr.op) {
   case AttributeOperator::kEquals:
     return value == want;

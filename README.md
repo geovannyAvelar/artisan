@@ -366,7 +366,11 @@ specifically for the `class` attribute, `[href^="https://"]` prefix,
 `[href$=".pdf"]` suffix, `[href*="example"]` substring anywhere,
 `[lang|="en"]` exactly that value or that value followed by a hyphen
 (`"en"` or `"en-US"`, not `"english"` - `lang` is real CSS's original
-use case for this operator) - no case-insensitive `i` flag), structural
+use case for this operator) - any of these can add a trailing `i` (or
+`I`) flag, `[type="text" i]`, to compare case-insensitively (ASCII only)
+instead of this file's usual case-sensitive default; there's no `s`
+flag to opt back into case-sensitivity, since nothing here is
+case-insensitive by default in the first place), structural
 pseudo-classes (`:first-child`, `:last-child`, `:nth-child(2)`,
 `:nth-child(even)`/`:nth-child(odd)`, and `:nth-of-type` with the same
 argument grammar - literal integers and the even/odd keywords only, not
@@ -398,8 +402,8 @@ way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
 in a `<style>` block - `:hover`/`:focus`/`:focus-within` parse there too,
 but always evaluate false: those entry points have no live mouse/focus
 state to match against, unlike a `<style>` block's cascade. Not
-supported: anything beyond this bounded grammar (the case-insensitive
-`i` attribute flag, combinators/comma-lists inside `:not()`, etc).
+supported: anything beyond this bounded grammar (combinators/comma-lists
+inside `:not()`, etc).
 `:hover`/`:focus`/`:focus-within` styling also only reaches elements the
 renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level

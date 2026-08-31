@@ -36,10 +36,17 @@ enum class AttributeOperator {
 struct AttributeSelector {
   std::string name;
   // nullopt = "[name]" (presence only, any value); set = "[name<op>value]"
-  // per `op` above - no case-insensitive "i" flag, a bounded subset,
-  // same philosophy as the rest of this file's CSS support.
+  // per `op` above.
   std::optional<std::string> value;
   AttributeOperator op = AttributeOperator::kEquals;
+  // The trailing `i` (or `I`) flag - "[name<op>value i]" - matches
+  // `value` against the attribute case-insensitively (ASCII only, same
+  // as this file's other lowercasing). Only meaningful alongside `value`
+  // - meaningless (and never set) for a bare "[name]" presence check,
+  // which never compares a value at all. No `s` (explicitly
+  // case-*sensitive*) flag - this file has no case-insensitive default
+  // for any attribute to opt out of in the first place.
+  bool caseInsensitive = false;
 };
 
 enum class PseudoClassKind {
