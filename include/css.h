@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,7 +48,13 @@ enum class PseudoClassKind {
   kHover,
   kFocus,
   kFocusWithin,
+  kNot,
 };
+
+// Declared here (defined below) so PseudoClassSelector::notArg can point
+// to one - std::shared_ptr only needs a complete type where it's
+// actually dereferenced/destroyed (css.cpp), not at this declaration.
+struct CompoundSelector;
 
 // nthA/nthB implement "an+b" - :nth-child(2)/:nth-of-type(2) are
 // {a=0, b=2}; the "even"/"odd" keyword forms are {a=2, b=0}/{a=2, b=1}.
@@ -57,10 +64,23 @@ enum class PseudoClassKind {
 // tag name (real CSS semantics - `p:nth-of-type(2)` is the second `<p>`
 // among its siblings, not the second element overall) - see
 // MatchesPseudoClass in css.cpp for where that split actually happens.
+//
+// notArg is only used when kind is kNot: `:not(.card)` parses `.card`
+// into its own CompoundSelector (tag/id/class/attribute/pseudo-class
+// parts only - no combinators, no comma-separated lists; `:not(div > p)`
+// or `:not(a, b)` won't parse the way you'd expect) and matching negates
+// whatever that inner compound would have matched. A shared_ptr (not a
+// plain CompoundSelector) because CompoundSelector contains
+// vector<PseudoClassSelector> - embedding one by value here would make
+// the two types recursively infinite-sized; shared_ptr is just this
+// file's way of making a self-referential AST node copyable, not an
+// ownership-sharing decision (nothing else ever points at the same
+// CompoundSelector).
 struct PseudoClassSelector {
   PseudoClassKind kind;
   int nthA = 0;
   int nthB = 0;
+  std::shared_ptr<CompoundSelector> notArg;
 };
 
 struct CompoundSelector {

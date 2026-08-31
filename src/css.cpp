@@ -218,15 +218,20 @@ void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector)
 }
 
 // Splits a compound selector ("div.card#hero", ".a.b", "*", "h1",
-// "a[href]", "li:nth-child(2)") into its tag/id/class/attribute/pseudo-
-// class parts. The leading segment (before the first special marker) is
-// the tag - absent or "*" means "any tag" (universal). Attribute/
-// pseudo-class values are assumed free of whitespace and of the marker
-// characters ('.', '#', '[', ':') themselves - same bounded-subset
-// philosophy as ParseColor's rgb() parsing elsewhere in this file, not a
-// full CSS tokenizer. Used both by StyleSheet::Parse's rule parsing and
+// "a[href]", "li:nth-child(2)", "p:not(.intro)") into its tag/id/class/
+// attribute/pseudo-class parts. The leading segment (before the first
+// special marker) is the tag - absent or "*" means "any tag" (universal).
+// Attribute/pseudo-class values are assumed free of whitespace and of
+// the marker characters ('.', '#', '[', ':') themselves - same
+// bounded-subset philosophy as ParseColor's rgb() parsing elsewhere in
+// this file, not a full CSS tokenizer (":not(...)" gets a specific
+// exception to that below, since its argument routinely contains those
+// marker characters). Used both by StyleSheet::Parse's rule parsing and
 // by ParseSelectorChain below (same grammar, different direction - see
-// css.h).
+// css.h). :not(...)'s own argument is parsed by recursing into this same
+// function, so it accepts exactly what a compound selector here always
+// does - no combinators, no comma-separated lists (":not(div > p)" or
+// ":not(a, b)" won't parse the way you'd expect from real CSS).
 CompoundSelector ParseCompoundSelector(const std::string &raw) {
   CompoundSelector selector;
   std::string value = Trim(raw);
@@ -293,6 +298,39 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
       pos = (close == std::string::npos)
                 ? std::string::npos
                 : value.find_first_of(".#[:", close + 1);
+      continue;
+    }
+
+    if (marker == ':' && ToLower(value.substr(pos + 1, 4)) == "not(") {
+      // :not(...) - find the matching ')' by paren depth (correctly
+      // handles a nested :not(:not(...)), even though that's an unusual
+      // thing to write), then recursively parse whatever's between
+      // "not(" and it as another compound selector (see
+      // PseudoClassSelector::notArg, css.h) rather than falling through
+      // to the generic marker-splitting below - which would otherwise
+      // mis-terminate at the first '.'/'#'/'[' *inside* the argument
+      // (e.g. ":not(.card)" would get cut at the '.' in ".card").
+      size_t argStart = pos + 1 + 4;
+      size_t i = argStart;
+      int depth = 1;
+      while (i < value.size() && depth > 0) {
+        if (value[i] == '(') {
+          ++depth;
+        } else if (value[i] == ')') {
+          --depth;
+          if (depth == 0) {
+            break;
+          }
+        }
+        ++i;
+      }
+      PseudoClassSelector pc;
+      pc.kind = PseudoClassKind::kNot;
+      pc.notArg = std::make_shared<CompoundSelector>(
+          ParseCompoundSelector(value.substr(argStart, i - argStart)));
+      selector.pseudoClasses.push_back(std::move(pc));
+      pos = (i < value.size()) ? value.find_first_of(".#[:", i + 1)
+                                : std::string::npos;
       continue;
     }
 
@@ -570,6 +608,13 @@ bool MatchesSelfOrAncestor(const Node *from, const Node &node) {
   return false;
 }
 
+// Forward-declared so MatchesPseudoClass's kNot case can call back into
+// it - CompoundMatches itself (below) is what actually invokes
+// MatchesPseudoClass for each of a compound's pseudo-classes, so the two
+// are mutually recursive (":not(.card:nth-child(2))" needs both).
+bool CompoundMatches(const CompoundSelector &selector, const Node &node,
+                      const PseudoClassState &state);
+
 // Whether `node` is at the position `pc` describes among its parent's
 // *element* siblings (1-based - real CSS's :nth-child counts only
 // element children). A node with no parent (root/detached) is treated
@@ -579,6 +624,13 @@ bool MatchesSelfOrAncestor(const Node *from, const Node &node) {
 // PseudoClassState, css.h) - the other kinds ignore it entirely.
 bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
                          const PseudoClassState &state) {
+  if (pc.kind == PseudoClassKind::kNot) {
+    // notArg is only null if `:not()` had no parseable argument (e.g.
+    // ":not()" itself, or something ParseCompoundSelector reduced to
+    // nothing) - treat that degenerate case as never negating anything,
+    // i.e. :not() with no real constraint matches like a bare "*" would.
+    return pc.notArg == nullptr || !CompoundMatches(*pc.notArg, node, state);
+  }
   if (pc.kind == PseudoClassKind::kHover) {
     // :hover matches `node` itself and every one of its ancestors -
     // hovering a child counts as hovering its containers too, same as
@@ -663,6 +715,7 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
   case PseudoClassKind::kHover:
   case PseudoClassKind::kFocus:
   case PseudoClassKind::kFocusWithin:
+  case PseudoClassKind::kNot:
     // Handled by the early returns above - unreachable here, but listed
     // so this switch stays exhaustive (no -Wswitch warning) as
     // PseudoClassKind grows.
@@ -835,7 +888,17 @@ int SpecificityOfCompound(const CompoundSelector &compound) {
   }
   score += static_cast<int>(compound.classes.size()) * 10;
   score += static_cast<int>(compound.attributes.size()) * 10;
-  score += static_cast<int>(compound.pseudoClasses.size()) * 10;
+  // Real CSS treats :not(...) as contributing its *argument's*
+  // specificity, not a flat pseudo-class point - :not(#foo) counts as
+  // an id (100), :not(div) as a tag (1), matching what :not() actually
+  // does semantically (it's the thing inside that determines how
+  // "specific" the constraint is). Every other pseudo-class here is a
+  // flat 10, same as a class or attribute selector.
+  for (const PseudoClassSelector &pc : compound.pseudoClasses) {
+    score += (pc.kind == PseudoClassKind::kNot && pc.notArg != nullptr)
+                 ? SpecificityOfCompound(*pc.notArg)
+                 : 10;
+  }
   if (!compound.tag.empty()) {
     score += 1;
   }

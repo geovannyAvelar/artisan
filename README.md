@@ -374,7 +374,16 @@ the full `an+b` algebra. `:nth-of-type` counts only same-tag siblings
 else is mixed in between; `:nth-child` counts every element sibling
 regardless of tag. There's no separate `:first-of-type`/`:last-of-type`
 - write `:nth-of-type(1)` for the former; there's no general "last" form
-without the full `an+b` algebra), and three interactive pseudo-classes,
+without the full `an+b` algebra), `:not(...)` (negates a single compound
+selector - `li:not(.done)`, `:not(#hero)`, `:not([disabled])`,
+`:not(:first-child)` all work, including nesting - `:not(:not(.a))` is
+equivalent to `.a`; `:not()`'s own argument follows the same rules as
+any other compound here, so no combinators or comma-lists inside it
+(`:not(div > p)`/`:not(a, b)` won't parse the way real CSS would read
+them). Specificity follows real CSS: `:not(...)` contributes whatever
+its argument's specificity is, not a flat pseudo-class point - `:not(#x)`
+counts as an id (100), `:not(div)` as a tag (1)), and three interactive
+pseudo-classes,
 `:hover`, `:focus`, and `:focus-within` - a `<style>` block rule like
 `.card:hover { background-color: ... }` or
 `#name:focus { border-color: ... }` re-resolves live as the mouse moves
@@ -388,7 +397,7 @@ way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
 in a `<style>` block - `:hover`/`:focus`/`:focus-within` parse there too,
 but always evaluate false: those entry points have no live mouse/focus
 state to match against, unlike a `<style>` block's cascade. Not
-supported: anything beyond this bounded grammar (`|=`, `:not()`, etc).
+supported: anything beyond this bounded grammar (`|=`, etc).
 `:hover`/`:focus`/`:focus-within` styling also only reaches elements the
 renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level
