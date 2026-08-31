@@ -273,6 +273,13 @@ struct Declarations {
   std::vector<GridTrack> gridTemplateColumns;
   bool hasGridTemplateRows = false;
   std::vector<GridTrack> gridTemplateRows;
+  bool hasGridTemplateAreas = false;
+  std::vector<std::vector<std::string>> gridTemplateAreas;
+  // grid-area - a plain string, no hasXxx flag: same as CompoundSelector's
+  // tag/id (css.h, above), an empty string already unambiguously means
+  // "not set" (real CSS has no way to write a meaningful empty area
+  // name), so a separate presence flag would be redundant.
+  std::string gridArea;
 
   // `content` - only meaningful when this Declarations was resolved for
   // a `::before`/`::after` pseudo-element (StyleSheet::Resolve's `target`

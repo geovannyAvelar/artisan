@@ -744,39 +744,136 @@ float MeasureFlexHeightAt(const Widget &widget, const IRenderer &renderer,
   return dryRun.y;
 }
 
+// One item's resolved cell placement - row/col (0-indexed, top-left of
+// its span) and rowSpan/colSpan (always >= 1; > 1 only ever comes from
+// a named grid-area whose occurrences span more than one cell - see
+// FindGridAreaPlacement below, since this bounded subset has no
+// grid-column/grid-row line-based span syntax of its own).
+struct GridItemPlacement {
+  int row;
+  int col;
+  int rowSpan;
+  int colSpan;
+};
+
+// The bounding box of every cell in `areas` naming `name` - real CSS
+// requires those occurrences to form a solid rectangle; this doesn't
+// validate that, it just takes whichever bounding box they span (a
+// non-rectangular or discontiguous `name` silently gets treated as if
+// it were the rectangle bounding all of it). Returns false (leaving
+// `out` untouched) if `name` doesn't appear anywhere in `areas`.
+bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
+                            const std::string &name, GridItemPlacement &out) {
+  int minRow = -1, maxRow = -1, minCol = -1, maxCol = -1;
+  for (int r = 0; r < static_cast<int>(areas.size()); ++r) {
+    for (int c = 0; c < static_cast<int>(areas[r].size()); ++c) {
+      if (areas[r][c] != name) {
+        continue;
+      }
+      if (minRow < 0) {
+        minRow = maxRow = r;
+        minCol = maxCol = c;
+      } else {
+        minRow = std::min(minRow, r);
+        maxRow = std::max(maxRow, r);
+        minCol = std::min(minCol, c);
+        maxCol = std::max(maxCol, c);
+      }
+    }
+  }
+  if (minRow < 0) {
+    return false;
+  }
+  out = {minRow, minCol, maxRow - minRow + 1, maxCol - minCol + 1};
+  return true;
+}
+
 // Lays out `widget`'s children as a CSS Grid - kContainer, display:grid
-// only, the bounded subset DisplayMode (widget.h) documents: fixed-px/
-// fr track lists only, always auto-placed into cells in document order
-// (row-major, no grid-column/grid-row placement or spans), always
-// stretched to fill their cell on both axes.
+// only, the bounded subset DisplayMode (widget.h) documents. Every item
+// stretches to fill its own cell(s) on both axes (no justify-items/
+// align-items). Placement: an item whose own grid-area names a cell in
+// widget.gridTemplateAreas goes there (spanning every cell that name's
+// occurrences bound - see FindGridAreaPlacement); everything else
+// (grid-template-areas unset, or an item's own grid-area unset or not
+// found in it) auto-places into the next cell in document order,
+// row-major, always a single cell (no grid-column/grid-row placement or
+// spans outside of named areas).
 void RenderGridContainer(const Widget &widget, LayoutState &state) {
   int n = widget.childCount;
   if (n == 0) {
     return;
   }
 
-  // Column count: however many tracks grid-template-columns names, or
-  // one full-width column if it's unset - the simplest sane fallback
-  // for a grid with no explicit column structure (real CSS's own
-  // implicit-track machinery for this case is a lot more elaborate than
-  // this bounded subset implements).
-  int columnCount = widget.gridTemplateColumns.empty()
-                         ? 1
-                         : static_cast<int>(widget.gridTemplateColumns.size());
-  float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
+  bool hasAreas = !widget.gridTemplateAreas.empty();
+
+  // Column/row count: from the area template's own shape when one's
+  // set (every row is assumed the same length as the first - see
+  // ParseGridTemplateAreas, css.cpp, for why that's not actually
+  // validated); otherwise the same as before named areas existed -
+  // however many tracks grid-template-columns names (or one full-width
+  // column if unset) for columns, and however many rows the children
+  // actually need at that many per row for rows.
+  int columnCount;
+  if (hasAreas) {
+    // The widest row, not just the first - ParseGridTemplateAreas
+    // (css.cpp) doesn't validate every row is the same length, so a
+    // malformed template could have a later row longer than the first;
+    // sizing columnCount off of *any* narrower row would let
+    // FindGridAreaPlacement return a column index the columnWidths/
+    // columnX vectors below aren't actually sized to hold.
+    columnCount = 0;
+    for (const auto &row : widget.gridTemplateAreas) {
+      columnCount = std::max(columnCount, static_cast<int>(row.size()));
+    }
+  } else {
+    columnCount = widget.gridTemplateColumns.empty()
+                       ? 1
+                       : static_cast<int>(widget.gridTemplateColumns.size());
+  }
+  columnCount = std::max(1, columnCount);
+
+  // Resolve every item's placement first - needed before row count can
+  // be known when there's no area template (row count depends on the
+  // highest auto-placed row any item actually lands in).
+  std::vector<GridItemPlacement> placements(n);
+  int nextAutoIndex = 0;
+  for (int i = 0; i < n; ++i) {
+    GridItemPlacement found;
+    if (hasAreas && !widget.children[i].gridArea.empty() &&
+        FindGridAreaPlacement(widget.gridTemplateAreas, widget.children[i].gridArea,
+                               found)) {
+      placements[i] = found;
+      continue;
+    }
+    int idx = nextAutoIndex++;
+    placements[i] = {idx / columnCount, idx % columnCount, 1, 1};
+  }
+
+  // A named placement is always within the area template's own bounds
+  // by construction (FindGridAreaPlacement only ever searches rows that
+  // already exist), so this only actually extends rowCount past the
+  // template's own size when an auto-placed item (an unnamed one, or
+  // one whose name isn't in the template - see the placements loop
+  // above) overflows past it, the same way rowCount is derived purely
+  // from placements when there's no area template at all.
+  int rowCount = hasAreas ? static_cast<int>(widget.gridTemplateAreas.size()) : 1;
+  for (const GridItemPlacement &p : placements) {
+    rowCount = std::max(rowCount, p.row + p.rowSpan);
+  }
 
   // Column widths: a fixed (px) track takes its own value outright; a
   // fractional (fr) track shares whatever's left after every fixed
   // track and gap is subtracted, proportionally to its own fr count -
   // the same leftover-space-by-weight idea flex-grow already uses for
   // item sizing (LayoutFlexLine above), just applied to track sizing.
-  // An unset grid-template-columns (columnCount == 1, from above) always
-  // falls into the `else` branch below trivially - one column, full
-  // available width, no fixed/fr tracks to speak of.
+  // Falls back to equal-width columns whenever grid-template-columns
+  // doesn't name exactly `columnCount` tracks - either because it's
+  // unset entirely (the pre-named-areas single-full-width-column
+  // behavior is just this formula's columnCount == 1 case), or an area
+  // template implies a column count it doesn't match.
+  float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
   std::vector<float> columnWidths(columnCount);
-  if (widget.gridTemplateColumns.empty()) {
-    columnWidths[0] = std::max(0.0f, state.maxWidth - totalColumnGap);
-  } else {
+  if (static_cast<int>(widget.gridTemplateColumns.size()) == columnCount) {
     float totalFixed = 0.0f;
     float totalFr = 0.0f;
     for (const GridTrack &track : widget.gridTemplateColumns) {
@@ -792,6 +889,12 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       const GridTrack &track = widget.gridTemplateColumns[c];
       columnWidths[c] = track.isFraction ? track.value * perFr : track.value;
     }
+  } else {
+    float each =
+        std::max(0.0f, state.maxWidth - totalColumnGap) / static_cast<float>(columnCount);
+    for (int c = 0; c < columnCount; ++c) {
+      columnWidths[c] = each;
+    }
   }
   std::vector<float> columnX(columnCount);
   float x = 0.0f;
@@ -800,36 +903,68 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     x += columnWidths[c] + widget.gap;
   }
 
-  // Row count: however many rows n children actually need at
-  // columnCount-per-row, always at least enough to place every child -
-  // a simplified stand-in for real CSS's own implicit-row generation
-  // (grid-auto-rows isn't supported; every implicit row is just
-  // auto-sized, per rowHeights below, unconditionally).
-  int rowCount = (n + columnCount - 1) / columnCount;
-
-  // Row heights: a fixed (px) grid-template-rows track is a floor, not
-  // an exact value - matching every other explicit-height property in
-  // this renderer (kBox/kContainer/kTable's own height): content taller
-  // than it still reserves its own full height rather than getting
-  // clipped. Every other row - beyond however many grid-template-rows
-  // named, or one whose track is fractional (fr rows aren't resolved in
-  // this bounded subset, since doing so meaningfully needs a known
-  // total height budget most grids never set) - auto-sizes to the
-  // tallest cell actually placed in it, the same natural-height
-  // measurement flex/table already use elsewhere in this file.
+  // Row heights, base pass: a fixed (px) grid-template-rows track is a
+  // floor, not an exact value - matching every other explicit-height
+  // property in this renderer (kBox/kContainer/kTable's own height):
+  // content taller than it still reserves its own full height rather
+  // than getting clipped. Every other row - beyond however many
+  // grid-template-rows named, or one whose track is fractional (fr rows
+  // aren't resolved in this bounded subset, since doing so meaningfully
+  // needs a known total height budget most grids never set) -
+  // auto-sizes to the tallest single-row (rowSpan == 1) item actually
+  // placed in it, the same natural-height measurement flex/table
+  // already use elsewhere in this file. A spanning item (rowSpan > 1,
+  // only ever from a named area - see GridItemPlacement) is excluded
+  // here and handled in a second pass below, the same base-then-
+  // shortfall two-pass shape TableWidgetHandler's own colspan/rowspan
+  // handling already uses.
   std::vector<float> rowHeights(rowCount, 0.0f);
   for (int i = 0; i < n; ++i) {
-    int row = i / columnCount;
-    int col = i % columnCount;
-    float natural =
-        MeasureItemHeightAt(widget.children[i], state.renderer, columnWidths[col]);
-    rowHeights[row] = std::max(rowHeights[row], natural);
+    const GridItemPlacement &p = placements[i];
+    if (p.rowSpan != 1) {
+      continue;
+    }
+    float cellWidth = 0.0f;
+    for (int c = p.col; c < p.col + p.colSpan; ++c) {
+      cellWidth += columnWidths[c];
+    }
+    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
+    float natural = MeasureItemHeightAt(widget.children[i], state.renderer, cellWidth);
+    rowHeights[p.row] = std::max(rowHeights[p.row], natural);
   }
   for (int r = 0; r < rowCount && r < static_cast<int>(widget.gridTemplateRows.size());
        ++r) {
     const GridTrack &track = widget.gridTemplateRows[r];
     if (!track.isFraction) {
       rowHeights[r] = std::max(rowHeights[r], track.value);
+    }
+  }
+  // Row heights, spanning pass: a rowSpan > 1 item's own natural height
+  // may need more room than the rows it crosses already have (from the
+  // base pass above) - spread the shortfall evenly across them, the
+  // same shortfall-distribution TableWidgetHandler's own colspan
+  // handling uses for columns.
+  for (int i = 0; i < n; ++i) {
+    const GridItemPlacement &p = placements[i];
+    if (p.rowSpan <= 1) {
+      continue;
+    }
+    float cellWidth = 0.0f;
+    for (int c = p.col; c < p.col + p.colSpan; ++c) {
+      cellWidth += columnWidths[c];
+    }
+    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
+    float needed = MeasureItemHeightAt(widget.children[i], state.renderer, cellWidth);
+
+    float available = static_cast<float>(p.rowSpan - 1) * widget.gap;
+    for (int r = p.row; r < p.row + p.rowSpan; ++r) {
+      available += rowHeights[r];
+    }
+    if (needed > available) {
+      float extra = (needed - available) / static_cast<float>(p.rowSpan);
+      for (int r = p.row; r < p.row + p.rowSpan; ++r) {
+        rowHeights[r] += extra;
+      }
     }
   }
   std::vector<float> rowY(rowCount);
@@ -840,10 +975,21 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   }
 
   for (int i = 0; i < n; ++i) {
-    int row = i / columnCount;
-    int col = i % columnCount;
+    const GridItemPlacement &p = placements[i];
 
-    // Stretch: every item fills its cell on both axes - the only
+    float cellWidth = 0.0f;
+    for (int c = p.col; c < p.col + p.colSpan; ++c) {
+      cellWidth += columnWidths[c];
+    }
+    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
+
+    float cellHeight = 0.0f;
+    for (int r = p.row; r < p.row + p.rowSpan; ++r) {
+      cellHeight += rowHeights[r];
+    }
+    cellHeight += static_cast<float>(p.rowSpan - 1) * widget.gap;
+
+    // Stretch: every item fills its own cell(s) on both axes - the only
     // alignment this bounded subset supports (no justify-items/
     // align-items). Same shallow-copy-and-override pattern
     // LayoutFlexLine already uses to impose a computed size on a const
@@ -851,17 +997,17 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     Widget effectiveChild = widget.children[i];
     effectiveChild.hasWidth = true;
     effectiveChild.widthIsPercent = false;
-    effectiveChild.width = columnWidths[col];
+    effectiveChild.width = cellWidth;
     effectiveChild.hasHeight = true;
-    effectiveChild.height = rowHeights[row];
+    effectiveChild.height = cellHeight;
 
-    float childX = state.x + columnX[col];
-    float childY = state.y + rowY[row];
+    float childX = state.x + columnX[p.col];
+    float childY = state.y + rowY[p.row];
 
     // A fresh LayoutState per item - same reasoning LayoutFlexLine's
     // identical childState construction documents (grid items are
     // always individually positioned boxes, never inline-flowed text).
-    LayoutState childState{state.renderer, childX, childY, columnWidths[col]};
+    LayoutState childState{state.renderer, childX, childY, cellWidth};
     childState.boxRegions = state.boxRegions;
     childState.suppressBlockSpacing = true;
     RenderWidget(effectiveChild, childState);

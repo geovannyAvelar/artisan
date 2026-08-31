@@ -80,6 +80,8 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.flexBasis = style.flexBasis;
   widget.gridTemplateColumns = style.gridTemplateColumns;
   widget.gridTemplateRows = style.gridTemplateRows;
+  widget.gridTemplateAreas = style.gridTemplateAreas;
+  widget.gridArea = style.gridArea;
 }
 
 bool IsAllWhitespace(const std::string &text) {

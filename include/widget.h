@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 namespace artisan {
@@ -275,6 +276,32 @@ struct Widget {
   // either.
   std::vector<GridTrack> gridTemplateColumns;
   std::vector<GridTrack> gridTemplateRows;
+
+  // grid-template-areas - one entry per row, each itself one area-name
+  // token per column ("." meaning that cell is explicitly empty) - e.g.
+  // `grid-template-areas: "header header" "sidebar content";` becomes
+  // {{"header","header"}, {"sidebar","content"}}. Empty (the default)
+  // means unset, same as gridTemplateColumns/Rows above. When set, this
+  // - not gridTemplateColumns' own size - determines the grid's column/
+  // row count (see RenderGridContainer): gridTemplateColumns/Rows still
+  // size those columns/rows if their own count happens to match, but a
+  // mismatched or unset gridTemplateColumns falls back to equal-width
+  // columns instead of the single-full-width-column fallback that
+  // applies without areas.
+  std::vector<std::vector<std::string>> gridTemplateAreas;
+
+  // grid-area - meaningful when this Widget is someone else's grid
+  // child (read by the parent's RenderGridContainer, same "item
+  // property in the same flat namespace" shape flexGrow/flexShrink
+  // above already have) whose gridTemplateAreas names this string
+  // somewhere - that name's bounding box (which may span multiple
+  // cells - see RenderGridContainer) becomes this item's placement.
+  // Empty (the default/unset) - or a name gridTemplateAreas doesn't
+  // contain - falls back to ordinary row-major auto-placement, the same
+  // as every item already gets without named areas at all. Only the
+  // named-area form is supported, not real CSS's row-start/column-
+  // start/row-end/column-end line-based shorthand.
+  std::string gridArea;
 };
 
 } // namespace artisan

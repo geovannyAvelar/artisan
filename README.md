@@ -564,25 +564,51 @@ above). `grid-template-columns`/`grid-template-rows` each take a plain
 space-separated track list - a fixed pixel size (`100px`, or a bare
 number) and/or an `Nfr` fractional unit, e.g.
 `grid-template-columns: 100px 1fr 2fr;` - not real CSS's `repeat()`,
-`minmax()`, `auto`, percentage tracks, or named lines/areas; a token
-matching neither form is skipped rather than failing the whole list.
-`fr` only resolves for columns, against the container's own available
-width (always known); a fractional row track is treated as `auto`
+`minmax()`, `auto`, percentage tracks, or named lines; a token matching
+neither form is skipped rather than failing the whole list. `fr` only
+resolves for columns, against the container's own available width
+(always known); a fractional row track is treated as `auto`
 (content-sized) instead, since resolving it meaningfully would need a
 known total container height most grids never set. `gap` (reused from
 flexbox) applies between both columns and rows - there's no separate
-`row-gap`/`column-gap`. Children are always auto-placed into cells in
-document order, row-major, wrapping to a new row whenever the current
-one runs out of columns - there's no `grid-column`/`grid-row` explicit
-placement and no spans. Every item always stretches to fill its cell on
-both axes - there's no `justify-items`/`align-items`. A row named by
-`grid-template-rows` is a *floor*, not an exact height (content taller
-than it still reserves its own full height, same as every other
-explicit-height property in this renderer); any row beyond however many
-`grid-template-rows` named - including every row when it's unset
-entirely, which also makes an unset `grid-template-columns` fall back to
-a single full-width column - auto-sizes to its own tallest cell's
-natural content height.
+`row-gap`/`column-gap`. A child with no placement of its own (see
+`grid-template-areas`/`grid-area` below) auto-places into the next cell
+in document order, row-major, wrapping to a new row whenever the current
+one runs out of columns - there's no line-based `grid-column`/
+`grid-row` placement (`grid-column: 2 / 4`, `span 2`, etc.). Every item
+always stretches to fill its own cell(s) on both axes - there's no
+`justify-items`/`align-items`. A row named by `grid-template-rows` is a
+*floor*, not an exact height (content taller than it still reserves its
+own full height, same as every other explicit-height property in this
+renderer); any row beyond however many `grid-template-rows` named -
+including every row when it's unset entirely, which also makes an unset
+`grid-template-columns` fall back to a single full-width column -
+auto-sizes to its own tallest (non-row-spanning) cell's natural content
+height.
+
+`grid-template-areas` names cells with plain quoted-string rows, e.g.
+```css
+grid-template-areas:
+  "header header"
+  "sidebar content"
+  "footer footer";
+```
+(a literal `.` names an explicitly empty cell). A child's own
+`grid-area: <name>` places it at whatever cells that name occupies -
+including more than one, when a name appears in more than one cell, the
+classic "header spans two columns" pattern above - real CSS's numeric
+`grid-area: row / col / row-end / col-end` line-based shorthand isn't
+supported, only the named form. `grid-template-columns`/
+`grid-template-rows` still size the resulting columns/rows exactly as
+above when their own track count matches the area template's; otherwise
+(including when they're unset entirely) columns fall back to equal
+width and rows to auto content-sizing, so `grid-template-areas` alone
+(no explicit tracks at all) is enough to get a working layout. A child
+whose own `grid-area` doesn't match any name in the template - or that
+has none at all - still auto-places into the next free-by-index cell in
+document order the same as it would without any area template, so named
+and unnamed children can mix, though placement for the unnamed ones
+doesn't try to route around cells a named child already claimed.
 
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see

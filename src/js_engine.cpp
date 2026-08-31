@@ -827,7 +827,8 @@ constexpr const char *kStylePropertyNames[] = {
     "margin-right",   "margin-bottom",    "margin-left",    "display",
     "flex-direction", "justify-content",  "align-items",    "gap",
     "flex-wrap",      "flex-grow",        "flex-shrink",    "flex-basis",
-    "align-content",  "grid-template-columns", "grid-template-rows"};
+    "align-content",  "grid-template-columns", "grid-template-rows",
+    "grid-template-areas", "grid-area"};
 
 JSValue JsStyleGetProperty(JSContext *ctx, JSValueConst this_val, int magic) {
   Node *node = GetStyleNode(ctx, this_val);
@@ -905,6 +906,8 @@ const JSCFunctionListEntry kStyleProto[] = {
     JS_CGETSET_MAGIC_DEF("alignContent", JsStyleGetProperty, JsStyleSetProperty, 24),
     JS_CGETSET_MAGIC_DEF("gridTemplateColumns", JsStyleGetProperty, JsStyleSetProperty, 25),
     JS_CGETSET_MAGIC_DEF("gridTemplateRows", JsStyleGetProperty, JsStyleSetProperty, 26),
+    JS_CGETSET_MAGIC_DEF("gridTemplateAreas", JsStyleGetProperty, JsStyleSetProperty, 27),
+    JS_CGETSET_MAGIC_DEF("gridArea", JsStyleGetProperty, JsStyleSetProperty, 28),
     JS_CGETSET_DEF("cssText", JsStyleGetCssText, JsStyleSetCssText),
 };
 

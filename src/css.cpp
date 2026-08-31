@@ -191,6 +191,56 @@ bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
   return true;
 }
 
+// Parses grid-template-areas - one or more quoted strings (typically
+// one per source line, though this scans for quote characters directly
+// rather than splitting on newlines, so it doesn't actually care how
+// they're laid out), each becoming one grid row; each whitespace-
+// separated token within a string becomes that row's per-column area
+// name ("." is a real CSS keyword for "this cell has no name" - kept
+// as a literal token here, same as any other name, since
+// FindGridAreaPlacement, widget_renderer.cpp, only ever searches for a
+// specific name an item's grid-area actually names, never "."
+// specifically). Doesn't validate that every row has the same number
+// of tokens, or that a name's occurrences form a real CSS's own
+// solid-rectangle requirement - RenderGridContainer's own
+// FindGridAreaPlacement just takes whichever bounding box a name's
+// occurrences span. Returns false (leaving `out` untouched) if no
+// quoted string with at least one token was found at all.
+bool ParseGridTemplateAreas(const std::string &raw,
+                             std::vector<std::vector<std::string>> &out) {
+  std::vector<std::vector<std::string>> rows;
+  size_t i = 0;
+  while (i < raw.size()) {
+    while (i < raw.size() && raw[i] != '"' && raw[i] != '\'') {
+      ++i;
+    }
+    if (i >= raw.size()) {
+      break;
+    }
+    char quote = raw[i];
+    size_t start = i + 1;
+    size_t end = raw.find(quote, start);
+    if (end == std::string::npos) {
+      break;
+    }
+    std::istringstream tokens(raw.substr(start, end - start));
+    std::string token;
+    std::vector<std::string> row;
+    while (tokens >> token) {
+      row.push_back(token);
+    }
+    if (!row.empty()) {
+      rows.push_back(std::move(row));
+    }
+    i = end + 1;
+  }
+  if (rows.empty()) {
+    return false;
+  }
+  out = std::move(rows);
+  return true;
+}
+
 // Parses an nth-*() argument - a literal integer, or the "even"/"odd"
 // keywords - into (nthA, nthB), the same v1 grammar nth-child and
 // nth-of-type both share (not the full "an+b" algebra). Returns false
@@ -647,6 +697,11 @@ Declarations ParseDeclarations(const std::string &body) {
           ParseGridTrackList(value, decl.gridTemplateColumns);
     } else if (property == "grid-template-rows") {
       decl.hasGridTemplateRows = ParseGridTrackList(value, decl.gridTemplateRows);
+    } else if (property == "grid-template-areas") {
+      decl.hasGridTemplateAreas =
+          ParseGridTemplateAreas(value, decl.gridTemplateAreas);
+    } else if (property == "grid-area") {
+      decl.gridArea = value;
     } else if (property == "flex-direction") {
       std::string lower = ToLower(value);
       if (lower == "row") {
@@ -1347,6 +1402,13 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasGridTemplateRows = true;
     declarations.gridTemplateRows = inlineStyle.gridTemplateRows;
   }
+  if (inlineStyle.hasGridTemplateAreas) {
+    declarations.hasGridTemplateAreas = true;
+    declarations.gridTemplateAreas = inlineStyle.gridTemplateAreas;
+  }
+  if (!inlineStyle.gridArea.empty()) {
+    declarations.gridArea = inlineStyle.gridArea;
+  }
 }
 
 namespace {
@@ -1479,7 +1541,8 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
   PropertyWinner alignContentWin;
   PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
-  PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin;
+  PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin, gridTemplateAreasWin;
+  PropertyWinner gridAreaWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
     const Rule &rule = rules_[i];
@@ -1640,6 +1703,15 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         gridTemplateRowsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGridTemplateRows = true;
       own.gridTemplateRows = rule.declarations.gridTemplateRows;
+    }
+    if (rule.declarations.hasGridTemplateAreas &&
+        gridTemplateAreasWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGridTemplateAreas = true;
+      own.gridTemplateAreas = rule.declarations.gridTemplateAreas;
+    }
+    if (!rule.declarations.gridArea.empty() &&
+        gridAreaWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.gridArea = rule.declarations.gridArea;
     }
     if (rule.declarations.hasContent &&
         contentWin.ShouldTake(matchedSpecificity, ruleIndex)) {
