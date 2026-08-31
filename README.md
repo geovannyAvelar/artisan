@@ -445,9 +445,13 @@ camelCase property (`style.paddingTop`, `style.flexGrow`, ...), same as
 the original five - see [Using JavaScript](#using-javascript).
 
 The box model and flexbox reach `kContainer` (`<div>`, `<p>`, `<span>`,
-etc.), `<input>`/`<button>`/checkbox/radio, `<a>`/`<label>`, and
-`<table>`/`<td>`/`<th>`; still not `kText`/`<hr>`/`<img>` directly. A
-text `<input>`/`<button>` (and a table cell's own `padding`, see below)
+etc.), `<input>`/`<button>`/checkbox/radio, `<a>`/`<label>`,
+`<table>`/`<td>`/`<th>`, `<hr>`, and `<img>`. A bare text node is the one
+deliberate exception, and always will be: it has no tag/class/id of its
+own for a selector to match, so it's never resolved its own CSS in the
+first place (see `MakeText` in `widget_tree_builder.cpp`) - the same
+reason real CSS doesn't give a text run its own independent box model
+either. A text `<input>`/`<button>` (and a table cell's own `padding`, see below)
 has its own built-in default padding (independent of CSS) so it stays
 usable unstyled - `padding` on one of these *adds* to that default
 rather than replacing it, unlike `kContainer`/`<a>`/`<label>`/`<table>`
@@ -478,6 +482,23 @@ doesn't apply to table cells); a `<table>`'s own `margin` does. A
 `<caption>` is unaffected by any of this - it still renders as plain
 text above the grid, at the table's original position rather than inside
 its margin/padding/border box, a simplification real CSS doesn't make.
+
+A `<hr>` honors margin, explicit `width`/`height` (overriding its default
+of filling available width at a fixed 2px height), and
+`background-color`/`border-color`/`border-width` - no `padding`, since a
+rule has no content of its own to inset around. An `<img>`'s CSS
+`width`/`height` override the `width`/`height` *attribute* outright, per
+axis independently (real CSS precedence: the attribute is only a
+UA-stylesheet-level default any stylesheet rule beats), and margin/
+padding work the same as everywhere else. `background-color`/
+`border-color` on an `<img>` only paint when both width and height are
+already resolved *before* the image is decoded - from CSS and/or the
+attribute, in any combination - since they need to land behind the image
+rather than on top of it; when either axis instead relies on the image's
+own natural aspect ratio (only known once decoding happens), background/
+border are silently skipped for that render rather than painted in the
+wrong order.
+
 Flexbox itself is still bounded: no CSS Grid, `align-content` only has
 anything to do in row direction with `flex-wrap: wrap` *and* an explicit
 CSS `height` taller than what the wrapped lines need on their own - an

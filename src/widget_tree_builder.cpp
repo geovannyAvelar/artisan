@@ -351,7 +351,7 @@ Length ParseLength(const std::string &attr) {
   }
 }
 
-Widget MakeImage(const Node &node) {
+Widget MakeImage(const Node &node, const Declarations &style) {
   const std::string *widthAttr = node.GetAttribute("width");
   const std::string *heightAttr = node.GetAttribute("height");
   Length width = ParseLength(widthAttr != nullptr ? *widthAttr : std::string());
@@ -377,6 +377,7 @@ Widget MakeImage(const Node &node) {
                 width.isPercent,
                 1,
                 1};
+  ApplyStyle(widget, style);
   return widget;
 }
 
@@ -598,7 +599,7 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
     } else if (tag == "hr") {
       inits.push_back(MakeRule(style));
     } else if (tag == "img") {
-      inits.push_back(MakeImage(child));
+      inits.push_back(MakeImage(child, style));
     } else if (tag == "table") {
       inits.push_back(
           MakeTable(child, tree, fontSize, focus, pseudoState, sheet, style));

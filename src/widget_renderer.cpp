@@ -778,13 +778,49 @@ public:
   void Render(const Widget &widget, LayoutState &state) const override {
     bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
+
+    // Margin: outside the border box, same as every other box-model kind.
+    // No padding here - a rule has no content of its own to inset around,
+    // just the bar itself (background/border below paint its whole box).
+    const float boxX = state.x + widget.marginLeft;
+    const float boxMaxWidth =
+        std::max(0.0f, state.maxWidth - widget.marginLeft - widget.marginRight);
+    state.y += widget.marginTop;
+
+    // Default width fills available space (like kContainer's own
+    // default, not kBox/kLink's shrink-to-fit - a rule has no content to
+    // size itself from); explicit width/height override outright, no
+    // floor against kRuleHeight - unlike kBox/kContainer's own explicit
+    // height there's no content that could get clipped by going smaller.
+    float width = boxMaxWidth;
+    if (widget.hasWidth) {
+      float resolvedWidth = widget.widthIsPercent
+                                 ? state.maxWidth * widget.width / 100.0f
+                                 : widget.width;
+      width = std::min(boxMaxWidth, std::max(0.0f, resolvedWidth));
+    }
+    float height = widget.hasHeight ? std::max(0.0f, widget.height) : kRuleHeight;
+
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }
+
+    // background-color fills behind the bar - rarely visible on its own
+    // (border-color/border-width already draw the bar itself, and the
+    // two nearly coincide at the default height), but matters once
+    // height is set taller than the border's own stroke width, or when a
+    // page sets border-width: 0 and relies on background-color alone to
+    // draw the bar's color instead.
+    if (widget.hasBackgroundColor) {
+      state.renderer.DrawFilledRect(boxX, state.y, width, height,
+                                     widget.backgroundColor);
+    }
     Color color = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
-    state.renderer.DrawRect(state.x, state.y, state.maxWidth, kRuleHeight,
-                             widget.borderWidth, color);
-    state.y += kRuleHeight;
+    state.renderer.DrawRect(boxX, state.y, width, height, widget.borderWidth,
+                             color);
+
+    state.y += height;
+    state.y += widget.marginBottom;
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }
@@ -1064,19 +1100,85 @@ public:
     bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
     FlushLine(state);
 
-    // A percentage width can only be resolved here, against the current
-    // layout width - artisanc can't know the viewport size at build time.
-    float explicitWidth = widget.imageWidthIsPercent
-                               ? state.maxWidth * widget.imageWidth / 100.0f
-                               : widget.imageWidth;
+    // Margin: outside the border box, same as every other box-model kind.
+    const float boxX = state.x + widget.marginLeft;
+    const float boxMaxWidth =
+        std::max(0.0f, state.maxWidth - widget.marginLeft - widget.marginRight);
+    state.y += widget.marginTop;
+
+    const float padTop = widget.paddingTop;
+    const float padRight = widget.paddingRight;
+    const float padBottom = widget.paddingBottom;
+    const float padLeft = widget.paddingLeft;
+
+    // Two independent sources of size, resolved per axis - CSS wins when
+    // both are set (real CSS precedence: the width/height *attribute* is
+    // only a UA-stylesheet-level default any stylesheet rule beats). A
+    // CSS width/height sizes the *outer* border box, same border-box-ish
+    // convention every other box-model kind here uses (padding eats into
+    // it below to get the image's own drawn size); the width/height
+    // *attribute* sizes the image's own content directly and has no
+    // box-model meaning of its own, so it needs no such adjustment.
+    bool haveWidth = widget.hasWidth || widget.imageWidth > 0.0f;
+    float outerWidth = 0.0f;
+    float imgWidth = 0.0f;
+    if (widget.hasWidth) {
+      float resolvedWidth = widget.widthIsPercent
+                                 ? state.maxWidth * widget.width / 100.0f
+                                 : widget.width;
+      outerWidth = std::min(boxMaxWidth, std::max(0.0f, resolvedWidth));
+      imgWidth = std::max(0.0f, outerWidth - padLeft - padRight);
+    } else if (widget.imageWidth > 0.0f) {
+      imgWidth = widget.imageWidthIsPercent
+                     ? state.maxWidth * widget.imageWidth / 100.0f
+                     : widget.imageWidth;
+      outerWidth = imgWidth + padLeft + padRight;
+    }
+
+    bool haveHeight = widget.hasHeight || widget.imageHeight > 0.0f;
+    float outerHeight = 0.0f;
+    float imgHeight = 0.0f;
+    if (widget.hasHeight) {
+      outerHeight = std::max(0.0f, widget.height);
+      imgHeight = std::max(0.0f, outerHeight - padTop - padBottom);
+    } else if (widget.imageHeight > 0.0f) {
+      imgHeight = widget.imageHeight;
+      outerHeight = imgHeight + padTop + padBottom;
+    }
+
+    const float contentMaxWidth =
+        std::max(0.0f, boxMaxWidth - padLeft - padRight);
 
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }
-    float height = state.renderer.DrawImage(
-        widget.imageData, widget.imageDataSize, state.x, state.y,
-        state.maxWidth, explicitWidth, widget.imageHeight);
-    state.y += height;
+
+    // Background/border need the final box *before* the image is
+    // decoded/painted, so they land behind it rather than on top -
+    // possible only when both axes are already known ahead of decode
+    // (from CSS and/or the width/height attribute, in any combination).
+    // When either axis instead relies on the image's own natural aspect
+    // ratio, its final size is a decode-time-only detail this renderer
+    // doesn't expose back up here, so background/border are skipped for
+    // that render - a documented simplification, not a bug.
+    if (haveWidth && haveHeight) {
+      if (widget.hasBackgroundColor) {
+        state.renderer.DrawFilledRect(boxX, state.y, outerWidth, outerHeight,
+                                       widget.backgroundColor);
+      }
+      if (widget.hasBorderColor) {
+        state.renderer.DrawRect(boxX, state.y, outerWidth, outerHeight,
+                                 widget.borderWidth, widget.borderColor);
+      }
+    }
+
+    float renderedHeight = state.renderer.DrawImage(
+        widget.imageData, widget.imageDataSize, boxX + padLeft,
+        state.y + padTop, contentMaxWidth, haveWidth ? imgWidth : 0.0f,
+        haveHeight ? imgHeight : 0.0f);
+
+    state.y += renderedHeight + padTop + padBottom;
+    state.y += widget.marginBottom;
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }

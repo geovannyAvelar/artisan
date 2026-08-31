@@ -169,11 +169,19 @@ struct Widget {
   // Box model (css.h's Declarations, same widget-build-time resolution)
   // - kContainer (widget_renderer.cpp's ContainerWidgetHandler), kBox
   // (BoxWidgetHandler), kLink, and kLabel (both via RenderTextLikeBox),
-  // and kTable/kTableCell (TableWidgetHandler - the table itself honors
+  // kTable/kTableCell (TableWidgetHandler - the table itself honors
   // margin/padding/width/height/background/border same as a kContainer,
   // a cell honors width/height/padding but not margin, which has no
-  // effect on a real table-cell either) so far; kText/kRule/kImage still
-  // ignore these fields.
+  // effect on a real table-cell either), kRule (RuleWidgetHandler - no
+  // padding, a <hr> has no content of its own to inset), and kImage
+  // (ImageWidgetHandler - background/border only when both width and
+  // height are already known ahead of decode, see its Render()) so far.
+  // kText deliberately never will: MakeText (widget_tree_builder.cpp)
+  // passes a bare text node its *parent's own* resolved Declarations
+  // wholesale (text has no tag/class/id of its own to resolve a style
+  // against), so giving kText a box model would double-apply the
+  // parent's own margin/padding/width/etc onto its text - real CSS
+  // doesn't give a bare text run an independent box model either.
   // Unlike Declarations, padding/margin carry no hasXxx flag here: by
   // the time BuildWidgetTree copies the cascade's resolved Declarations
   // onto a Widget, "not set by any rule" has already resolved to 0 -
