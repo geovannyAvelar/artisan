@@ -744,6 +744,144 @@ float MeasureFlexHeightAt(const Widget &widget, const IRenderer &renderer,
   return dryRun.y;
 }
 
+// Lays out `widget`'s children as a CSS Grid - kContainer, display:grid
+// only, the bounded subset DisplayMode (widget.h) documents: fixed-px/
+// fr track lists only, always auto-placed into cells in document order
+// (row-major, no grid-column/grid-row placement or spans), always
+// stretched to fill their cell on both axes.
+void RenderGridContainer(const Widget &widget, LayoutState &state) {
+  int n = widget.childCount;
+  if (n == 0) {
+    return;
+  }
+
+  // Column count: however many tracks grid-template-columns names, or
+  // one full-width column if it's unset - the simplest sane fallback
+  // for a grid with no explicit column structure (real CSS's own
+  // implicit-track machinery for this case is a lot more elaborate than
+  // this bounded subset implements).
+  int columnCount = widget.gridTemplateColumns.empty()
+                         ? 1
+                         : static_cast<int>(widget.gridTemplateColumns.size());
+  float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
+
+  // Column widths: a fixed (px) track takes its own value outright; a
+  // fractional (fr) track shares whatever's left after every fixed
+  // track and gap is subtracted, proportionally to its own fr count -
+  // the same leftover-space-by-weight idea flex-grow already uses for
+  // item sizing (LayoutFlexLine above), just applied to track sizing.
+  // An unset grid-template-columns (columnCount == 1, from above) always
+  // falls into the `else` branch below trivially - one column, full
+  // available width, no fixed/fr tracks to speak of.
+  std::vector<float> columnWidths(columnCount);
+  if (widget.gridTemplateColumns.empty()) {
+    columnWidths[0] = std::max(0.0f, state.maxWidth - totalColumnGap);
+  } else {
+    float totalFixed = 0.0f;
+    float totalFr = 0.0f;
+    for (const GridTrack &track : widget.gridTemplateColumns) {
+      if (track.isFraction) {
+        totalFr += track.value;
+      } else {
+        totalFixed += track.value;
+      }
+    }
+    float leftover = std::max(0.0f, state.maxWidth - totalFixed - totalColumnGap);
+    float perFr = totalFr > 0.0f ? leftover / totalFr : 0.0f;
+    for (int c = 0; c < columnCount; ++c) {
+      const GridTrack &track = widget.gridTemplateColumns[c];
+      columnWidths[c] = track.isFraction ? track.value * perFr : track.value;
+    }
+  }
+  std::vector<float> columnX(columnCount);
+  float x = 0.0f;
+  for (int c = 0; c < columnCount; ++c) {
+    columnX[c] = x;
+    x += columnWidths[c] + widget.gap;
+  }
+
+  // Row count: however many rows n children actually need at
+  // columnCount-per-row, always at least enough to place every child -
+  // a simplified stand-in for real CSS's own implicit-row generation
+  // (grid-auto-rows isn't supported; every implicit row is just
+  // auto-sized, per rowHeights below, unconditionally).
+  int rowCount = (n + columnCount - 1) / columnCount;
+
+  // Row heights: a fixed (px) grid-template-rows track is a floor, not
+  // an exact value - matching every other explicit-height property in
+  // this renderer (kBox/kContainer/kTable's own height): content taller
+  // than it still reserves its own full height rather than getting
+  // clipped. Every other row - beyond however many grid-template-rows
+  // named, or one whose track is fractional (fr rows aren't resolved in
+  // this bounded subset, since doing so meaningfully needs a known
+  // total height budget most grids never set) - auto-sizes to the
+  // tallest cell actually placed in it, the same natural-height
+  // measurement flex/table already use elsewhere in this file.
+  std::vector<float> rowHeights(rowCount, 0.0f);
+  for (int i = 0; i < n; ++i) {
+    int row = i / columnCount;
+    int col = i % columnCount;
+    float natural =
+        MeasureItemHeightAt(widget.children[i], state.renderer, columnWidths[col]);
+    rowHeights[row] = std::max(rowHeights[row], natural);
+  }
+  for (int r = 0; r < rowCount && r < static_cast<int>(widget.gridTemplateRows.size());
+       ++r) {
+    const GridTrack &track = widget.gridTemplateRows[r];
+    if (!track.isFraction) {
+      rowHeights[r] = std::max(rowHeights[r], track.value);
+    }
+  }
+  std::vector<float> rowY(rowCount);
+  float y = 0.0f;
+  for (int r = 0; r < rowCount; ++r) {
+    rowY[r] = y;
+    y += rowHeights[r] + widget.gap;
+  }
+
+  for (int i = 0; i < n; ++i) {
+    int row = i / columnCount;
+    int col = i % columnCount;
+
+    // Stretch: every item fills its cell on both axes - the only
+    // alignment this bounded subset supports (no justify-items/
+    // align-items). Same shallow-copy-and-override pattern
+    // LayoutFlexLine already uses to impose a computed size on a const
+    // child without mutating the shared tree.
+    Widget effectiveChild = widget.children[i];
+    effectiveChild.hasWidth = true;
+    effectiveChild.widthIsPercent = false;
+    effectiveChild.width = columnWidths[col];
+    effectiveChild.hasHeight = true;
+    effectiveChild.height = rowHeights[row];
+
+    float childX = state.x + columnX[col];
+    float childY = state.y + rowY[row];
+
+    // A fresh LayoutState per item - same reasoning LayoutFlexLine's
+    // identical childState construction documents (grid items are
+    // always individually positioned boxes, never inline-flowed text).
+    LayoutState childState{state.renderer, childX, childY, columnWidths[col]};
+    childState.boxRegions = state.boxRegions;
+    childState.suppressBlockSpacing = true;
+    RenderWidget(effectiveChild, childState);
+    FlushLine(childState);
+  }
+
+  state.y += rowY[rowCount - 1] + rowHeights[rowCount - 1];
+}
+
+// Like MeasureFlexHeightAt, but for a grid container's own background/
+// border box.
+float MeasureGridHeightAt(const Widget &widget, const IRenderer &renderer,
+                           float width) {
+  NullRenderer nullRenderer(renderer);
+  LayoutState dryRun{nullRenderer, 0.0f, 0.0f, width};
+  RenderGridContainer(widget, dryRun);
+  FlushLine(dryRun);
+  return dryRun.y;
+}
+
 // One WidgetHandler subclass per WidgetKind. The Widget tree itself stays
 // a plain tagged struct (so it can live as static const data with zero
 // runtime construction) - only the *behavior* per kind is isolated here.
@@ -1645,6 +1783,7 @@ public:
     }
 
     bool isFlex = widget.hasDisplay && widget.display == DisplayMode::kFlex;
+    bool isGrid = widget.hasDisplay && widget.display == DisplayMode::kGrid;
 
     // A background/border wraps the container's own (margin-adjusted,
     // width-clamped) border box.
@@ -1654,6 +1793,8 @@ public:
         boxHeight = widget.height;
       } else if (isFlex) {
         boxHeight = MeasureFlexHeightAt(widget, state.renderer, boxMaxWidth);
+      } else if (isGrid) {
+        boxHeight = MeasureGridHeightAt(widget, state.renderer, boxMaxWidth);
       } else {
         boxHeight = MeasureHeightAt(widget, state.renderer, boxMaxWidth);
       }
@@ -1681,6 +1822,8 @@ public:
     float contentTopY = state.y;
     if (isFlex) {
       RenderFlexContainer(widget, state);
+    } else if (isGrid) {
+      RenderGridContainer(widget, state);
     } else {
       for (int i = 0; i < widget.childCount; ++i) {
         RenderWidget(widget.children[i], state);

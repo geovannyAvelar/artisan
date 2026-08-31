@@ -540,7 +540,7 @@ own natural aspect ratio (only known once decoding happens), background/
 border are silently skipped for that render rather than painted in the
 wrong order.
 
-Flexbox itself is still bounded: no CSS Grid, `align-content` only has
+Flexbox itself is still bounded: `align-content` only has
 anything to do in row direction with `flex-wrap: wrap` *and* an explicit
 CSS `height` taller than what the wrapped lines need on their own - an
 auto-height container's cross size already just is its content's, with
@@ -557,6 +557,32 @@ to the larger one). Explicit `width`/`height` clamp to whatever space is
 actually available rather than overflowing/scrolling - there's no
 scroll-within-content concept beyond the page-level scroll `main.cpp`
 already has.
+
+`display: grid` is a bounded subset of CSS Grid, a second, independent
+layout mode alongside flexbox (kContainer only, same as everything
+above). `grid-template-columns`/`grid-template-rows` each take a plain
+space-separated track list - a fixed pixel size (`100px`, or a bare
+number) and/or an `Nfr` fractional unit, e.g.
+`grid-template-columns: 100px 1fr 2fr;` - not real CSS's `repeat()`,
+`minmax()`, `auto`, percentage tracks, or named lines/areas; a token
+matching neither form is skipped rather than failing the whole list.
+`fr` only resolves for columns, against the container's own available
+width (always known); a fractional row track is treated as `auto`
+(content-sized) instead, since resolving it meaningfully would need a
+known total container height most grids never set. `gap` (reused from
+flexbox) applies between both columns and rows - there's no separate
+`row-gap`/`column-gap`. Children are always auto-placed into cells in
+document order, row-major, wrapping to a new row whenever the current
+one runs out of columns - there's no `grid-column`/`grid-row` explicit
+placement and no spans. Every item always stretches to fill its cell on
+both axes - there's no `justify-items`/`align-items`. A row named by
+`grid-template-rows` is a *floor*, not an exact height (content taller
+than it still reserves its own full height, same as every other
+explicit-height property in this renderer); any row beyond however many
+`grid-template-rows` named - including every row when it's unset
+entirely, which also makes an unset `grid-template-columns` fall back to
+a single full-width column - auto-sizes to its own tallest cell's
+natural content height.
 
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see

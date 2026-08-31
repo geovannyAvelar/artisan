@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 namespace artisan {
 
 // A plain RGB color - shared between Widget (what a resolved style bakes
@@ -30,7 +32,20 @@ struct Color {
 // Lives here rather than in css.h because css.h already includes this
 // header (for Color, above) to avoid a circular include - not the other
 // way around.
-enum class DisplayMode { kBlock, kFlex };
+//
+// CSS Grid (display: grid, below) is a second, independent layout mode
+// alongside flexbox - kContainer only, same as flexbox, and a bounded
+// subset in the same spirit: grid-template-columns/rows accept only a
+// space-separated list of fixed px tracks and/or `fr` (fractional)
+// tracks (see GridTrack) - no repeat()/minmax()/auto/percentage tracks,
+// no named lines/areas. Children are always auto-placed into cells in
+// document order, row-major (no grid-column/grid-row placement, no
+// spans - see RenderGridContainer, widget_renderer.cpp), and always
+// stretch to fill their cell on both axes (no justify-items/
+// align-items - real CSS's own default for both is `stretch` anyway,
+// so this isn't even a "different from real CSS's default" simplification
+// the way AlignContent's own below is, just an omitted, always-on one).
+enum class DisplayMode { kBlock, kFlex, kGrid };
 enum class FlexDirection { kRow, kColumn };
 enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
 enum class AlignItems { kFlexStart, kCenter, kFlexEnd, kStretch };
@@ -46,6 +61,18 @@ enum class AlignContent {
   kStretch,
 };
 enum class FlexWrap { kNowrap, kWrap };
+
+// A single grid-template-columns/rows track's sizing function - a fixed
+// pixel size, or a fractional (fr) unit that shares whatever space is
+// left over after every fixed track (and every inter-track gap) is
+// subtracted, proportionally to its own fr count relative to every
+// other fr track's - the same "distribute leftover space by weight"
+// idea flex-grow already uses for item sizing, just applied to track
+// sizing instead (see RenderGridContainer, widget_renderer.cpp).
+struct GridTrack {
+  bool isFraction = false;
+  float value = 0.0f; // Pixels, or the fr count.
+};
 
 enum class WidgetKind {
   kContainer,  // Groups children (div, span, body, ...); no text of its own.
@@ -239,6 +266,15 @@ struct Widget {
   float flexShrink = 1.0f;
   bool hasFlexBasis = false;
   float flexBasis = 0.0f;
+
+  // CSS Grid - kContainer only, meaningful when hasDisplay/display is
+  // kGrid (see DisplayMode above for this bounded subset's scope). No
+  // hasXxx flag needed: an empty vector already means "unset", the
+  // correct fallback RenderGridContainer treats as a single full-width
+  // column / auto-sized rows - same reasoning gap doesn't need one
+  // either.
+  std::vector<GridTrack> gridTemplateColumns;
+  std::vector<GridTrack> gridTemplateRows;
 };
 
 } // namespace artisan

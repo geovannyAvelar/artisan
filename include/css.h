@@ -263,6 +263,17 @@ struct Declarations {
   bool hasFlexBasis = false;
   float flexBasis = 0.0f;
 
+  // CSS Grid - see Widget's identical fields (widget.h) for this bounded
+  // subset's scope. Unlike Widget's, these carry their own hasXxx flags
+  // - same reason every other Declarations field does (a rule setting
+  // grid-template-rows without mentioning grid-template-columns has to
+  // be distinguishable from one that sets grid-template-columns to
+  // empty, at cascade time - see StyleSheet::Resolve).
+  bool hasGridTemplateColumns = false;
+  std::vector<GridTrack> gridTemplateColumns;
+  bool hasGridTemplateRows = false;
+  std::vector<GridTrack> gridTemplateRows;
+
   // `content` - only meaningful when this Declarations was resolved for
   // a `::before`/`::after` pseudo-element (StyleSheet::Resolve's `target`
   // parameter), where it's the literal text a synthetic kText child gets

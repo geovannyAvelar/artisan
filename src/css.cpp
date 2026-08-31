@@ -154,6 +154,43 @@ bool ParseLengthOrPercent(const std::string &raw, float &outValue,
   return ParsePixelLength(value, outValue);
 }
 
+// Parses a grid-template-columns/rows track list - space-separated
+// tokens, each either a plain pixel length (bare number or "...px") or
+// an "Nfr" fractional unit (e.g. "2fr") - see GridTrack (widget.h) for
+// what each becomes. Real CSS's repeat()/minmax()/auto/percentage
+// tracks and named lines aren't supported. A token matching neither
+// form is silently skipped rather than failing the whole list, same
+// "parse whatever we understand" posture ParseDeclarations already has
+// for an unrecognized property - so a list mixing a supported and an
+// unsupported token still produces however many tracks it can. Returns
+// false (leaving `out` untouched) only when nothing in `raw` parsed to
+// a single valid track.
+bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
+  std::vector<GridTrack> tracks;
+  std::istringstream tokens(raw);
+  std::string token;
+  while (tokens >> token) {
+    std::string lower = ToLower(token);
+    if (lower.size() >= 3 && lower.substr(lower.size() - 2) == "fr") {
+      try {
+        tracks.push_back({true, std::stof(lower.substr(0, lower.size() - 2))});
+      } catch (const std::exception &) {
+        // Not a valid "Nfr" token - skip it.
+      }
+      continue;
+    }
+    float px;
+    if (ParsePixelLength(token, px)) {
+      tracks.push_back({false, px});
+    }
+  }
+  if (tracks.empty()) {
+    return false;
+  }
+  out = std::move(tracks);
+  return true;
+}
+
 // Parses an nth-*() argument - a literal integer, or the "even"/"odd"
 // keywords - into (nthA, nthB), the same v1 grammar nth-child and
 // nth-of-type both share (not the full "an+b" algebra). Returns false
@@ -598,10 +635,18 @@ Declarations ParseDeclarations(const std::string &body) {
       if (lower == "flex") {
         decl.hasDisplay = true;
         decl.display = DisplayMode::kFlex;
+      } else if (lower == "grid") {
+        decl.hasDisplay = true;
+        decl.display = DisplayMode::kGrid;
       } else if (lower == "block") {
         decl.hasDisplay = true;
         decl.display = DisplayMode::kBlock;
       }
+    } else if (property == "grid-template-columns") {
+      decl.hasGridTemplateColumns =
+          ParseGridTrackList(value, decl.gridTemplateColumns);
+    } else if (property == "grid-template-rows") {
+      decl.hasGridTemplateRows = ParseGridTrackList(value, decl.gridTemplateRows);
     } else if (property == "flex-direction") {
       std::string lower = ToLower(value);
       if (lower == "row") {
@@ -1294,6 +1339,14 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasFlexBasis = true;
     declarations.flexBasis = inlineStyle.flexBasis;
   }
+  if (inlineStyle.hasGridTemplateColumns) {
+    declarations.hasGridTemplateColumns = true;
+    declarations.gridTemplateColumns = inlineStyle.gridTemplateColumns;
+  }
+  if (inlineStyle.hasGridTemplateRows) {
+    declarations.hasGridTemplateRows = true;
+    declarations.gridTemplateRows = inlineStyle.gridTemplateRows;
+  }
 }
 
 namespace {
@@ -1426,6 +1479,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
   PropertyWinner alignContentWin;
   PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
+  PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
     const Rule &rule = rules_[i];
@@ -1576,6 +1630,16 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         flexBasisWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasFlexBasis = true;
       own.flexBasis = rule.declarations.flexBasis;
+    }
+    if (rule.declarations.hasGridTemplateColumns &&
+        gridTemplateColumnsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGridTemplateColumns = true;
+      own.gridTemplateColumns = rule.declarations.gridTemplateColumns;
+    }
+    if (rule.declarations.hasGridTemplateRows &&
+        gridTemplateRowsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGridTemplateRows = true;
+      own.gridTemplateRows = rule.declarations.gridTemplateRows;
     }
     if (rule.declarations.hasContent &&
         contentWin.ShouldTake(matchedSpecificity, ruleIndex)) {
