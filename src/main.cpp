@@ -1,6 +1,7 @@
 #include "app.h"
 #include "app_script.h"
 #include "compiled_document.h"
+#include "css.h"
 #include "dom_node.h"
 #include "js_engine.h"
 #include "node_c_api.h"
@@ -112,16 +113,20 @@ bool EraseSelection(InputFocus &focus, std::string &value) {
 // shows (see the main loop below); nothing here needs to know the scroll
 // position, so a wheel/key scroll never has to re-run layout.
 //
-// Also records where every input/button box landed, in the same
-// unscrolled content coordinates - the next click or drag hit-tests
-// against these after adding the current scroll offset back in.
+// Also records where every input/button/hoverable box landed, in the
+// same unscrolled content coordinates - the next click or hover
+// hit-tests against these after adding the current scroll offset back
+// in. `pseudoState` is what `:hover`/`:focus` in a `<style>` block match
+// against for this render - the caller (the main loop below) is the one
+// that actually knows which node is hovered/focused.
 SDL_Texture *RenderFrame(SDL_Renderer *renderer,
                           const artisan::WidgetRenderer &measuringWidgetRenderer,
                           const Node &document, const InputFocus &focus,
+                          const artisan::PseudoClassState &pseudoState,
                           int width, int height,
                           std::vector<BoxRegion> *outBoxRegions,
                           float *outContentHeight) {
-  auto widgetTree = artisan::BuildWidgetTree(document, focus);
+  auto widgetTree = artisan::BuildWidgetTree(document, focus, pseudoState);
 
   float contentHeight =
       measuringWidgetRenderer.MeasureContentHeight(widgetTree->root(), width);
@@ -398,6 +403,15 @@ int main(int argc, char *argv[]) {
   // SDL_TEXTINPUT - see the two cases below.
   bool suppressNextTextInput = false;
 
+  // The node the pointer is currently positioned over, if any - what
+  // `:hover` (css.h's PseudoClassState) matches against. Updated by
+  // SDL_MOUSEMOTION below via the same boxRegions hit-testing a click
+  // already uses; a change here means the *rendered* styling might need
+  // to change too (a `:hover` rule taking or losing effect), so it's the
+  // one piece of state in this loop that sets needsRedraw on its own
+  // rather than only in response to a DOM mutation.
+  Node *hoveredNode = nullptr;
+
   float scrollY = 0.0f;
   float contentHeight = static_cast<float>(kInitialHeight);
   constexpr float kWheelStep = 40.0f;
@@ -449,6 +463,7 @@ int main(int argc, char *argv[]) {
     focus = InputFocus{};
     isSelecting = false;
     suppressNextTextInput = false;
+    hoveredNode = nullptr;
     scrollY = 0.0f;
     needsRedraw = true;
   };
@@ -508,9 +523,10 @@ int main(int argc, char *argv[]) {
 
   navigate(pages.front().name);
 
-  SDL_Texture *texture =
-      RenderFrame(renderer, measuringWidgetRenderer, *document, focus, width,
-                  height, &boxRegions, &contentHeight);
+  SDL_Texture *texture = RenderFrame(
+      renderer, measuringWidgetRenderer, *document, focus,
+      artisan::PseudoClassState{hoveredNode, focus.node}, width, height,
+      &boxRegions, &contentHeight);
   if (texture == nullptr) {
     return 1;
   }
@@ -778,7 +794,7 @@ int main(int argc, char *argv[]) {
         }
         break;
 
-      case SDL_MOUSEMOTION:
+      case SDL_MOUSEMOTION: {
         if (isSelecting && focus.node != nullptr) {
           const BoxRegion *region = FindRegion(boxRegions, focus.node);
           if (region != nullptr) {
@@ -790,7 +806,25 @@ int main(int argc, char *argv[]) {
             }
           }
         }
+
+        // :hover tracking - boxRegions are in unscrolled content
+        // coordinates, same adjustment the click handler below already
+        // makes. A change here means a `:hover` rule might now apply (or
+        // stop applying) somewhere, so it needs a redraw of its own,
+        // independent of whatever isSelecting above just did.
+        const BoxRegion *hoverRegion = HitTestRegion(
+            boxRegions, static_cast<float>(event.motion.x),
+            static_cast<float>(event.motion.y) + scrollY);
+        Node *newHovered =
+            hoverRegion != nullptr
+                ? static_cast<Node *>(const_cast<void *>(hoverRegion->userData))
+                : nullptr;
+        if (newHovered != hoveredNode) {
+          hoveredNode = newHovered;
+          needsRedraw = true;
+        }
         break;
+      }
 
       case SDL_MOUSEBUTTONUP:
         if (event.button.button == SDL_BUTTON_LEFT) {
@@ -863,9 +897,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (needsRedraw) {
-      SDL_Texture *newTexture =
-          RenderFrame(renderer, measuringWidgetRenderer, *document, focus,
-                      width, height, &boxRegions, &contentHeight);
+      SDL_Texture *newTexture = RenderFrame(
+          renderer, measuringWidgetRenderer, *document, focus,
+          artisan::PseudoClassState{hoveredNode, focus.node}, width, height,
+          &boxRegions, &contentHeight);
       if (newTexture != nullptr) {
         SDL_DestroyTexture(texture);
         texture = newTexture;

@@ -22,7 +22,7 @@ struct AttributeSelector {
   std::optional<std::string> value;
 };
 
-enum class PseudoClassKind { kFirstChild, kLastChild, kNthChild };
+enum class PseudoClassKind { kFirstChild, kLastChild, kNthChild, kHover, kFocus };
 
 // nthA/nthB implement "an+b" - :nth-child(2) is {a=0, b=2};
 // :nth-child(even)/:nth-child(odd) are {a=2, b=0}/{a=2, b=1}. Only used
@@ -39,6 +39,29 @@ struct CompoundSelector {
   std::vector<std::string> classes; // Must all be present on the element.
   std::vector<AttributeSelector> attributes;
   std::vector<PseudoClassSelector> pseudoClasses;
+};
+
+// The live mouse/focus state a match against `:hover`/`:focus` needs -
+// everything else in this file (tag/id/class/attribute/structural
+// pseudo-classes) is decided purely from the Node tree's own shape, but
+// these two depend on state that lives outside the DOM entirely (which
+// element the pointer happens to be over right now, which <input> has
+// focus - main.cpp owns both). Default-constructed (nullptr/nullptr)
+// means "nothing is hovered or focused", which is what every caller that
+// has no live UI state to offer (the JS/Go query bindings below) passes
+// implicitly via each function's default argument - `:hover`/`:focus`
+// simply never match through those, same as the rest of this struct
+// being irrelevant to a one-shot snapshot query.
+struct PseudoClassState {
+  // The node the pointer is currently positioned over, if any. Matches
+  // `:hover` on this node AND every one of its ancestors (real CSS
+  // semantics: hovering a child counts as hovering its containers too) -
+  // see MatchesPseudoClass in css.cpp for the walk that implements that.
+  const Node *hovered = nullptr;
+  // The node that currently has focus, if any. Matches `:focus` on this
+  // exact node only - unlike hover, real CSS doesn't bubble focus to
+  // ancestors on its own (that's `:focus-within`, not implemented here).
+  const Node *focused = nullptr;
 };
 
 // How two adjacent compound selectors in a chain relate - "div p" is
@@ -168,8 +191,12 @@ public:
   // ties, exactly like a real cascade. `inherited` supplies color/bold
   // for any property this element doesn't set itself (backgroundColor/
   // borderColor/borderWidth never inherit - an unset element is just
-  // unset, not its parent's).
-  Declarations Resolve(const Node &node, const Declarations &inherited) const;
+  // unset, not its parent's). `pseudoState` is what `:hover`/`:focus`
+  // selectors match against - see PseudoClassState above; omit it (or
+  // pass a default-constructed one) to resolve as if nothing is hovered
+  // or focused.
+  Declarations Resolve(const Node &node, const Declarations &inherited,
+                        const PseudoClassState &pseudoState = {}) const;
 
 private:
   std::vector<Rule> rules_;
@@ -178,25 +205,33 @@ private:
 // The other direction from StyleSheet::Resolve: given a selector string
 // (the same grammar Selector documents - descendant/child/sibling
 // combinators, attribute selectors, :first-child/:last-child/:nth-child,
-// comma-separated lists) rather than a node, find node(s) it matches
-// within `root`'s subtree (not including `root` itself), in document
-// order. QuerySelector stops at the first match (nullptr if none);
-// QuerySelectorAll collects every match. Backs document/node's
+// :hover/:focus, comma-separated lists) rather than a node, find node(s)
+// it matches within `root`'s subtree (not including `root` itself), in
+// document order. QuerySelector stops at the first match (nullptr if
+// none); QuerySelectorAll collects every match. Backs document/node's
 // querySelector(All) JS bindings (js_engine.cpp) - a snapshot at call
 // time, not a live view, same simplification WidgetTree's own "one-shot,
 // not a live view" comment already documents for a different tree.
-Node *QuerySelector(Node &root, const std::string &selector);
-std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector);
+// `pseudoState` defaults to "nothing hovered or focused" - none of these
+// query entry points has live UI state to offer on its own, so a
+// `:hover`/`:focus` selector simply never matches unless a caller that
+// does have it (there isn't one today) passes it explicitly.
+Node *QuerySelector(Node &root, const std::string &selector,
+                     const PseudoClassState &pseudoState = {});
+std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector,
+                                      const PseudoClassState &pseudoState = {});
 
 // Whether `node` itself (not its subtree) matches `selector` - same
 // bounded grammar as QuerySelector above. Backs the JS/Go `matches`
 // binding, and is what Closest below is built from.
-bool ElementMatches(const Node &node, const std::string &selector);
+bool ElementMatches(const Node &node, const std::string &selector,
+                     const PseudoClassState &pseudoState = {});
 
 // `node`, or its nearest ancestor (inclusive - `node` itself counts, per
 // real DOM's closest()) that matches `selector`. nullptr if neither
 // `node` nor anything above it matches.
-Node *Closest(Node &node, const std::string &selector);
+Node *Closest(Node &node, const std::string &selector,
+              const PseudoClassState &pseudoState = {});
 
 // Folds `node`'s own inline `style="..."` attribute (if any) into
 // `declarations`, parsed with the same ParseDeclarations a <style>

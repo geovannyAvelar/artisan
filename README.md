@@ -359,17 +359,30 @@ A `<style>` block anywhere in a page's markup can style elements by tag,
 
 Selectors can chain with combinators - `div p` (descendant), `div > p`
 (child), `a + b` (adjacent sibling), `a ~ b` (general sibling) - and a
-compound can carry attribute selectors (`[href]`, `[type="text"]`) and
+compound can carry attribute selectors (`[href]`, `[type="text"]`),
 structural pseudo-classes (`:first-child`, `:last-child`,
 `:nth-child(2)`, `:nth-child(even)`/`:nth-child(odd)` - literal
-integers and the even/odd keywords only, not the full `an+b` algebra).
-Comma-separated lists (`h1, .card`) work the same way in
-`querySelector`/`querySelectorAll`/`matches`/`closest` as they do in a
-`<style>` block. Not supported: interactive pseudo-classes (`:hover`,
-`:focus` - these would need live mouse/focus state threaded into the
-cascade, a bigger change than matching structure) and anything beyond
-this bounded grammar (`:nth-of-type`, `~=`/`^=`/`$=` attribute
-operators, etc).
+integers and the even/odd keywords only, not the full `an+b` algebra),
+and the two interactive pseudo-classes, `:hover` and `:focus` - a
+`<style>` block rule like `.card:hover { background-color: ... }` or
+`#name:focus { border-color: ... }` re-resolves live as the mouse moves
+or focus changes, same as real CSS, including `:hover` bubbling to
+ancestors (`.card:hover .title` matches while hovering anywhere inside
+`.card`, not just `.card` itself) - `:focus` doesn't bubble the same way
+(no `:focus-within`). Comma-separated lists (`h1, .card`) work the same
+way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
+in a `<style>` block - `:hover`/`:focus` parse there too, but always
+evaluate false: those entry points have no live mouse/focus state to
+match against, unlike a `<style>` block's cascade. Not supported:
+anything beyond this bounded grammar (`:nth-of-type`, `~=`/`^=`/`$=`
+attribute operators, `:focus-within`, etc). `:hover`/`:focus` styling
+also only reaches elements the renderer actually hit-tests - every
+`<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level
+containers (`<div>`, `<p>`, `<li>`, ...), but not yet an inline element
+(`<span>`) or a table row/cell on its own (though a `<td>` still
+inherits `:hover` correctly from a hoverable *ancestor*, e.g.
+`.row:hover td` - it just can't be the direct target of the mouse
+itself).
 
 Properties: `color`, `background-color`, `font-weight` (`bold`/
 `normal`), `border-color`, `border-width`, and a box model/flexbox pass -

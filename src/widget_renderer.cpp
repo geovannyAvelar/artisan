@@ -1199,6 +1199,12 @@ public:
     float boxMaxWidth =
         std::max(0.0f, state.maxWidth - widget.marginLeft - widget.marginRight);
     state.y += widget.marginTop;
+    // Border-box top - see the region push after this container's
+    // content/padding are done below, which pairs with this to record
+    // the same border box a background/border would paint into (see
+    // that block a few lines down), so a hover hit-test lands on exactly
+    // what a background/border visually would.
+    float boxTopY = state.y;
 
     // Explicit CSS width clamps/overrides the natural content width. A
     // percentage resolves against state.maxWidth (the space this
@@ -1272,6 +1278,20 @@ public:
     }
 
     state.y += widget.paddingBottom;
+
+    // The same border box background/border painting above used (or
+    // would have, had this container had either) - registered so a
+    // hover hit-test (main.cpp) can find this element even when it's
+    // otherwise non-interactive (a plain <div>/<li>/...), the same way
+    // BoxWidgetHandler/LinkWidgetHandler/LabelWidgetHandler already
+    // register theirs. MakeContainer (widget_tree_builder.cpp) is the
+    // only place that ever builds a block-level (blockSpacing) kContainer
+    // Widget, and it always sets userData - no null check needed here.
+    if (state.boxRegions != nullptr) {
+      state.boxRegions->push_back(
+          {widget.userData, boxX, boxTopY, boxMaxWidth, state.y - boxTopY});
+    }
+
     state.x = savedX;
     state.maxWidth = savedMaxWidth;
 

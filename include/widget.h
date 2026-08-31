@@ -109,11 +109,15 @@ struct Widget {
   int colSpan;
   int rowSpan;
 
-  // kBox, kLink, kLabel only: the Node this widget was materialized from -
-  // lets a hit-test find which live DOM node the user clicked, to
-  // focus/edit or click it (or, for kLink, read its href and navigate; for
-  // kLabel, read its `for` and activate the target it points at).
-  // Opaque here so widget.h doesn't need to know about Node.
+  // kBox, kLink, kLabel, and block-level kContainer: the Node this widget
+  // was materialized from - lets a hit-test find which live DOM node the
+  // user clicked (or is hovering), to focus/edit or click it (or, for
+  // kLink, read its href and navigate; for kLabel, read its `for` and
+  // activate the target it points at; a container has nothing to
+  // activate, but still needs to be hit-testable so `:hover` styling on
+  // an otherwise non-interactive element like a `<div>`/`<li>` works -
+  // see ContainerWidgetHandler in widget_renderer.cpp). Opaque here so
+  // widget.h doesn't need to know about Node.
   const void *userData = nullptr;
 
   // kBox only, and only meaningful when this is the focused <input>: the

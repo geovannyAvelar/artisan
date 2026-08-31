@@ -155,10 +155,10 @@ bool ParseLengthOrPercent(const std::string &raw, float &outValue,
 }
 
 // Parses a pseudo-class token (the text after ':', e.g. "first-child",
-// "nth-child(2)", "nth-child(even)") and appends it to `selector` -
-// silently ignored (matching this file's "skip what we don't
-// understand" philosophy elsewhere, e.g. ParseDeclarations) if it isn't
-// one of the structural pseudo-classes this bounded grammar supports.
+// "nth-child(2)", "nth-child(even)", "hover", "focus") and appends it to
+// `selector` - silently ignored (matching this file's "skip what we
+// don't understand" philosophy elsewhere, e.g. ParseDeclarations) if it
+// isn't one of the pseudo-classes this bounded grammar supports.
 // nth-child's v1 grammar: a literal integer, or the "even"/"odd"
 // keywords - not the full "an+b" algebra.
 void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector) {
@@ -168,6 +168,10 @@ void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector)
     pc.kind = PseudoClassKind::kFirstChild;
   } else if (lower == "last-child") {
     pc.kind = PseudoClassKind::kLastChild;
+  } else if (lower == "hover") {
+    pc.kind = PseudoClassKind::kHover;
+  } else if (lower == "focus") {
+    pc.kind = PseudoClassKind::kFocus;
   } else if (lower.rfind("nth-child(", 0) == 0 && !lower.empty() &&
              lower.back() == ')') {
     std::string arg = Trim(lower.substr(10, lower.size() - 10 - 1));
@@ -500,8 +504,30 @@ Declarations ParseDeclarations(const std::string &body) {
 // element children). A node with no parent (root/detached) is treated
 // as its own only sibling, so :first-child/:last-child/:nth-child(1)
 // all vacuously match it - same as real CSS resolves an unparented
-// element.
-bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node) {
+// element. `state` supplies what :hover/:focus need (see
+// PseudoClassState, css.h) - the other three kinds ignore it entirely,
+// same as they always have.
+bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
+                         const PseudoClassState &state) {
+  if (pc.kind == PseudoClassKind::kHover) {
+    // :hover matches `node` itself and every one of its ancestors -
+    // hovering a child counts as hovering its containers too, same as
+    // real CSS. state.hovered is the exact (deepest) node the pointer is
+    // over; walking up from there and comparing by identity covers both.
+    for (const Node *n = state.hovered; n != nullptr; n = n->parent()) {
+      if (n == &node) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (pc.kind == PseudoClassKind::kFocus) {
+    // Unlike :hover, real CSS doesn't bubble :focus to ancestors on its
+    // own (that's :focus-within, a separate pseudo-class not implemented
+    // here) - only the exact focused node matches.
+    return state.focused == &node;
+  }
+
   const Node *parent = node.parent();
   // No parent (root/detached): vacuously node's own only sibling - same
   // as computing index=1, elementCount=1 below, just without a parent
@@ -537,6 +563,12 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node) {
     // nthA == 2 (even/odd) - both non-negative, so plain modulo is safe
     // (no negative-operand sign concerns a general "an+b" would have).
     return pc.nthA == 0 ? index == pc.nthB : (index % pc.nthA) == pc.nthB;
+  case PseudoClassKind::kHover:
+  case PseudoClassKind::kFocus:
+    // Handled by the two early returns above - unreachable here, but
+    // listed so this switch stays exhaustive (no -Wswitch warning) as
+    // PseudoClassKind grows.
+    return false;
   }
   return false;
 }
@@ -547,7 +579,8 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node) {
 // so a bare CompoundSelector{} - "*" - matches anything). The rightmost
 // compound of a Selector chain - see MatchesChain below for the rest of
 // the chain (ancestor/sibling compounds).
-bool CompoundMatches(const CompoundSelector &selector, const Node &node) {
+bool CompoundMatches(const CompoundSelector &selector, const Node &node,
+                      const PseudoClassState &state) {
   if (node.type() != NodeType::kElement) {
     return false;
   }
@@ -593,7 +626,7 @@ bool CompoundMatches(const CompoundSelector &selector, const Node &node) {
   }
 
   for (const PseudoClassSelector &pc : selector.pseudoClasses) {
-    if (!MatchesPseudoClass(pc, node)) {
+    if (!MatchesPseudoClass(pc, node, state)) {
       return false;
     }
   }
@@ -610,7 +643,8 @@ bool CompoundMatches(const CompoundSelector &selector, const Node &node) {
 // b" must match even when there are two nested <p> ancestors and only
 // the outer one has a "div" ancestor of its own).
 bool MatchesAncestorChain(const Selector &selector, int upToIndex,
-                           const Node *contextNode) {
+                           const Node *contextNode,
+                           const PseudoClassState &state) {
   if (upToIndex < 0) {
     return true;
   }
@@ -620,27 +654,27 @@ bool MatchesAncestorChain(const Selector &selector, int upToIndex,
   case Combinator::kDescendant:
     for (const Node *ancestor = contextNode->parent(); ancestor != nullptr;
          ancestor = ancestor->parent()) {
-      if (CompoundMatches(compound, *ancestor) &&
-          MatchesAncestorChain(selector, upToIndex - 1, ancestor)) {
+      if (CompoundMatches(compound, *ancestor, state) &&
+          MatchesAncestorChain(selector, upToIndex - 1, ancestor, state)) {
         return true;
       }
     }
     return false;
   case Combinator::kChild: {
     const Node *parent = contextNode->parent();
-    return parent != nullptr && CompoundMatches(compound, *parent) &&
-           MatchesAncestorChain(selector, upToIndex - 1, parent);
+    return parent != nullptr && CompoundMatches(compound, *parent, state) &&
+           MatchesAncestorChain(selector, upToIndex - 1, parent, state);
   }
   case Combinator::kAdjacentSibling: {
     const Node *prev = contextNode->previousSibling();
-    return prev != nullptr && CompoundMatches(compound, *prev) &&
-           MatchesAncestorChain(selector, upToIndex - 1, prev);
+    return prev != nullptr && CompoundMatches(compound, *prev, state) &&
+           MatchesAncestorChain(selector, upToIndex - 1, prev, state);
   }
   case Combinator::kGeneralSibling:
     for (const Node *prev = contextNode->previousSibling(); prev != nullptr;
          prev = prev->previousSibling()) {
-      if (CompoundMatches(compound, *prev) &&
-          MatchesAncestorChain(selector, upToIndex - 1, prev)) {
+      if (CompoundMatches(compound, *prev, state) &&
+          MatchesAncestorChain(selector, upToIndex - 1, prev, state)) {
         return true;
       }
     }
@@ -652,15 +686,16 @@ bool MatchesAncestorChain(const Selector &selector, int upToIndex,
 // Whether `node` matches the full selector chain - the rightmost
 // compound against `node` itself, then each earlier compound against an
 // ancestor/sibling per its combinator (MatchesAncestorChain above).
-bool MatchesChain(const Selector &selector, const Node &node) {
+bool MatchesChain(const Selector &selector, const Node &node,
+                   const PseudoClassState &state) {
   if (selector.compounds.empty()) {
     return false;
   }
-  if (!CompoundMatches(selector.compounds.back(), node)) {
+  if (!CompoundMatches(selector.compounds.back(), node, state)) {
     return false;
   }
   return MatchesAncestorChain(selector, static_cast<int>(selector.compounds.size()) - 2,
-                               &node);
+                               &node, state);
 }
 
 int SpecificityOfCompound(const CompoundSelector &compound) {
@@ -727,12 +762,12 @@ struct PropertyWinner {
 namespace {
 template <typename Callback>
 void ForEachMatch(const std::vector<Selector> &selectors, Node &root,
-                   const Callback &callback) {
+                   const PseudoClassState &state, const Callback &callback) {
   for (const auto &childPtr : root.children()) {
     Node *child = childPtr.get();
     bool matched = false;
     for (const Selector &selector : selectors) {
-      if (MatchesChain(selector, *child)) {
+      if (MatchesChain(selector, *child, state)) {
         matched = true;
         break;
       }
@@ -742,45 +777,49 @@ void ForEachMatch(const std::vector<Selector> &selectors, Node &root,
         return;
       }
     }
-    ForEachMatch(selectors, *child, callback);
+    ForEachMatch(selectors, *child, state, callback);
   }
 }
 } // namespace
 
-Node *QuerySelector(Node &root, const std::string &selector) {
+Node *QuerySelector(Node &root, const std::string &selector,
+                     const PseudoClassState &pseudoState) {
   std::vector<Selector> parsed = ParseSelectorList(selector);
   Node *found = nullptr;
-  ForEachMatch(parsed, root, [&](Node *match) {
+  ForEachMatch(parsed, root, pseudoState, [&](Node *match) {
     found = match;
     return false; // Stop at the first match.
   });
   return found;
 }
 
-std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector) {
+std::vector<Node *> QuerySelectorAll(Node &root, const std::string &selector,
+                                      const PseudoClassState &pseudoState) {
   std::vector<Selector> parsed = ParseSelectorList(selector);
   std::vector<Node *> results;
-  ForEachMatch(parsed, root, [&](Node *match) {
+  ForEachMatch(parsed, root, pseudoState, [&](Node *match) {
     results.push_back(match);
     return true; // Keep going - collect every match.
   });
   return results;
 }
 
-bool ElementMatches(const Node &node, const std::string &selector) {
+bool ElementMatches(const Node &node, const std::string &selector,
+                     const PseudoClassState &pseudoState) {
   for (const Selector &parsed : ParseSelectorList(selector)) {
-    if (MatchesChain(parsed, node)) {
+    if (MatchesChain(parsed, node, pseudoState)) {
       return true;
     }
   }
   return false;
 }
 
-Node *Closest(Node &node, const std::string &selector) {
+Node *Closest(Node &node, const std::string &selector,
+              const PseudoClassState &pseudoState) {
   std::vector<Selector> parsed = ParseSelectorList(selector);
   for (Node *n = &node; n != nullptr; n = n->parent()) {
     for (const Selector &selector : parsed) {
-      if (MatchesChain(selector, *n)) {
+      if (MatchesChain(selector, *n, pseudoState)) {
         return n;
       }
     }
@@ -1010,8 +1049,8 @@ StyleSheet StyleSheet::Parse(const std::string &css) {
   return sheet;
 }
 
-Declarations StyleSheet::Resolve(const Node &node,
-                                  const Declarations &inherited) const {
+Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited,
+                                  const PseudoClassState &pseudoState) const {
   Declarations own;
 
   PropertyWinner colorWin, boldWin, bgWin, borderColorWin, borderWidthWin;
@@ -1027,7 +1066,7 @@ Declarations StyleSheet::Resolve(const Node &node,
 
     int matchedSpecificity = -1;
     for (const Selector &selector : rule.selectors) {
-      if (MatchesChain(selector, node)) {
+      if (MatchesChain(selector, node, pseudoState)) {
         matchedSpecificity = std::max(matchedSpecificity, Specificity(selector));
       }
     }

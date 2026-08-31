@@ -1,5 +1,6 @@
 #pragma once
 
+#include "css.h"
 #include "dom_node.h"
 #include "widget.h"
 
@@ -66,8 +67,14 @@ struct InputFocus {
 // this tree - that widget's cursorPos/selectionAnchor get set from
 // `focus` so WidgetRenderer draws its caret/highlight; purely a rendering
 // decision; the Node's actual `value` attribute is never touched by it.
+// `pseudoState` is what `:hover`/`:focus` selectors in a `<style>` block
+// match against while resolving each element's style (css.h) - pass the
+// caller's actual live mouse/focus state to get real hover/focus
+// styling, or omit it (default: nothing hovered or focused) for a
+// one-shot build that shouldn't reflect either.
 std::unique_ptr<WidgetTree> BuildWidgetTree(const Node &root,
-                                             const InputFocus &focus = {});
+                                             const InputFocus &focus = {},
+                                             const PseudoClassState &pseudoState = {});
 
 // An <input>'s `type` attribute picks checkbox/radio's small fixed-size
 // indicator over the default single-line text box - anything else

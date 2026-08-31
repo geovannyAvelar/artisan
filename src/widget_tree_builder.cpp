@@ -151,14 +151,16 @@ float FontSizeForTag(const std::string &tag) {
 std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
                                         float fontSize,
                                         const InputFocus &focus,
+                                        const PseudoClassState &pseudoState,
                                         const StyleSheet &sheet,
                                         const Declarations &inheritedStyle);
 
 Widget MakeContainer(const Node &node, WidgetTree &tree, float fontSize,
                       bool blockSpacing, const InputFocus &focus,
+                      const PseudoClassState &pseudoState,
                       const StyleSheet &sheet, const Declarations &style) {
-  std::vector<Widget> childInits =
-      BuildChildrenInits(node, tree, fontSize, focus, sheet, style);
+  std::vector<Widget> childInits = BuildChildrenInits(
+      node, tree, fontSize, focus, pseudoState, sheet, style);
   int count = static_cast<int>(childInits.size());
   const Widget *childrenPtr = tree.StoreArray(std::move(childInits));
 
@@ -175,6 +177,14 @@ Widget MakeContainer(const Node &node, WidgetTree &tree, float fontSize,
                 false,
                 1,
                 1};
+  // Lets a hit-test (main.cpp, via WidgetRenderer's BoxRegion output)
+  // recover which Node a container's box belongs to - the same use
+  // MakeLink/MakeLabel/MakeCheckable already put userData to, extended
+  // here so `:hover` styling works on an otherwise non-interactive
+  // element too (a <div>/<li>/..., not just a button/link/label/input).
+  // ContainerWidgetHandler (widget_renderer.cpp) is what actually turns
+  // this into a BoxRegion, and only does so for a block-level container.
+  widget.userData = &node;
   ApplyStyle(widget, style);
   return widget;
 }
@@ -438,10 +448,11 @@ std::string FindCaptionText(const Node &tableNode) {
 // flattened to text: TableWidgetHandler runs the same block-flow layout
 // on it to size and paint it within whatever width its column gets.
 Widget MakeTableCell(const Node &node, WidgetTree &tree, float fontSize,
-                      const InputFocus &focus, const StyleSheet &sheet,
-                      const Declarations &style) {
-  std::vector<Widget> childInits =
-      BuildChildrenInits(node, tree, fontSize, focus, sheet, style);
+                      const InputFocus &focus,
+                      const PseudoClassState &pseudoState,
+                      const StyleSheet &sheet, const Declarations &style) {
+  std::vector<Widget> childInits = BuildChildrenInits(
+      node, tree, fontSize, focus, pseudoState, sheet, style);
   int count = static_cast<int>(childInits.size());
   const Widget *childrenPtr = tree.StoreArray(std::move(childInits));
 
@@ -471,8 +482,8 @@ Widget MakeTableCell(const Node &node, WidgetTree &tree, float fontSize,
 // the whole thing out as a real grid at render time, honoring each cell's
 // colspan/rowspan and painting the <caption> above it.
 Widget MakeTable(const Node &node, WidgetTree &tree, float fontSize,
-                  const InputFocus &focus, const StyleSheet &sheet,
-                  const Declarations &style) {
+                  const InputFocus &focus, const PseudoClassState &pseudoState,
+                  const StyleSheet &sheet, const Declarations &style) {
   std::string captionText = FindCaptionText(node);
 
   std::vector<const Node *> rowNodes;
@@ -483,16 +494,16 @@ Widget MakeTable(const Node &node, WidgetTree &tree, float fontSize,
     // Cascades table -> row -> cell -> cell's own children, same as any
     // other nesting - a <tr class="highlight"> can color its cells' text
     // without each <td> needing its own class.
-    Declarations rowStyle = sheet.Resolve(*rowNode, style);
+    Declarations rowStyle = sheet.Resolve(*rowNode, style, pseudoState);
 
     std::vector<const Node *> cellNodes;
     CollectTableCells(*rowNode, cellNodes);
 
     std::vector<Widget> cellInits;
     for (const Node *cellNode : cellNodes) {
-      Declarations cellStyle = sheet.Resolve(*cellNode, rowStyle);
-      cellInits.push_back(
-          MakeTableCell(*cellNode, tree, fontSize, focus, sheet, cellStyle));
+      Declarations cellStyle = sheet.Resolve(*cellNode, rowStyle, pseudoState);
+      cellInits.push_back(MakeTableCell(*cellNode, tree, fontSize, focus,
+                                         pseudoState, sheet, cellStyle));
     }
 
     int cellCount = static_cast<int>(cellInits.size());
@@ -547,6 +558,7 @@ std::string InputLabel(const Node &node) {
 std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
                                         float fontSize,
                                         const InputFocus &focus,
+                                        const PseudoClassState &pseudoState,
                                         const StyleSheet &sheet,
                                         const Declarations &inheritedStyle) {
   std::vector<Widget> inits;
@@ -574,7 +586,7 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
     // Declarations, css.h). Text nodes above skip this entirely and just
     // take inheritedStyle directly, since they have no tag/class/id of
     // their own to match a selector against.
-    Declarations style = sheet.Resolve(child, inheritedStyle);
+    Declarations style = sheet.Resolve(child, inheritedStyle, pseudoState);
     // An inline style="..." attribute wins over the stylesheet cascade
     // regardless of what matched above - same precedence real CSS gives
     // inline style, above even an #id selector.
@@ -587,7 +599,8 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
     } else if (tag == "img") {
       inits.push_back(MakeImage(child));
     } else if (tag == "table") {
-      inits.push_back(MakeTable(child, tree, fontSize, focus, sheet, style));
+      inits.push_back(
+          MakeTable(child, tree, fontSize, focus, pseudoState, sheet, style));
     } else if (tag == "input" && IsCheckableInputType(child)) {
       const std::string *type = child.GetAttribute("type");
       BoxKind boxKind = *type == "radio" ? BoxKind::kRadio : BoxKind::kCheckbox;
@@ -625,7 +638,8 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
       inits.push_back(MakeLabel(tree, child, fontSize, style));
     } else {
       inits.push_back(MakeContainer(child, tree, FontSizeForTag(tag),
-                                     IsBlockTag(tag), focus, sheet, style));
+                                     IsBlockTag(tag), focus, pseudoState,
+                                     sheet, style));
     }
   }
 
@@ -635,7 +649,8 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
 } // namespace
 
 std::unique_ptr<WidgetTree> BuildWidgetTree(const Node &root,
-                                             const InputFocus &focus) {
+                                             const InputFocus &focus,
+                                             const PseudoClassState &pseudoState) {
   auto tree = std::make_unique<WidgetTree>();
 
   std::string cssText;
@@ -646,10 +661,10 @@ std::unique_ptr<WidgetTree> BuildWidgetTree(const Node &root,
   // its own (see the synthetic top-level container below) but a rule
   // like `body { color: ... }` should still seed inheritance for
   // everything under it, so it's resolved here rather than skipped.
-  Declarations rootStyle = sheet.Resolve(root, Declarations{});
+  Declarations rootStyle = sheet.Resolve(root, Declarations{}, pseudoState);
 
   std::vector<Widget> rootChildren = BuildChildrenInits(
-      root, *tree, kDefaultFontSize, focus, sheet, rootStyle);
+      root, *tree, kDefaultFontSize, focus, pseudoState, sheet, rootStyle);
   int count = static_cast<int>(rootChildren.size());
   const Widget *childrenPtr = tree->StoreArray(std::move(rootChildren));
 
