@@ -167,8 +167,9 @@ struct Widget {
   float borderWidth = 1.0f;
 
   // Box model (css.h's Declarations, same widget-build-time resolution)
-  // - kContainer (widget_renderer.cpp's ContainerWidgetHandler) and kBox
-  // (BoxWidgetHandler) so far; other kinds still ignore these fields.
+  // - kContainer (widget_renderer.cpp's ContainerWidgetHandler), kBox
+  // (BoxWidgetHandler), kLink, and kLabel (both via RenderTextLikeBox)
+  // so far; other kinds still ignore these fields.
   // Unlike Declarations, padding/margin carry no hasXxx flag here: by
   // the time BuildWidgetTree copies the cascade's resolved Declarations
   // onto a Widget, "not set by any rule" has already resolved to 0 -

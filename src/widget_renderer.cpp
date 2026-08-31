@@ -965,81 +965,96 @@ public:
   }
 };
 
-// <a>: painted like BoxWidgetHandler's flush-before/register-a-hit-rect
-// treatment, but with an underline instead of a border - a link isn't a
-// boxy control, just clickable text. Single-line only (no word-wrap),
-// same simplification BoxWidgetHandler already makes for button/input
-// labels.
+// Shared by LinkWidgetHandler/LabelWidgetHandler below: single-line
+// clickable text with the same margin/padding/explicit-width-height/
+// background/border box model kBox's text handler has - minus that
+// kind's own intrinsic default padding, since a link/label isn't a boxy
+// control with a built-in inset of its own; unset padding here really is
+// zero, same as kContainer. `underline` is link-only (see
+// kLinkUnderlineHeight).
+void RenderTextLikeBox(const Widget &widget, LayoutState &state,
+                        bool suppressSpacing, bool underline) {
+  FlushLine(state);
+
+  const float boxX = state.x + widget.marginLeft;
+  const float boxMaxWidth =
+      std::max(0.0f, state.maxWidth - widget.marginLeft - widget.marginRight);
+  state.y += widget.marginTop;
+
+  const std::string label = widget.text != nullptr ? widget.text : "";
+  const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
+  const float textWidth =
+      state.renderer.MeasureText(label, widget.fontSize, widget.bold);
+
+  float width = textWidth + widget.paddingLeft + widget.paddingRight;
+  float height = lineHeight + widget.paddingTop + widget.paddingBottom;
+
+  if (widget.hasWidth) {
+    float resolvedWidth = widget.widthIsPercent
+                               ? state.maxWidth * widget.width / 100.0f
+                               : widget.width;
+    width = std::min(boxMaxWidth, std::max(0.0f, resolvedWidth));
+  }
+  if (widget.hasHeight) {
+    height = std::max(height, widget.height);
+  }
+
+  if (!suppressSpacing) {
+    state.y += kBlockSpacing;
+  }
+
+  if (widget.hasBackgroundColor) {
+    state.renderer.DrawFilledRect(boxX, state.y, width, height,
+                                   widget.backgroundColor);
+  }
+  if (widget.hasBorderColor) {
+    state.renderer.DrawRect(boxX, state.y, width, height, widget.borderWidth,
+                             widget.borderColor);
+  }
+
+  const float textX = boxX + widget.paddingLeft;
+  const float textY = state.y + widget.paddingTop;
+
+  if (!label.empty()) {
+    Color color = widget.hasColor ? widget.color : kDefaultTextColor;
+    state.renderer.DrawText(label, textX, textY + widget.fontSize,
+                             widget.fontSize, widget.bold, color);
+    if (underline) {
+      state.renderer.DrawFilledRect(textX, textY + lineHeight - kLinkUnderlineHeight,
+                                     textWidth, kLinkUnderlineHeight, color);
+    }
+  }
+
+  if (state.boxRegions != nullptr) {
+    state.boxRegions->push_back({widget.userData, boxX, state.y, width, height});
+  }
+
+  state.y += height;
+  state.y += widget.marginBottom;
+  if (!suppressSpacing) {
+    state.y += kBlockSpacing;
+  }
+}
+
+// <a>: RenderTextLikeBox with an underline.
 class LinkWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
     bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
-    FlushLine(state);
-
-    const std::string label = widget.text != nullptr ? widget.text : "";
-    const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
-    const float textWidth =
-        state.renderer.MeasureText(label, widget.fontSize, widget.bold);
-
-    if (!suppressSpacing) {
-      state.y += kBlockSpacing;
-    }
-
-    if (!label.empty()) {
-      Color color = widget.hasColor ? widget.color : kDefaultTextColor;
-      state.renderer.DrawText(label, state.x, state.y + widget.fontSize,
-                               widget.fontSize, widget.bold, color);
-      state.renderer.DrawFilledRect(state.x, state.y + lineHeight - kLinkUnderlineHeight,
-                                     textWidth, kLinkUnderlineHeight, color);
-    }
-
-    if (state.boxRegions != nullptr) {
-      state.boxRegions->push_back(
-          {widget.userData, state.x, state.y, textWidth, lineHeight});
-    }
-
-    state.y += lineHeight;
-    if (!suppressSpacing) {
-      state.y += kBlockSpacing;
-    }
+    RenderTextLikeBox(widget, state, suppressSpacing, /*underline=*/true);
   }
 };
 
-// <label for="...">: identical to LinkWidgetHandler, minus the underline -
-// clickable text, but a label isn't a navigation affordance the way a
-// link is, so nothing marks it as such visually. main.cpp resolves
-// userData's `for` attribute and activates whatever it points at (focus a
-// text input, toggle a checkbox/radio, click a button).
+// <label for="...">: RenderTextLikeBox, no underline - a label isn't a
+// navigation affordance the way a link is, so nothing marks it as such
+// visually. main.cpp resolves userData's `for` attribute and activates
+// whatever it points at (focus a text input, toggle a checkbox/radio,
+// click a button).
 class LabelWidgetHandler final : public WidgetHandler {
 public:
   void Render(const Widget &widget, LayoutState &state) const override {
     bool suppressSpacing = ConsumeSuppressBlockSpacing(state);
-    FlushLine(state);
-
-    const std::string label = widget.text != nullptr ? widget.text : "";
-    const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
-    const float textWidth =
-        state.renderer.MeasureText(label, widget.fontSize, widget.bold);
-
-    if (!suppressSpacing) {
-      state.y += kBlockSpacing;
-    }
-
-    if (!label.empty()) {
-      Color color = widget.hasColor ? widget.color : kDefaultTextColor;
-      state.renderer.DrawText(label, state.x, state.y + widget.fontSize,
-                               widget.fontSize, widget.bold, color);
-    }
-
-    if (state.boxRegions != nullptr) {
-      state.boxRegions->push_back(
-          {widget.userData, state.x, state.y, textWidth, lineHeight});
-    }
-
-    state.y += lineHeight;
-    if (!suppressSpacing) {
-      state.y += kBlockSpacing;
-    }
+    RenderTextLikeBox(widget, state, suppressSpacing, /*underline=*/false);
   }
 };
 

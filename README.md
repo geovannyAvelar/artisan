@@ -445,17 +445,22 @@ camelCase property (`style.paddingTop`, `style.flexGrow`, ...), same as
 the original five - see [Using JavaScript](#using-javascript).
 
 The box model and flexbox reach `kContainer` (`<div>`, `<p>`, `<span>`,
-etc.) and `<input>`/`<button>`/checkbox/radio; still not `<table>`/`<a>`/
-`<label>`/text directly. A text `<input>`/`<button>` has its own built-in
-default padding (independent of CSS) so it stays usable unstyled -
-`padding` on one of these *adds* to that default rather than replacing
-it, unlike `kContainer` where unset padding is genuinely zero. Explicit
-`width`/`height` on one of these overrides its normal content-driven
-(shrink-to-fit label) sizing outright, the same as on a `kContainer`,
-and both participate correctly as flex items (`flex-grow`/`flex-shrink`/
-`align-items: stretch` all resize them, not just a `kContainer` child).
-A checkbox/radio's fixed-size indicator only honors `margin` - its
-width/height/padding aren't meaningful for a native-style toggle glyph.
+etc.), `<input>`/`<button>`/checkbox/radio, and `<a>`/`<label>`; still
+not `<table>`/text directly. A text `<input>`/`<button>` has its own
+built-in default padding (independent of CSS) so it stays usable
+unstyled - `padding` on one of these *adds* to that default rather than
+replacing it, unlike `kContainer`/`<a>`/`<label>` where unset padding is
+genuinely zero (a link/label isn't a boxy control with a built-in inset
+of its own). Explicit `width`/`height` on any of these overrides their
+normal content-driven (shrink-to-fit label) sizing outright, the same as
+on a `kContainer`, and all participate correctly as flex items
+(`flex-grow`/`flex-shrink`/`align-items: stretch` all resize them, not
+just a `kContainer` child). `background-color`/`border-color`/
+`border-width` now paint on `<a>`/`<label>` too - a link's underline is
+drawn inside its padding box, same relative position as before this
+existed. A checkbox/radio's fixed-size indicator only honors `margin` -
+its width/height/padding aren't meaningful for a native-style toggle
+glyph.
 Flexbox itself is still bounded: no CSS Grid, `align-content` only has
 anything to do in row direction with `flex-wrap: wrap` *and* an explicit
 CSS `height` taller than what the wrapped lines need on their own - an
