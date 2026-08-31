@@ -338,6 +338,31 @@ struct Widget {
   std::vector<GridTrack> gridTemplateColumns;
   std::vector<GridTrack> gridTemplateRows;
 
+  // grid-template-columns: subgrid - columns only (grid-template-rows:
+  // subgrid isn't supported; a subgrid row track resolves the same
+  // "auto" way an unrecognized/fr row track already does, the same
+  // columns-only asymmetry fr/min-content/max-content row tracks
+  // already have, for the same reason: this engine's rows are always
+  // content-auto-sized, with no independent per-row pixel budget of
+  // their own to adopt anything into). gridTemplateColumnsSubgrid true
+  // means gridTemplateColumns above is ignored entirely - the actual
+  // track widths instead come from subgridColumnWidths, populated by
+  // the *parent* grid container (RenderGridContainer,
+  // widget_renderer.cpp) on a shallow copy of this Widget, right before
+  // rendering it, with the slice of the parent's own already-resolved
+  // column widths this item's placement spans - the same shallow-copy-
+  // and-override pattern justify-items/align-items's own stretch
+  // override already uses to hand a computed value down to a child
+  // without mutating the shared tree. Left empty when this container
+  // isn't actually a grid item of a compatible parent grid (or simply
+  // isn't a subgrid at all), in which case a subgrid container falls
+  // back to the same single-full-width-column behavior an ordinary
+  // unset grid-template-columns already has - no special error
+  // handling needed, since a Widget's own defaults already describe
+  // exactly that fallback.
+  bool gridTemplateColumnsSubgrid = false;
+  std::vector<float> subgridColumnWidths;
+
   // grid-template-areas - one entry per row, each itself one area-name
   // token per column ("." meaning that cell is explicitly empty) - e.g.
   // `grid-template-areas: "header header" "sidebar content";` becomes

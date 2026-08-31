@@ -80,6 +80,7 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.hasFlexBasis = style.hasFlexBasis;
   widget.flexBasis = style.flexBasis;
   widget.gridTemplateColumns = style.gridTemplateColumns;
+  widget.gridTemplateColumnsSubgrid = style.gridTemplateColumnsSubgrid;
   widget.gridTemplateRows = style.gridTemplateRows;
   widget.gridTemplateAreas = style.gridTemplateAreas;
   widget.gridArea = style.gridArea;

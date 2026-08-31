@@ -688,6 +688,32 @@ keyword still parses without breaking the property (`grid-auto-flow:
 column dense` still flows by column), it just has no additional effect
 of its own.
 
+`grid-template-columns: subgrid` lets a nested grid adopt its parent's
+column tracks instead of sizing its own - columns only, mirroring the
+`fr`/`min-content`/`max-content` columns-only precedent above (a nested
+`grid-template-rows: subgrid` isn't supported; a subgrid's rows are
+still ordinary content-auto-sized rows). It only takes effect on a
+child that's both `display: grid` and placed into the parent via
+`grid-column` (a `grid-area` match works too, since that resolves to
+the same underlying column range) - an un-placed or non-grid child
+ignores the keyword and gets ordinary auto-placement/layout instead.
+The parent computes its own column widths as usual, then hands the
+slice spanned by the subgrid child's own placement down as that
+child's fixed column tracks, so e.g. a 3-column-wide subgrid child
+placed at `grid-column: 1 / 4` inside a `1fr 2fr 1fr` parent gets
+exactly those three column widths for its own `1fr 2fr 1fr`-equivalent
+tracks - its own cells' boundaries then line up exactly with the
+parent's, which is the entire point of subgrid. A subgrid child's own
+item count is clamped to however many columns it inherited (extra
+items past that just pile into the last inherited column rather than
+adding new ones of their own), since - unlike every other track-list
+mismatch in this bounded subset, which grows to fit - there's no
+sensible fallback width for a subgrid column beyond what the parent
+explicitly handed down. Real CSS's subgrid also inherits line names
+and can subgrid only one axis while sizing the other normally in the
+same declaration; neither is supported here, only the single
+all-or-nothing `subgrid` keyword on `grid-template-columns`.
+
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see
 `html_document.cpp`). There's also no shared stylesheet across pages -

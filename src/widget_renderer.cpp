@@ -810,6 +810,19 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
 // align-self - only the container-level properties, the same
 // container-only-alignment scope RenderFlexContainer's own alignItems
 // already has.
+//
+// Subgrid: an item that's itself display:grid with grid-template-
+// columns: subgrid doesn't resolve its own column tracks at all - it
+// adopts the exact slice of *this* container's own columnWidths its
+// placement spans (handed down via a shallow copy's subgridColumnWidths
+// field right before that item renders, below - see
+// Widget::gridTemplateColumnsSubgrid, widget.h, for the full contract).
+// Rows don't get an equivalent (grid-template-rows: subgrid isn't
+// recognized at all - see ParseDeclarations, css.cpp), the same
+// columns-only asymmetry fr/min-content/max-content row tracks already
+// have, for the same reason: rows are always content-auto-sized here,
+// with no independent per-row pixel budget of their own to adopt
+// anything into.
 void RenderGridContainer(const Widget &widget, LayoutState &state) {
   int n = widget.childCount;
   if (n == 0) {
@@ -839,9 +852,22 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // items simply march across in one row) rather than something
   // unbounded, the same reasoning an unset grid-template-columns falls
   // back to a single column for row-flow above.
+  // Subgrid (grid-template-columns: subgrid) - columns only, see
+  // Widget::gridTemplateColumnsSubgrid (widget.h) for the full
+  // contract. subgridColumnWidths is empty (falling through to every
+  // branch below exactly as if this weren't a subgrid at all) when this
+  // container isn't actually placed as a grid item of a compatible
+  // parent grid.
+  bool isColumnSubgrid =
+      widget.gridTemplateColumnsSubgrid && !widget.subgridColumnWidths.empty();
+
   int autoPlaceColumnCount;
   int autoPlaceRowCount;
-  if (hasAreas) {
+  if (isColumnSubgrid) {
+    autoPlaceColumnCount = static_cast<int>(widget.subgridColumnWidths.size());
+    autoPlaceRowCount =
+        widget.gridTemplateRows.empty() ? 1 : static_cast<int>(widget.gridTemplateRows.size());
+  } else if (hasAreas) {
     // The widest row, not just the first - ParseGridTemplateAreas
     // (css.cpp) doesn't validate every row is the same length, so a
     // malformed template could have a later row longer than the first;
@@ -879,29 +905,40 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   int nextAutoIndex = 0;
   for (int i = 0; i < n; ++i) {
     const Widget &child = widget.children[i];
-    GridItemPlacement found;
+    GridItemPlacement placed;
     if (hasAreas && !child.gridArea.empty() &&
-        FindGridAreaPlacement(widget.gridTemplateAreas, child.gridArea, found)) {
-      placements[i] = found;
-      continue;
-    }
-
-    int colSpan = std::max(1, child.gridColumn.span);
-    int rowSpan = std::max(1, child.gridRow.span);
-    if (child.gridColumn.hasStart || child.gridRow.hasStart) {
-      int col = child.gridColumn.hasStart ? std::max(0, child.gridColumn.start - 1) : 0;
-      int row = child.gridRow.hasStart ? std::max(0, child.gridRow.start - 1) : 0;
-      placements[i] = {row, col, rowSpan, colSpan};
-      continue;
-    }
-
-    int idx = nextAutoIndex++;
-    if (columnFlow) {
-      placements[i] = {idx % autoPlaceRowCount, idx / autoPlaceRowCount, rowSpan, colSpan};
+        FindGridAreaPlacement(widget.gridTemplateAreas, child.gridArea, placed)) {
+      // Found via area match - placed already set.
     } else {
-      placements[i] = {idx / autoPlaceColumnCount, idx % autoPlaceColumnCount, rowSpan,
-                        colSpan};
+      int colSpan = std::max(1, child.gridColumn.span);
+      int rowSpan = std::max(1, child.gridRow.span);
+      if (child.gridColumn.hasStart || child.gridRow.hasStart) {
+        int col = child.gridColumn.hasStart ? std::max(0, child.gridColumn.start - 1) : 0;
+        int row = child.gridRow.hasStart ? std::max(0, child.gridRow.start - 1) : 0;
+        placed = {row, col, rowSpan, colSpan};
+      } else {
+        int idx = nextAutoIndex++;
+        if (columnFlow) {
+          placed = {idx % autoPlaceRowCount, idx / autoPlaceRowCount, rowSpan, colSpan};
+        } else {
+          placed = {idx / autoPlaceColumnCount, idx % autoPlaceColumnCount, rowSpan, colSpan};
+        }
+      }
     }
+
+    // A subgrid's own column count is fixed at exactly how many tracks
+    // its parent handed it (autoPlaceColumnCount, in this case) -
+    // clamp rather than let the "extend for whatever a placement asks
+    // for" step below grow it past that, which would leave the extra
+    // column(s) with no adopted width to use (see the columnWidths
+    // resolution below, which skips its own extend-for-overflow-safety
+    // formula entirely for a subgrid, straight-assigning
+    // subgridColumnWidths instead).
+    if (isColumnSubgrid) {
+      placed.col = std::min(placed.col, autoPlaceColumnCount - 1);
+      placed.colSpan = std::min(placed.colSpan, autoPlaceColumnCount - placed.col);
+    }
+    placements[i] = placed;
   }
 
   // Final column/row counts: at least as many as an area template
@@ -938,7 +975,14 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // implies a column count it doesn't match.
   float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
   std::vector<float> columnWidths(columnCount);
-  if (static_cast<int>(widget.gridTemplateColumns.size()) == columnCount) {
+  if (isColumnSubgrid) {
+    // columnCount == subgridColumnWidths.size() exactly here (the
+    // placement-clamp above guarantees no placement ever asked the
+    // extend-for-overflow step just above to grow columnCount past
+    // that), so this is a straight assignment, no per-column
+    // resolution of any kind needed - the parent already did that.
+    columnWidths = widget.subgridColumnWidths;
+  } else if (static_cast<int>(widget.gridTemplateColumns.size()) == columnCount) {
     // Min-content/max-content columns first, from actual cell content -
     // single-column-span placements only (a spanning item doesn't
     // contribute here, the same base-pass-excludes-spans shape the row
@@ -1126,6 +1170,21 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     // stretch-column re-measurement already has) and offsets it within
     // the cell instead.
     Widget effectiveChild = widget.children[i];
+
+    // Subgrid: hand this item the exact slice of *this* container's
+    // own already-resolved columnWidths its own placement spans, so
+    // that if it's itself a display:grid container with
+    // grid-template-columns: subgrid, its own RenderGridContainer call
+    // (triggered inside RenderWidget below) picks these up instead of
+    // resolving its own tracks - see Widget::subgridColumnWidths
+    // (widget.h) for the full contract. A no-op (empty assign) for any
+    // ordinary, non-subgrid child.
+    if (effectiveChild.hasDisplay && effectiveChild.display == DisplayMode::kGrid &&
+        effectiveChild.gridTemplateColumnsSubgrid) {
+      effectiveChild.subgridColumnWidths.assign(columnWidths.begin() + p.col,
+                                                 columnWidths.begin() + p.col + p.colSpan);
+    }
+
     float renderWidth = itemWidth[i];
     if (widget.justifyItems == AlignItems::kStretch) {
       effectiveChild.hasWidth = true;

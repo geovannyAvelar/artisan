@@ -776,8 +776,23 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.display = DisplayMode::kBlock;
       }
     } else if (property == "grid-template-columns") {
-      decl.hasGridTemplateColumns =
-          ParseGridTrackList(value, decl.gridTemplateColumns);
+      // `subgrid` replaces the whole track list, not a token within it
+      // (real CSS's own grammar keeps it mutually exclusive with a
+      // literal track list too) - columns only, see
+      // Widget::gridTemplateColumnsSubgrid (widget.h) for why
+      // grid-template-rows: subgrid isn't recognized at all here (falls
+      // through to ParseGridTrackList below, which - like any other
+      // unrecognized token - just finds no valid track in "subgrid" and
+      // leaves the property unset).
+      if (ToLower(Trim(value)) == "subgrid") {
+        decl.hasGridTemplateColumns = true;
+        decl.gridTemplateColumns.clear();
+        decl.gridTemplateColumnsSubgrid = true;
+      } else {
+        decl.hasGridTemplateColumns =
+            ParseGridTrackList(value, decl.gridTemplateColumns);
+        decl.gridTemplateColumnsSubgrid = false;
+      }
     } else if (property == "grid-template-rows") {
       decl.hasGridTemplateRows = ParseGridTrackList(value, decl.gridTemplateRows);
     } else if (property == "grid-template-areas") {
@@ -1541,6 +1556,7 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
   if (inlineStyle.hasGridTemplateColumns) {
     declarations.hasGridTemplateColumns = true;
     declarations.gridTemplateColumns = inlineStyle.gridTemplateColumns;
+    declarations.gridTemplateColumnsSubgrid = inlineStyle.gridTemplateColumnsSubgrid;
   }
   if (inlineStyle.hasGridTemplateRows) {
     declarations.hasGridTemplateRows = true;
@@ -1862,6 +1878,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         gridTemplateColumnsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGridTemplateColumns = true;
       own.gridTemplateColumns = rule.declarations.gridTemplateColumns;
+      own.gridTemplateColumnsSubgrid = rule.declarations.gridTemplateColumnsSubgrid;
     }
     if (rule.declarations.hasGridTemplateRows &&
         gridTemplateRowsWin.ShouldTake(matchedSpecificity, ruleIndex)) {

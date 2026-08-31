@@ -278,6 +278,14 @@ struct Declarations {
   // empty, at cascade time - see StyleSheet::Resolve).
   bool hasGridTemplateColumns = false;
   std::vector<GridTrack> gridTemplateColumns;
+  // grid-template-columns: subgrid - no separate hasXxx flag: this only
+  // ever means anything alongside hasGridTemplateColumns above (the
+  // *same* property, so the two always cascade together as one unit -
+  // see StyleSheet::Resolve, which copies both together whenever this
+  // property's own PropertyWinner picks a winning rule), and false is
+  // the correct value whenever a winning rule's own grid-template-
+  // columns wasn't literally the `subgrid` keyword.
+  bool gridTemplateColumnsSubgrid = false;
   bool hasGridTemplateRows = false;
   std::vector<GridTrack> gridTemplateRows;
   bool hasGridTemplateAreas = false;
