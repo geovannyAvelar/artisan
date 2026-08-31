@@ -231,7 +231,33 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
       if (eq == std::string::npos) {
         attr.name = ToLower(Trim(inner));
       } else {
-        attr.name = ToLower(Trim(inner.substr(0, eq)));
+        // The operator character (~^$*), if any, sits directly before
+        // '=' - not itself part of the name. Plain "[name=value]" has
+        // none, leaving nameEnd at eq and op at its default (kEquals).
+        size_t nameEnd = eq;
+        if (eq > 0) {
+          switch (inner[eq - 1]) {
+          case '~':
+            attr.op = AttributeOperator::kIncludes;
+            nameEnd = eq - 1;
+            break;
+          case '^':
+            attr.op = AttributeOperator::kPrefix;
+            nameEnd = eq - 1;
+            break;
+          case '$':
+            attr.op = AttributeOperator::kSuffix;
+            nameEnd = eq - 1;
+            break;
+          case '*':
+            attr.op = AttributeOperator::kSubstring;
+            nameEnd = eq - 1;
+            break;
+          default:
+            break;
+          }
+        }
+        attr.name = ToLower(Trim(inner.substr(0, nameEnd)));
         std::string attrValue = Trim(inner.substr(eq + 1));
         if (attrValue.size() >= 2 &&
             (attrValue.front() == '"' || attrValue.front() == '\'') &&
@@ -573,6 +599,38 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
   return false;
 }
 
+// Whether `value` (an attribute's actual current text) satisfies `attr`'s
+// operator against `attr.value` - only called once both are known to
+// exist (a null/absent attribute, or an attr.value-less "[name]", never
+// reach here; see CompoundMatches below). An empty `*attr.value` never
+// matches kPrefix/kSuffix/kSubstring, matching real CSS (`[href^=""]`
+// selects nothing, not everything).
+bool AttributeValueMatches(const std::string &value, const AttributeSelector &attr) {
+  const std::string &want = *attr.value;
+  switch (attr.op) {
+  case AttributeOperator::kEquals:
+    return value == want;
+  case AttributeOperator::kIncludes: {
+    std::stringstream ss(value);
+    std::string token;
+    while (ss >> token) {
+      if (token == want) {
+        return true;
+      }
+    }
+    return false;
+  }
+  case AttributeOperator::kPrefix:
+    return !want.empty() && value.compare(0, want.size(), want) == 0;
+  case AttributeOperator::kSuffix:
+    return !want.empty() && value.size() >= want.size() &&
+           value.compare(value.size() - want.size(), want.size(), want) == 0;
+  case AttributeOperator::kSubstring:
+    return !want.empty() && value.find(want) != std::string::npos;
+  }
+  return false;
+}
+
 // Every part of a compound selector must match - a tag constraint, an id
 // constraint, every listed class, every attribute constraint, and every
 // pseudo-class, all AND'd together (an empty part imposes no constraint,
@@ -620,7 +678,7 @@ bool CompoundMatches(const CompoundSelector &selector, const Node &node,
     if (value == nullptr) {
       return false;
     }
-    if (attr.value.has_value() && *value != *attr.value) {
+    if (attr.value.has_value() && !AttributeValueMatches(*value, attr)) {
       return false;
     }
   }

@@ -9,17 +9,34 @@
 
 namespace artisan {
 
+// The relational operators an attribute selector's value can use -
+// real CSS's `~=`/`^=`/`$=`/`*=`, plus plain `=`. Only meaningful when
+// AttributeSelector::value is set (a bare "[name]" - presence only -
+// ignores this entirely). `|=` (dash-match, mainly used for `lang`
+// attributes) isn't supported - a rare enough operator that it's left
+// out of this bounded grammar, same as the missing case-insensitive "i"
+// flag.
+enum class AttributeOperator {
+  kEquals,    // [name=value]  - exact match.
+  kIncludes,  // [name~=value] - value is one of the attribute's
+              // whitespace-separated tokens (the general form of what
+              // `.class` does specifically for the "class" attribute).
+  kPrefix,    // [name^=value] - attribute starts with value.
+  kSuffix,    // [name$=value] - attribute ends with value.
+  kSubstring, // [name*=value] - attribute contains value anywhere.
+};
+
 // A single compound selector, e.g. "div.card#hero" - a tag name (optional
 // - empty matches any tag, i.e. universal), an id (optional), any number
 // of classes, attribute constraints, and structural pseudo-classes, ALL
 // of which must match (an AND, not an OR).
 struct AttributeSelector {
   std::string name;
-  // nullopt = "[name]" (presence only, any value); set = "[name=value]"
-  // (exact match - no ~=/|=/^=/$=/*= operators, and no case-insensitive
-  // "i" flag - a bounded subset, same philosophy as the rest of this
-  // file's CSS support).
+  // nullopt = "[name]" (presence only, any value); set = "[name<op>value]"
+  // per `op` above - no case-insensitive "i" flag, a bounded subset,
+  // same philosophy as the rest of this file's CSS support.
   std::optional<std::string> value;
+  AttributeOperator op = AttributeOperator::kEquals;
 };
 
 enum class PseudoClassKind { kFirstChild, kLastChild, kNthChild, kHover, kFocus };

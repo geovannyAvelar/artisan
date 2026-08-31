@@ -359,8 +359,14 @@ A `<style>` block anywhere in a page's markup can style elements by tag,
 
 Selectors can chain with combinators - `div p` (descendant), `div > p`
 (child), `a + b` (adjacent sibling), `a ~ b` (general sibling) - and a
-compound can carry attribute selectors (`[href]`, `[type="text"]`),
-structural pseudo-classes (`:first-child`, `:last-child`,
+compound can carry attribute selectors (`[href]` presence,
+`[type="text"]` exact match, `[class~="card"]` one of a whitespace-
+separated list of tokens - the general form of what `.card` does
+specifically for the `class` attribute, `[href^="https://"]` prefix,
+`[href$=".pdf"]` suffix, `[href*="example"]` substring anywhere - no
+case-insensitive `i` flag, and no `|=` dash-match, a rare enough
+operator to leave out of this bounded grammar), structural
+pseudo-classes (`:first-child`, `:last-child`,
 `:nth-child(2)`, `:nth-child(even)`/`:nth-child(odd)` - literal
 integers and the even/odd keywords only, not the full `an+b` algebra),
 and the two interactive pseudo-classes, `:hover` and `:focus` - a
@@ -374,8 +380,8 @@ way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
 in a `<style>` block - `:hover`/`:focus` parse there too, but always
 evaluate false: those entry points have no live mouse/focus state to
 match against, unlike a `<style>` block's cascade. Not supported:
-anything beyond this bounded grammar (`:nth-of-type`, `~=`/`^=`/`$=`
-attribute operators, `:focus-within`, etc). `:hover`/`:focus` styling
+anything beyond this bounded grammar (`:nth-of-type`, `|=`, `:focus-within`,
+etc). `:hover`/`:focus` styling
 also only reaches elements the renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level
 containers (`<div>`, `<p>`, `<li>`, ...), but not yet an inline element
