@@ -831,7 +831,16 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // placement is known, is - see below): an auto-placed item's own
   // column is always `< autoPlaceColumnCount` by construction (a mod
   // result), so it can never be what asks for more columns than this.
+  // autoPlaceRowCount is this same idea for grid-auto-flow: column
+  // (below) - the wrap bound column-flow needs to know how many rows
+  // fit in a column before starting a new one, the same role
+  // autoPlaceColumnCount already plays for row-flow's own wrapping.
+  // Unset grid-template-rows falls back to 1 (one row per column, i.e.
+  // items simply march across in one row) rather than something
+  // unbounded, the same reasoning an unset grid-template-columns falls
+  // back to a single column for row-flow above.
   int autoPlaceColumnCount;
+  int autoPlaceRowCount;
   if (hasAreas) {
     // The widest row, not just the first - ParseGridTemplateAreas
     // (css.cpp) doesn't validate every row is the same length, so a
@@ -843,12 +852,18 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     for (const auto &row : widget.gridTemplateAreas) {
       autoPlaceColumnCount = std::max(autoPlaceColumnCount, static_cast<int>(row.size()));
     }
+    autoPlaceRowCount = static_cast<int>(widget.gridTemplateAreas.size());
   } else {
     autoPlaceColumnCount = widget.gridTemplateColumns.empty()
                                 ? 1
                                 : static_cast<int>(widget.gridTemplateColumns.size());
+    autoPlaceRowCount = widget.gridTemplateRows.empty()
+                             ? 1
+                             : static_cast<int>(widget.gridTemplateRows.size());
   }
   autoPlaceColumnCount = std::max(1, autoPlaceColumnCount);
+  autoPlaceRowCount = std::max(1, autoPlaceRowCount);
+  bool columnFlow = widget.gridAutoFlow == GridAutoFlow::kColumn;
 
   // Resolve every item's placement. Precedence, matching GridLinePlacement's
   // own doc comment (widget.h): a grid-area match wins first; otherwise
@@ -857,7 +872,9 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // line 1); otherwise a bare `span N` (no explicit start on either
   // axis) still auto-places in document order, just at that span instead
   // of always 1x1; otherwise plain 1x1 auto-placement, same as an item
-  // with none of this set at all.
+  // with none of this set at all. Auto-placement itself wraps along
+  // whichever axis grid-auto-flow names (row, the default, or column -
+  // see autoPlaceColumnCount/autoPlaceRowCount above).
   std::vector<GridItemPlacement> placements(n);
   int nextAutoIndex = 0;
   for (int i = 0; i < n; ++i) {
@@ -879,8 +896,12 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     }
 
     int idx = nextAutoIndex++;
-    placements[i] = {idx / autoPlaceColumnCount, idx % autoPlaceColumnCount, rowSpan,
-                      colSpan};
+    if (columnFlow) {
+      placements[i] = {idx % autoPlaceRowCount, idx / autoPlaceRowCount, rowSpan, colSpan};
+    } else {
+      placements[i] = {idx / autoPlaceColumnCount, idx % autoPlaceColumnCount, rowSpan,
+                        colSpan};
+    }
   }
 
   // Final column/row counts: at least as many as an area template

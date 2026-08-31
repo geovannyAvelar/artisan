@@ -573,14 +573,17 @@ known total container height most grids never set. `gap` (reused from
 flexbox) applies between both columns and rows - there's no separate
 `row-gap`/`column-gap`. A child with no placement of its own (see
 `grid-template-areas`/`grid-area` and `grid-column`/`grid-row` below)
-auto-places into the next cell in document order, row-major, wrapping to
-a new row whenever the current one runs out of columns. Every item
-stretches to fill its own cell(s) on both axes by default - see
-`justify-items`/`align-items` below for overriding that. A row named by
+auto-places into the next cell in document order, wrapping along
+whichever axis `grid-auto-flow` names (`row`, the default, wraps to a
+new row whenever the current one runs out of columns; `column` wraps to
+a new column whenever the current one runs out of rows - see
+`grid-auto-flow` below for the details). Every item stretches to fill
+its own cell(s) on both axes by default - see `justify-items`/
+`align-items` below for overriding that. A row named by
 `grid-template-rows` is a *floor*, not an exact height (content taller
 than it still reserves its own full height, same as every other
-explicit-height property in this
-renderer); any row beyond however many `grid-template-rows` named -
+explicit-height property in this renderer); any row beyond however many
+`grid-template-rows` named -
 including every row when it's unset entirely, which also makes an unset
 `grid-template-columns` fall back to a single full-width column -
 auto-sizes to its own tallest (non-row-spanning) cell's natural content
@@ -658,6 +661,23 @@ back into row auto-sizing correctly (a narrower item can wrap its text
 across more lines than a stretched one would, becoming taller) - it's
 only ever the *positioning* within the cell that's skipped when
 stretch doesn't apply, not the sizing math surrounding it.
+
+`grid-auto-flow` controls which axis auto-placement fills first:
+`row` (the default, and the only behavior before this property existed)
+wraps to a new row once the current one runs out of columns;
+`column` wraps to a new column once the current one runs out of rows -
+using however many rows `grid-template-rows` declares as the wrap
+point (falling back to 1 - one item per column - when it's unset,
+mirroring how an unset `grid-template-columns` falls back to a single
+column for row-flow). Real CSS's `dense` packing modifier (re-filling
+earlier holes an explicit placement left open, rather than always
+moving forward) isn't supported - this engine's auto-placement has
+never tracked cell occupancy at all (see `grid-template-areas` and
+`grid-column`/`grid-row` above for where that same gap already applies
+to explicit placement), so dense packing has nothing to do; a `dense`
+keyword still parses without breaking the property (`grid-auto-flow:
+column dense` still flows by column), it just has no additional effect
+of its own.
 
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see

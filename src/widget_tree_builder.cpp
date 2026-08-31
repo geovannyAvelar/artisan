@@ -85,6 +85,7 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.gridArea = style.gridArea;
   widget.gridColumn = style.gridColumn;
   widget.gridRow = style.gridRow;
+  widget.gridAutoFlow = style.gridAutoFlow;
 }
 
 bool IsAllWhitespace(const std::string &text) {

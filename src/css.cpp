@@ -779,6 +779,26 @@ Declarations ParseDeclarations(const std::string &body) {
       decl.hasGridColumn = ParseGridLinePlacement(value, decl.gridColumn);
     } else if (property == "grid-row") {
       decl.hasGridRow = ParseGridLinePlacement(value, decl.gridRow);
+    } else if (property == "grid-auto-flow") {
+      // Real CSS's valid values are `row`, `column`, `row dense`,
+      // `column dense`, and bare `dense` (implying row) - only the
+      // leading row/column keyword is ever consulted here, since this
+      // engine's auto-placement has never tracked cell occupancy at all
+      // (see GridAutoFlow, widget.h) and `dense` packing is meaningless
+      // without it, but a `dense` modifier still parses (rather than
+      // making the whole property unrecognized) so it doesn't lose
+      // whichever row/column keyword came with it.
+      std::string lower = ToLower(value);
+      std::istringstream tokens(lower);
+      std::string first;
+      tokens >> first;
+      if (first == "row" || first == "dense") {
+        decl.hasGridAutoFlow = true;
+        decl.gridAutoFlow = GridAutoFlow::kRow;
+      } else if (first == "column") {
+        decl.hasGridAutoFlow = true;
+        decl.gridAutoFlow = GridAutoFlow::kColumn;
+      }
     } else if (property == "flex-direction") {
       std::string lower = ToLower(value);
       if (lower == "row") {
@@ -1531,6 +1551,10 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasGridRow = true;
     declarations.gridRow = inlineStyle.gridRow;
   }
+  if (inlineStyle.hasGridAutoFlow) {
+    declarations.hasGridAutoFlow = true;
+    declarations.gridAutoFlow = inlineStyle.gridAutoFlow;
+  }
 }
 
 namespace {
@@ -1667,6 +1691,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin, gridTemplateAreasWin;
   PropertyWinner gridAreaWin;
   PropertyWinner gridColumnWin, gridRowWin;
+  PropertyWinner gridAutoFlowWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
     const Rule &rule = rules_[i];
@@ -1851,6 +1876,11 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         gridRowWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGridRow = true;
       own.gridRow = rule.declarations.gridRow;
+    }
+    if (rule.declarations.hasGridAutoFlow &&
+        gridAutoFlowWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGridAutoFlow = true;
+      own.gridAutoFlow = rule.declarations.gridAutoFlow;
     }
     if (rule.declarations.hasContent &&
         contentWin.ShouldTake(matchedSpecificity, ruleIndex)) {

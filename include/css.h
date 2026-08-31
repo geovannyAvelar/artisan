@@ -298,6 +298,8 @@ struct Declarations {
   GridLinePlacement gridColumn;
   bool hasGridRow = false;
   GridLinePlacement gridRow;
+  bool hasGridAutoFlow = false;
+  GridAutoFlow gridAutoFlow = GridAutoFlow::kRow;
 
   // `content` - only meaningful when this Declarations was resolved for
   // a `::before`/`::after` pseudo-element (StyleSheet::Resolve's `target`

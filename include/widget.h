@@ -94,6 +94,21 @@ struct GridLinePlacement {
   int span = 1;  // Always >= 1.
 };
 
+// grid-auto-flow - which axis auto-placement (RenderGridContainer,
+// widget_renderer.cpp) fills first: kRow (the default) wraps to a new
+// row once the current one runs out of columns, same as every grid
+// before this property existed; kColumn wraps to a new column once the
+// current one runs out of rows instead. Real CSS's `dense` packing
+// modifier (re-filling earlier holes an explicit placement left open,
+// rather than always moving forward) isn't supported - this engine's
+// auto-placement has never tracked cell occupancy at all (see
+// RenderGridContainer's own doc comment on the placement precedence
+// ladder), and dense packing is meaningless without it; `grid-auto-flow:
+// row dense`/`column dense` still resolve their own row/column keyword
+// correctly, just without the dense behavior (see ParseDeclarations,
+// css.cpp).
+enum class GridAutoFlow { kRow, kColumn };
+
 enum class WidgetKind {
   kContainer,  // Groups children (div, span, body, ...); no text of its own.
   kText,       // A leaf that paints `text` at `fontSize` (word-wrapped).
@@ -353,6 +368,13 @@ struct Widget {
   // widget_renderer.cpp, for exactly where each case is decided.
   GridLinePlacement gridColumn;
   GridLinePlacement gridRow;
+
+  // grid-auto-flow - see GridAutoFlow above. Container property (unlike
+  // gridArea/gridColumn/gridRow just above): it governs how *this*
+  // container auto-places whichever of its own children fall through to
+  // auto-placement, not anything about this Widget as someone else's
+  // child.
+  GridAutoFlow gridAutoFlow = GridAutoFlow::kRow;
 };
 
 } // namespace artisan
