@@ -241,7 +241,14 @@ struct Declarations {
   bool hasJustifyContent = false;
   JustifyContent justifyContent = JustifyContent::kFlexStart;
   bool hasAlignItems = false;
-  AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
+  // Real CSS flexbox's own default - also, unrelatedly, real CSS Grid's
+  // own default for the exact same property (see ParseDeclarations,
+  // css.cpp, for why this one field serves both).
+  AlignItems alignItems = AlignItems::kStretch;
+  // justify-items - CSS Grid only, flexbox has no equivalent (see
+  // ParseDeclarations, css.cpp). Real CSS's own default is `stretch`.
+  bool hasJustifyItems = false;
+  AlignItems justifyItems = AlignItems::kStretch;
   bool hasAlignContent = false;
   // kFlexStart, not real CSS's kStretch default - see Widget::alignContent
   // (widget.h) for why this engine deliberately defaults the *unset*

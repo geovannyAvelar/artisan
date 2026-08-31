@@ -575,10 +575,11 @@ flexbox) applies between both columns and rows - there's no separate
 `grid-template-areas`/`grid-area` and `grid-column`/`grid-row` below)
 auto-places into the next cell in document order, row-major, wrapping to
 a new row whenever the current one runs out of columns. Every item
-always stretches to fill its own cell(s) on both axes - there's no
-`justify-items`/`align-items`. A row named by `grid-template-rows` is a
-*floor*, not an exact height (content taller than it still reserves its
-own full height, same as every other explicit-height property in this
+stretches to fill its own cell(s) on both axes by default - see
+`justify-items`/`align-items` below for overriding that. A row named by
+`grid-template-rows` is a *floor*, not an exact height (content taller
+than it still reserves its own full height, same as every other
+explicit-height property in this
 renderer); any row beyond however many `grid-template-rows` named -
 including every row when it's unset entirely, which also makes an unset
 `grid-template-columns` fall back to a single full-width column -
@@ -634,6 +635,29 @@ that, explicit placement of any kind (named or line-based) is exactly
 as prone to overlapping an auto-placed sibling as `grid-template-areas`
 already documents above, for the same reason (auto-placement is a
 simple next-free-index counter, not occupancy-aware).
+
+`justify-items`/`align-items` control whether a grid item stretches to
+fill its own cell(s) (the default, and what every item did before these
+existed) or keeps its own natural, fit-content size and is
+start/center/end-positioned within the cell instead -
+`justify-items: center` on a grid of narrower-than-their-cell buttons
+centers each one horizontally, `align-items: end` bottom-aligns them
+vertically, and so on. `align-items` is genuinely the same property
+flexbox's own cross-axis alignment already uses (interpreted
+differently depending on which layout mode is active on that
+container - a container is always exactly one or the other), so it
+accepts either keyword spelling, flexbox's `flex-start`/`flex-end` or
+grid's own `start`/`end`, in both contexts; `justify-items` (grid only -
+flexbox has no equivalent, since `justify-content` distributes free
+space among items along the main axis rather than positioning one item
+within its own single line) only accepts grid's `start`/`end`. Real
+CSS's per-item `justify-self`/`align-self` overrides aren't supported -
+only these two container-level properties, the same scope flexbox's own
+`align-items` already has. A non-stretched item's own width still feeds
+back into row auto-sizing correctly (a narrower item can wrap its text
+across more lines than a stretched one would, becoming taller) - it's
+only ever the *positioning* within the cell that's skipped when
+stretch doesn't apply, not the sizing math surrounding it.
 
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see

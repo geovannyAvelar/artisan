@@ -19,10 +19,10 @@ struct Color {
 // Declarations, which resolves markup's display/flex-direction/
 // justify-content/align-items/align-content/flex-grow/flex-shrink/
 // flex-basis/flex-wrap down to these) - kContainer only, same as the
-// rest of the box model. No CSS Grid, and flex-wrap has no effect in
-// column direction (column's main axis - height - already has no fixed
-// budget to wrap against in this flow model, same reason justify-content
-// already degenerates to flex-start there - see RenderFlexContainer).
+// rest of the box model. flex-wrap has no effect in column direction
+// (column's main axis - height - already has no fixed budget to wrap
+// against in this flow model, same reason justify-content already
+// degenerates to flex-start there - see RenderFlexContainer).
 // align-content is likewise a no-op in column direction, for the same
 // reason (it only has anything to redistribute among when flex-wrap
 // actually produced more than one line) - and in row direction, it only
@@ -39,13 +39,17 @@ struct Color {
 // subset in the same spirit: grid-template-columns/rows accept only a
 // space-separated list of fixed px tracks and/or `fr` (fractional)
 // tracks (see GridTrack) - no repeat()/minmax()/auto/percentage tracks,
-// no named lines/areas. Children are always auto-placed into cells in
-// document order, row-major (no grid-column/grid-row placement, no
-// spans - see RenderGridContainer, widget_renderer.cpp), and always
-// stretch to fill their cell on both axes (no justify-items/
-// align-items - real CSS's own default for both is `stretch` anyway,
-// so this isn't even a "different from real CSS's default" simplification
-// the way AlignContent's own below is, just an omitted, always-on one).
+// no named lines. grid-template-areas/grid-area name cells; grid-column/
+// grid-row place by numeric grid line instead (see GridLinePlacement) -
+// either way, anything unplaced still auto-places into cells in document
+// order, row-major (see RenderGridContainer, widget_renderer.cpp).
+// justify-items/align-items (reusing this same AlignItems enum and,
+// for align-items, the very same Widget field flexbox's own cross-axis
+// alignment already uses - see Widget::alignItems below) control
+// whether an item stretches to fill its cell on each axis (the default,
+// same as flexbox's own) or keeps its natural size and is start/center/
+// end-positioned within it instead - no per-item justify-self/
+// align-self, only these two container-level properties.
 enum class DisplayMode { kBlock, kFlex, kGrid };
 enum class FlexDirection { kRow, kColumn };
 enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
@@ -259,7 +263,18 @@ struct Widget {
   DisplayMode display = DisplayMode::kBlock;
   FlexDirection flexDirection = FlexDirection::kRow;
   JustifyContent justifyContent = JustifyContent::kFlexStart;
-  AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
+  // Real CSS flexbox's own default - also, unrelatedly, real CSS
+  // Grid's own default for the exact same property when this Widget is
+  // a grid container instead (RenderGridContainer, widget_renderer.cpp,
+  // reads this field too - see ParseDeclarations, css.cpp, for why one
+  // field serves both display modes).
+  AlignItems alignItems = AlignItems::kStretch;
+  // justify-items - CSS Grid only (RenderGridContainer); flexbox has no
+  // equivalent property (justify-content distributes free space among
+  // *items*, not each item within its own line - a different concept
+  // from positioning one item within its own single cell, hence its own
+  // field here rather than reusing justifyContent above).
+  AlignItems justifyItems = AlignItems::kStretch;
   // kFlexStart, not real CSS's own kStretch default: kFlexStart is
   // exactly the "lines just stack contiguously" behavior this engine
   // already had before align-content existed at all, so a page that

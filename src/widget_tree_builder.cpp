@@ -71,6 +71,7 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.flexDirection = style.flexDirection;
   widget.justifyContent = style.justifyContent;
   widget.alignItems = style.alignItems;
+  widget.justifyItems = style.justifyItems;
   widget.alignContent = style.alignContent;
   widget.gap = style.gap;
   widget.flexWrap = style.flexWrap;

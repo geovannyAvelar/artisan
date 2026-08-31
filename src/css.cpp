@@ -804,19 +804,52 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.justifyContent = JustifyContent::kSpaceBetween;
       }
     } else if (property == "align-items") {
+      // Genuinely the same property for both flexbox and CSS Grid in
+      // real CSS (interpreted differently by whichever layout algorithm
+      // is active - RenderFlexContainer/RenderGridContainer,
+      // widget_renderer.cpp - since a container is always exactly one
+      // or the other), so this parses both flexbox's own `flex-start`/
+      // `flex-end` keyword spelling and grid's `start`/`end` one into
+      // the same AlignItems value - real CSS only accepts the *grid*
+      // spelling on a grid container and the *flex* one on a flex
+      // container, but this parser has no way to know which context a
+      // rule will end up matching yet, so it accepts either everywhere.
       std::string lower = ToLower(value);
-      if (lower == "flex-start") {
+      if (lower == "flex-start" || lower == "start") {
         decl.hasAlignItems = true;
         decl.alignItems = AlignItems::kFlexStart;
       } else if (lower == "center") {
         decl.hasAlignItems = true;
         decl.alignItems = AlignItems::kCenter;
-      } else if (lower == "flex-end") {
+      } else if (lower == "flex-end" || lower == "end") {
         decl.hasAlignItems = true;
         decl.alignItems = AlignItems::kFlexEnd;
       } else if (lower == "stretch") {
         decl.hasAlignItems = true;
         decl.alignItems = AlignItems::kStretch;
+      }
+    } else if (property == "justify-items") {
+      // Grid only - flexbox has no equivalent property (justify-content
+      // is flex's own inline-axis alignment, but it distributes free
+      // space among *items*, not each item within its own line the way
+      // this positions an item within its own cell - a different
+      // concept entirely, hence its own AlignItems-typed field
+      // (Declarations::justifyItems) rather than reusing
+      // JustifyContent). Same four keywords grid's own align-items
+      // above accepts.
+      std::string lower = ToLower(value);
+      if (lower == "start") {
+        decl.hasJustifyItems = true;
+        decl.justifyItems = AlignItems::kFlexStart;
+      } else if (lower == "center") {
+        decl.hasJustifyItems = true;
+        decl.justifyItems = AlignItems::kCenter;
+      } else if (lower == "end") {
+        decl.hasJustifyItems = true;
+        decl.justifyItems = AlignItems::kFlexEnd;
+      } else if (lower == "stretch") {
+        decl.hasJustifyItems = true;
+        decl.justifyItems = AlignItems::kStretch;
       }
     } else if (property == "align-content") {
       std::string lower = ToLower(value);
@@ -1447,6 +1480,10 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasAlignItems = true;
     declarations.alignItems = inlineStyle.alignItems;
   }
+  if (inlineStyle.hasJustifyItems) {
+    declarations.hasJustifyItems = true;
+    declarations.justifyItems = inlineStyle.justifyItems;
+  }
   if (inlineStyle.hasAlignContent) {
     declarations.hasAlignContent = true;
     declarations.alignContent = inlineStyle.alignContent;
@@ -1624,6 +1661,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner paddingTopWin, paddingRightWin, paddingBottomWin, paddingLeftWin;
   PropertyWinner marginTopWin, marginRightWin, marginBottomWin, marginLeftWin;
   PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
+  PropertyWinner justifyItemsWin;
   PropertyWinner alignContentWin;
   PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
   PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin, gridTemplateAreasWin;
@@ -1750,6 +1788,11 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         alignItemsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasAlignItems = true;
       own.alignItems = rule.declarations.alignItems;
+    }
+    if (rule.declarations.hasJustifyItems &&
+        justifyItemsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasJustifyItems = true;
+      own.justifyItems = rule.declarations.justifyItems;
     }
     if (rule.declarations.hasAlignContent &&
         alignContentWin.ShouldTake(matchedSpecificity, ruleIndex)) {

@@ -247,26 +247,27 @@ float MeasureItemNaturalWidth(const Widget &widget, const IRenderer &renderer,
   return nullRenderer.naturalWidth();
 }
 
-// A flex item's natural main-size, for flex-basis/cross-size purposes -
-// unlike MeasureItemNaturalWidth above (which renders the item as one
-// unit, background/border box included), a kContainer item with no
-// explicit width of its own would report that box as spanning however
-// wide `cap` happens to be: real CSS's own "a block fills its
-// container" default, exactly right for normal block-flow rendering
-// (see ContainerWidgetHandler::Render's boxMaxWidth) but not what
-// "natural width" means for an *unstretched flex item* - one of those
-// wants its *content's* preferred width instead, the same way a real
-// browser auto-sizes a flex item to fit-content rather than 100%. For a
-// kContainer, that means measuring its own children directly
-// (MeasureNaturalWidth, bypassing its own background/border box
-// entirely, straight to whatever text/grandchildren actually determine
-// a size) instead of treating the container as a single rendered unit.
-// Every other kind's own Render() already computes a genuinely
-// content-driven size on its own (e.g. BoxWidgetHandler's
-// textWidth-based width), so MeasureItemNaturalWidth is already correct
-// for those, unchanged.
-float MeasureFlexItemNaturalWidth(const Widget &widget, const IRenderer &renderer,
-                                   float cap) {
+// An item's natural, fit-content width - unlike MeasureItemNaturalWidth
+// above (which renders the item as one unit, background/border box
+// included), a kContainer item with no explicit width of its own would
+// report that box as spanning however wide `cap` happens to be: real
+// CSS's own "a block fills its container" default, exactly right for
+// normal block-flow rendering (see ContainerWidgetHandler::Render's
+// boxMaxWidth) but not what "natural width" means once something else
+// is sizing this item instead - an unstretched flex item (flex-basis/
+// cross-size, RenderFlexContainer) or a non-stretched grid item
+// (justify-items != stretch, RenderGridContainer) both want the item's
+// *content's* preferred width, the same way a real browser auto-sizes
+// either to fit-content rather than 100%. For a kContainer, that means
+// measuring its own children directly (MeasureNaturalWidth, bypassing
+// its own background/border box entirely, straight to whatever text/
+// grandchildren actually determine a size) instead of treating the
+// container as a single rendered unit. Every other kind's own Render()
+// already computes a genuinely content-driven size on its own (e.g.
+// BoxWidgetHandler's textWidth-based width), so MeasureItemNaturalWidth
+// is already correct for those, unchanged.
+float MeasureItemFitContentWidth(const Widget &widget, const IRenderer &renderer,
+                                  float cap) {
   if (widget.kind == WidgetKind::kContainer) {
     return MeasureNaturalWidth(widget, renderer, cap);
   }
@@ -420,7 +421,7 @@ FlexLineResult LayoutFlexLine(const Widget &widget, LayoutState &state, bool isR
     float itemCross = crossSize[i];
     // renderWidth[idx] already prioritizes the item's own explicit
     // width over its measured natural/content width (see
-    // MeasureFlexItemNaturalWidth and RenderFlexContainer's own
+    // MeasureItemFitContentWidth and RenderFlexContainer's own
     // renderWidth computation) - the right default main-axis (row) or
     // cross-axis (column) render width before any grow/shrink/stretch
     // below has a chance to override it.
@@ -582,7 +583,7 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
   // this container's available width (a flex item's text still wraps
   // against the container, same as any other child would) - and its
   // *render* width, which prioritizes the item's own explicit width
-  // over that natural/content-driven one (see MeasureFlexItemNaturalWidth's
+  // over that natural/content-driven one (see MeasureItemFitContentWidth's
   // own doc comment for why a kContainer's naturalWidth deliberately
   // bypasses its own explicit width). renderWidth is what every later
   // computation here actually wants; naturalWidth only still matters as
@@ -591,7 +592,7 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
   std::vector<float> renderWidth(n);
   for (int i = 0; i < n; ++i) {
     naturalWidth[i] =
-        MeasureFlexItemNaturalWidth(widget.children[i], state.renderer, state.maxWidth);
+        MeasureItemFitContentWidth(widget.children[i], state.renderer, state.maxWidth);
     const Widget &child = widget.children[i];
     renderWidth[i] = (child.hasWidth && !child.widthIsPercent) ? child.width : naturalWidth[i];
   }
@@ -789,15 +790,26 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
 }
 
 // Lays out `widget`'s children as a CSS Grid - kContainer, display:grid
-// only, the bounded subset DisplayMode (widget.h) documents. Every item
-// stretches to fill its own cell(s) on both axes (no justify-items/
-// align-items). Placement: an item whose own grid-area names a cell in
-// widget.gridTemplateAreas goes there (spanning every cell that name's
-// occurrences bound - see FindGridAreaPlacement); everything else
-// (grid-template-areas unset, or an item's own grid-area unset or not
-// found in it) auto-places into the next cell in document order,
-// row-major, always a single cell (no grid-column/grid-row placement or
-// spans outside of named areas).
+// only, the bounded subset DisplayMode (widget.h) documents.
+//
+// Placement, in precedence order: an item whose own grid-area names a
+// cell in widget.gridTemplateAreas goes there (spanning every cell that
+// name's occurrences bound - see FindGridAreaPlacement); an item with an
+// explicit grid-column/grid-row start line places there instead (the
+// other axis, if unset, defaults to line 1); a bare grid-column/
+// grid-row span with no explicit start on either axis still auto-places
+// in document order, just at that span; everything else (no area
+// template match, no explicit column/row) auto-places into the next
+// single cell in document order, row-major.
+//
+// Alignment: widget.justifyItems/alignItems (stretch by default, same
+// as real CSS) control whether an item fills its own cell(s) on each
+// axis outright, or keeps its own fit-content size and is
+// start/center/end-positioned within the cell instead - see the
+// itemWidth/xOffset/yOffset computation below. No justify-self/
+// align-self - only the container-level properties, the same
+// container-only-alignment scope RenderFlexContainer's own alignItems
+// already has.
 void RenderGridContainer(const Widget &widget, LayoutState &state) {
   int n = widget.childCount;
   if (n == 0) {
@@ -926,6 +938,31 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     x += columnWidths[c] + widget.gap;
   }
 
+  // Each item's own resolved render width - its full cell width when
+  // justify-items is stretch (the default, and this bounded subset's
+  // only behavior before this property existed), or its own fit-content
+  // width otherwise (capped to the cell, same "no scroll-within-content"
+  // clamping every explicit size elsewhere in this renderer already
+  // does). Resolved before row heights below since a non-stretched
+  // item's natural *height* depends on how wide it actually ends up -
+  // narrower than its cell can mean taller wrapped content, same
+  // coupling MeasureItemHeightAt's own width parameter always has.
+  std::vector<float> itemWidth(n);
+  for (int i = 0; i < n; ++i) {
+    const GridItemPlacement &p = placements[i];
+    float cellWidth = 0.0f;
+    for (int c = p.col; c < p.col + p.colSpan; ++c) {
+      cellWidth += columnWidths[c];
+    }
+    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
+    if (widget.justifyItems == AlignItems::kStretch) {
+      itemWidth[i] = cellWidth;
+    } else {
+      itemWidth[i] = std::min(
+          cellWidth, MeasureItemFitContentWidth(widget.children[i], state.renderer, cellWidth));
+    }
+  }
+
   // Row heights, base pass: a fixed (px) grid-template-rows track is a
   // floor, not an exact value - matching every other explicit-height
   // property in this renderer (kBox/kContainer/kTable's own height):
@@ -947,12 +984,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     if (p.rowSpan != 1) {
       continue;
     }
-    float cellWidth = 0.0f;
-    for (int c = p.col; c < p.col + p.colSpan; ++c) {
-      cellWidth += columnWidths[c];
-    }
-    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
-    float natural = MeasureItemHeightAt(widget.children[i], state.renderer, cellWidth);
+    float natural = MeasureItemHeightAt(widget.children[i], state.renderer, itemWidth[i]);
     rowHeights[p.row] = std::max(rowHeights[p.row], natural);
   }
   for (int r = 0; r < rowCount && r < static_cast<int>(widget.gridTemplateRows.size());
@@ -972,12 +1004,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     if (p.rowSpan <= 1) {
       continue;
     }
-    float cellWidth = 0.0f;
-    for (int c = p.col; c < p.col + p.colSpan; ++c) {
-      cellWidth += columnWidths[c];
-    }
-    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
-    float needed = MeasureItemHeightAt(widget.children[i], state.renderer, cellWidth);
+    float needed = MeasureItemHeightAt(widget.children[i], state.renderer, itemWidth[i]);
 
     float available = static_cast<float>(p.rowSpan - 1) * widget.gap;
     for (int r = p.row; r < p.row + p.rowSpan; ++r) {
@@ -1012,25 +1039,53 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     }
     cellHeight += static_cast<float>(p.rowSpan - 1) * widget.gap;
 
-    // Stretch: every item fills its own cell(s) on both axes - the only
-    // alignment this bounded subset supports (no justify-items/
-    // align-items). Same shallow-copy-and-override pattern
-    // LayoutFlexLine already uses to impose a computed size on a const
-    // child without mutating the shared tree.
+    // Stretch (the default, and this bounded subset's only behavior
+    // before justify-items/align-items existed) fills the item's own
+    // cell(s) on that axis outright - same shallow-copy-and-override
+    // pattern LayoutFlexLine already uses to impose a computed size on a
+    // const child without mutating the shared tree. Anything else
+    // (start/center/end) leaves the item at its own already-resolved
+    // fit-content size (itemWidth[i] for width; natural height at that
+    // width, measured fresh here rather than cached from the row-height
+    // passes above, the same acceptable redundancy LayoutFlexLine's own
+    // stretch-column re-measurement already has) and offsets it within
+    // the cell instead.
     Widget effectiveChild = widget.children[i];
-    effectiveChild.hasWidth = true;
-    effectiveChild.widthIsPercent = false;
-    effectiveChild.width = cellWidth;
-    effectiveChild.hasHeight = true;
-    effectiveChild.height = cellHeight;
+    float renderWidth = itemWidth[i];
+    if (widget.justifyItems == AlignItems::kStretch) {
+      effectiveChild.hasWidth = true;
+      effectiveChild.widthIsPercent = false;
+      effectiveChild.width = cellWidth;
+      renderWidth = cellWidth;
+    }
+    float itemHeight = cellHeight;
+    if (widget.alignItems == AlignItems::kStretch) {
+      effectiveChild.hasHeight = true;
+      effectiveChild.height = cellHeight;
+    } else {
+      itemHeight = MeasureItemHeightAt(effectiveChild, state.renderer, renderWidth);
+    }
 
-    float childX = state.x + columnX[p.col];
-    float childY = state.y + rowY[p.row];
+    float xOffset = 0.0f;
+    if (widget.justifyItems == AlignItems::kCenter) {
+      xOffset = (cellWidth - renderWidth) / 2.0f;
+    } else if (widget.justifyItems == AlignItems::kFlexEnd) {
+      xOffset = cellWidth - renderWidth;
+    }
+    float yOffset = 0.0f;
+    if (widget.alignItems == AlignItems::kCenter) {
+      yOffset = (cellHeight - itemHeight) / 2.0f;
+    } else if (widget.alignItems == AlignItems::kFlexEnd) {
+      yOffset = cellHeight - itemHeight;
+    }
+
+    float childX = state.x + columnX[p.col] + xOffset;
+    float childY = state.y + rowY[p.row] + yOffset;
 
     // A fresh LayoutState per item - same reasoning LayoutFlexLine's
     // identical childState construction documents (grid items are
     // always individually positioned boxes, never inline-flowed text).
-    LayoutState childState{state.renderer, childX, childY, cellWidth};
+    LayoutState childState{state.renderer, childX, childY, renderWidth};
     childState.boxRegions = state.boxRegions;
     childState.suppressBlockSpacing = true;
     RenderWidget(effectiveChild, childState);
