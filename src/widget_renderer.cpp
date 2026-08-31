@@ -301,14 +301,22 @@ struct FlexLineResult {
 // this function did before flex-grow/shrink/wrap existed.
 // `crossAxisOffset` positions this line within the container's own
 // cross axis - 0 for the only line there is, unless flex-wrap:wrap
-// produced more than one (each subsequent line's own crossAxisOffset is
-// the sum of every earlier line's FlexLineResult::crossSize, plus a gap
-// between them - see the caller).
+// produced more than one (each subsequent line's own crossAxisOffset
+// factors in every earlier line's own FlexLineResult::crossSize, plus
+// whatever gap align-content put between them - see the caller).
+// `minCrossSize` is align-content:stretch's doing (row only; see
+// RenderFlexContainer) - this line's natural cross size (the tallest
+// item, same as ever) still gets computed as usual below, but then
+// widened to at least this if it's bigger, so align-items:stretch (which
+// already stretches every item to fill lineCrossSize) picks up the
+// larger, stretched size for free without needing its own separate
+// logic. 0 for every align-content value other than stretch.
 FlexLineResult LayoutFlexLine(const Widget &widget, LayoutState &state, bool isRow,
                                int startIndex, int count,
                                const std::vector<float> &renderWidth,
                                const std::vector<float> &basis,
-                               float mainAxisAvailable, float crossAxisOffset) {
+                               float mainAxisAvailable, float crossAxisOffset,
+                               float minCrossSize) {
   float gap = widget.gap;
   int n = count;
 
@@ -391,14 +399,16 @@ FlexLineResult LayoutFlexLine(const Widget &widget, LayoutState &state, bool isR
 
   // This line's own cross-axis size: row's cross axis (height) is
   // intrinsic - the tallest item (stretch grows every item to that same
-  // height, so it can't change the max); column's cross axis (width) is
-  // simply the space available.
+  // height, so it can't change the max), or minCrossSize if
+  // align-content:stretch says this line should be taller than that;
+  // column's cross axis (width) is simply the space available.
   float lineCrossSize;
   if (isRow) {
     lineCrossSize = 0.0f;
     for (float c : crossSize) {
       lineCrossSize = std::max(lineCrossSize, c);
     }
+    lineCrossSize = std::max(lineCrossSize, minCrossSize);
   } else {
     lineCrossSize = state.maxWidth;
   }
@@ -511,23 +521,55 @@ FlexLineResult LayoutFlexLine(const Widget &widget, LayoutState &state, bool isR
   return {lineCrossSize, mainCursor};
 }
 
+// A flex line's natural (pre-stretch) cross size, without laying out or
+// painting anything - the same "tallest item" computation LayoutFlexLine
+// does internally for row (factored out here so RenderFlexContainer can
+// learn every line's size *before* committing to any of their positions,
+// which align-content needs: it has to know the total cross-axis extent
+// every line's content would naturally take up before it can decide how
+// to distribute whatever's left over). Column's is always state.maxWidth
+// (the available width - see LayoutFlexLine's identical column case),
+// though RenderFlexContainer never actually calls this for column, since
+// column never wraps into more than one line for align-content to have
+// anything to distribute among in the first place.
+float MeasureLineCrossSize(const Widget &widget, LayoutState &state, bool isRow,
+                            int startIndex, int count,
+                            const std::vector<float> &renderWidth) {
+  if (!isRow) {
+    return state.maxWidth;
+  }
+  float lineCrossSize = 0.0f;
+  for (int i = 0; i < count; ++i) {
+    int idx = startIndex + i;
+    lineCrossSize = std::max(
+        lineCrossSize,
+        MeasureItemHeightAt(widget.children[idx], state.renderer, renderWidth[idx]));
+  }
+  return lineCrossSize;
+}
+
 // A flexbox: display:flex, flex-direction, justify-content, align-items
-// (including stretch), gap, flex-grow/flex-shrink/flex-basis, and
-// flex-wrap (row direction only - column's main axis has no fixed
-// budget to wrap against, same reasoning its justify-content/grow/
-// shrink already don't apply there, see LayoutFlexLine). No CSS Grid, no
-// align-content (wrapped lines just stack in DOM order along the cross
-// axis - see the class-level comment on the FlexWrap enum in widget.h),
-// no `order` (items lay out in DOM order). Reuses the same NullRenderer
-// dry-run idiom TableWidgetHandler already established for its own grid
-// columns/rows: measure every child's natural size first, then
-// distribute/position/paint, one flex line at a time (LayoutFlexLine
+// (including stretch), align-content, gap, flex-grow/flex-shrink/
+// flex-basis, and flex-wrap (row direction only - column's main axis has
+// no fixed budget to wrap against, same reasoning its justify-content/
+// grow/shrink already don't apply there, see LayoutFlexLine; align-content
+// is a row-only, wrap-only concept too, for the same reason - see
+// MeasureLineCrossSize above and the align-content distribution below).
+// No CSS Grid, no `order` (items lay out in DOM order). Reuses the same
+// NullRenderer dry-run idiom TableWidgetHandler already established for
+// its own grid columns/rows: measure every child's natural size first,
+// then distribute/position/paint, one flex line at a time (LayoutFlexLine
 // above). Lays children out into state.x/state.y/state.maxWidth (the
 // caller - ContainerWidgetHandler::Render - has already applied this
 // container's own margin/padding/width to those by the time it calls
 // this), advancing state.y by however much cross-axis (row) or
 // main-axis (column) extent the children consumed - the same contract
-// the ordinary block-flow child loop it replaces has.
+// the ordinary block-flow child loop it replaces has. align-content only
+// ever has anything to redistribute when the container has an explicit
+// CSS height (widget.hasHeight - already resolved box-model state by
+// this point, same as the rest of Part 2) taller than what the wrapped
+// lines naturally need; an auto-height container's cross size *is* its
+// content's, with nothing left over - real CSS behaves the same way.
 void RenderFlexContainer(const Widget &widget, LayoutState &state) {
   int n = widget.childCount;
   if (n == 0) {
@@ -597,13 +639,65 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
     lines.emplace_back(lineStart, n - lineStart);
   }
 
-  // Row: accumulates each line's own cross size (+ a gap between lines,
-  // reusing the one `gap` property this engine has - no separate
-  // row-gap/column-gap) into the total cross-axis extent every line
-  // together consumed. Column: never more than one line, so this is
-  // just that single line's own main-axis extent.
+  // align-content: only meaningful for row (column never wraps into more
+  // than one line - see this function's own doc comment) and only when
+  // there's actual extra space to redistribute, i.e. an explicit CSS
+  // height taller than what the lines naturally need. Pre-measuring
+  // every line's natural cross size up front (rather than learning it
+  // line-by-line, which is what the loop below used to do as its only
+  // job) is what makes that "taller than natural" comparison possible
+  // before any line's final position is committed to.
+  std::vector<float> naturalCrossSize(lines.size(), 0.0f);
+  float leadingCross = 0.0f;
+  float betweenCrossGap = widget.gap;
+  float perLineStretch = 0.0f;
+  if (isRow) {
+    float totalNaturalCross = static_cast<float>(lines.size() - 1) * widget.gap;
+    for (size_t li = 0; li < lines.size(); ++li) {
+      naturalCrossSize[li] = MeasureLineCrossSize(widget, state, isRow, lines[li].first,
+                                                    lines[li].second, renderWidth);
+      totalNaturalCross += naturalCrossSize[li];
+    }
+
+    float extraCrossSpace =
+        widget.hasHeight ? std::max(0.0f, widget.height - totalNaturalCross) : 0.0f;
+    if (extraCrossSpace > 0.0f) {
+      switch (widget.alignContent) {
+      case AlignContent::kFlexStart:
+        break;
+      case AlignContent::kCenter:
+        leadingCross = extraCrossSpace / 2.0f;
+        break;
+      case AlignContent::kFlexEnd:
+        leadingCross = extraCrossSpace;
+        break;
+      case AlignContent::kSpaceBetween:
+        if (lines.size() > 1) {
+          betweenCrossGap =
+              widget.gap + extraCrossSpace / static_cast<float>(lines.size() - 1);
+        }
+        break;
+      case AlignContent::kSpaceAround: {
+        float perLineGap = extraCrossSpace / static_cast<float>(lines.size());
+        leadingCross = perLineGap / 2.0f;
+        betweenCrossGap = widget.gap + perLineGap;
+        break;
+      }
+      case AlignContent::kStretch:
+        perLineStretch = extraCrossSpace / static_cast<float>(lines.size());
+        break;
+      }
+    }
+  }
+
+  // Row: accumulates each line's own cross size (+ betweenCrossGap
+  // between lines - align-content:space-between/space-around's own
+  // enlarged gap, or just widget.gap otherwise) into the total
+  // cross-axis extent every line together consumed. Column: never more
+  // than one line, so this is just that single line's own main-axis
+  // extent.
   float stateYAdvance = 0.0f;
-  float crossCursor = 0.0f;
+  float crossCursor = leadingCross;
   for (size_t li = 0; li < lines.size(); ++li) {
     int startIndex = lines[li].first;
     int count = lines[li].second;
@@ -616,14 +710,15 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
       }
     }
 
+    float minCrossSize = isRow ? naturalCrossSize[li] + perLineStretch : 0.0f;
     FlexLineResult result = LayoutFlexLine(widget, state, isRow, startIndex, count,
                                             renderWidth, basis, mainAxisAvailable,
-                                            crossCursor);
+                                            crossCursor, minCrossSize);
 
     if (isRow) {
       crossCursor += result.crossSize;
       if (li + 1 < lines.size()) {
-        crossCursor += widget.gap;
+        crossCursor += betweenCrossGap;
       }
       stateYAdvance = crossCursor;
     } else {

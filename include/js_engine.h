@@ -58,7 +58,8 @@ namespace artisan {
 //   node.style.color/backgroundColor/fontWeight/borderColor/borderWidth/
 //        width/height/paddingTop/paddingRight/paddingBottom/paddingLeft/
 //        marginTop/marginRight/marginBottom/marginLeft/display/
-//        flexDirection/justifyContent/alignItems/gap/cssText
+//        flexDirection/justifyContent/alignItems/alignContent/gap/
+//        flexWrap/flexGrow/flexShrink/flexBasis/cssText
 //                                           (read/write; every property
 //                                            css.h's Declarations
 //                                            understands, camelCase -

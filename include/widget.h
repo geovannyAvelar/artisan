@@ -14,14 +14,19 @@ struct Color {
 
 // Flexbox (see widget_renderer.cpp's RenderFlexContainer, and css.h's
 // Declarations, which resolves markup's display/flex-direction/
-// justify-content/align-items/flex-grow/flex-shrink/flex-basis/
-// flex-wrap down to these) - kContainer only, same as the rest of the
-// box model. No CSS Grid, no align-content (a wrapped flex container's
-// multiple lines just stack in DOM order along the cross axis, no extra
-// distribution control over them) and flex-wrap has no effect in column
-// direction (column's main axis - height - already has no fixed budget
-// to wrap against in this flow model, same reason justify-content
+// justify-content/align-items/align-content/flex-grow/flex-shrink/
+// flex-basis/flex-wrap down to these) - kContainer only, same as the
+// rest of the box model. No CSS Grid, and flex-wrap has no effect in
+// column direction (column's main axis - height - already has no fixed
+// budget to wrap against in this flow model, same reason justify-content
 // already degenerates to flex-start there - see RenderFlexContainer).
+// align-content is likewise a no-op in column direction, for the same
+// reason (it only has anything to redistribute among when flex-wrap
+// actually produced more than one line) - and in row direction, it only
+// has anything to redistribute at all when the container has an explicit
+// CSS height taller than its wrapped lines' natural combined extent (see
+// RenderFlexContainer): an auto-height container's cross size *is* its
+// content's, with nothing left over, matching real CSS.
 // Lives here rather than in css.h because css.h already includes this
 // header (for Color, above) to avoid a circular include - not the other
 // way around.
@@ -29,6 +34,17 @@ enum class DisplayMode { kBlock, kFlex };
 enum class FlexDirection { kRow, kColumn };
 enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
 enum class AlignItems { kFlexStart, kCenter, kFlexEnd, kStretch };
+// Real CSS's default for align-content is `stretch` (see AlignContent's
+// use on Widget below for why it's fine for this enum's own default to
+// differ from that).
+enum class AlignContent {
+  kFlexStart,
+  kCenter,
+  kFlexEnd,
+  kSpaceBetween,
+  kSpaceAround,
+  kStretch,
+};
 enum class FlexWrap { kNowrap, kWrap };
 
 enum class WidgetKind {
@@ -175,15 +191,22 @@ struct Widget {
 
   // Flexbox - kContainer only. Only hasDisplay/display need a presence
   // flag (whether display:flex is even active); flexDirection/
-  // justifyContent/alignItems/gap's own defaults (kRow/kStretch/0) are
-  // already the right value to fall back to when a rule/inline style
-  // never mentioned them - same reasoning padding/margin's Widget-level
-  // fields above don't need hasXxx either.
+  // justifyContent/alignItems/alignContent/gap's own defaults (kRow/
+  // kStretch/kFlexStart/0) are already the right value to fall back to
+  // when a rule/inline style never mentioned them - same reasoning
+  // padding/margin's Widget-level fields above don't need hasXxx either.
   bool hasDisplay = false;
   DisplayMode display = DisplayMode::kBlock;
   FlexDirection flexDirection = FlexDirection::kRow;
   JustifyContent justifyContent = JustifyContent::kFlexStart;
   AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
+  // kFlexStart, not real CSS's own kStretch default: kFlexStart is
+  // exactly the "lines just stack contiguously" behavior this engine
+  // already had before align-content existed at all, so a page that
+  // never mentions the property (the overwhelming majority) keeps
+  // rendering byte-for-byte the same - only a rule that explicitly sets
+  // align-content now does anything different.
+  AlignContent alignContent = AlignContent::kFlexStart;
   float gap = 0.0f;
   FlexWrap flexWrap = FlexWrap::kNowrap;
 

@@ -555,6 +555,27 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.hasAlignItems = true;
         decl.alignItems = AlignItems::kStretch;
       }
+    } else if (property == "align-content") {
+      std::string lower = ToLower(value);
+      if (lower == "flex-start") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kFlexStart;
+      } else if (lower == "center") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kCenter;
+      } else if (lower == "flex-end") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kFlexEnd;
+      } else if (lower == "space-between") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kSpaceBetween;
+      } else if (lower == "space-around") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kSpaceAround;
+      } else if (lower == "stretch") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kStretch;
+      }
     } else if (property == "gap") {
       decl.hasGap = ParsePixelLength(value, decl.gap);
     } else if (property == "flex-wrap") {
@@ -1103,6 +1124,10 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasAlignItems = true;
     declarations.alignItems = inlineStyle.alignItems;
   }
+  if (inlineStyle.hasAlignContent) {
+    declarations.hasAlignContent = true;
+    declarations.alignContent = inlineStyle.alignContent;
+  }
   if (inlineStyle.hasGap) {
     declarations.hasGap = true;
     declarations.gap = inlineStyle.gap;
@@ -1251,6 +1276,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner paddingTopWin, paddingRightWin, paddingBottomWin, paddingLeftWin;
   PropertyWinner marginTopWin, marginRightWin, marginBottomWin, marginLeftWin;
   PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
+  PropertyWinner alignContentWin;
   PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
@@ -1362,6 +1388,11 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         alignItemsWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasAlignItems = true;
       own.alignItems = rule.declarations.alignItems;
+    }
+    if (rule.declarations.hasAlignContent &&
+        alignContentWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasAlignContent = true;
+      own.alignContent = rule.declarations.alignContent;
     }
     if (rule.declarations.hasGap && gapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGap = true;

@@ -204,6 +204,12 @@ struct Declarations {
   JustifyContent justifyContent = JustifyContent::kFlexStart;
   bool hasAlignItems = false;
   AlignItems alignItems = AlignItems::kStretch; // Real CSS flexbox's own default.
+  bool hasAlignContent = false;
+  // kFlexStart, not real CSS's kStretch default - see Widget::alignContent
+  // (widget.h) for why this engine deliberately defaults the *unset*
+  // case to matching its own pre-existing no-align-content behavior
+  // instead.
+  AlignContent alignContent = AlignContent::kFlexStart;
   bool hasGap = false;
   float gap = 0.0f;
   bool hasFlexWrap = false;

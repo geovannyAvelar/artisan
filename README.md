@@ -414,8 +414,15 @@ shorthand or the four `-top`/`-right`/`-bottom`/`-left` longhands), and,
 for `display: flex` containers, `flex-direction` (`row`/`column`),
 `justify-content` (`flex-start`/`center`/`flex-end`/`space-between`),
 `align-items` (`flex-start`/`center`/`flex-end`/`stretch` - `stretch` is
-the default, matching real CSS), `gap`, `flex-wrap` (`nowrap`/`wrap`),
-and, on a flex item itself, `flex-grow`/`flex-shrink` (unitless numbers;
+the default, matching real CSS), `align-content`
+(`flex-start`/`center`/`flex-end`/`space-between`/`space-around`/
+`stretch` - unlike real CSS, `flex-start` rather than `stretch` is this
+engine's own default for the property being *unset entirely*, so a page
+that never mentions `align-content` keeps rendering exactly as it did
+before this property existed; write `align-content: stretch` explicitly
+to get real CSS's actual default behavior), `gap`, `flex-wrap`
+(`nowrap`/`wrap`), and, on a flex item itself, `flex-grow`/`flex-shrink`
+(unitless numbers;
 default `0`/`1`, matching real CSS - items don't grow but do shrink to
 fit unless told otherwise) and `flex-basis` (px, or `auto` to fall back
 to the item's own `width`/`height` for the main axis, or its natural
@@ -433,12 +440,15 @@ the original five - see [Using JavaScript](#using-javascript).
 
 The box model and flexbox are `kContainer`-only for now (a `<div>`,
 `<p>`, `<span>`, etc. - not yet `<input>`/`<table>`/text directly).
-Flexbox itself is still bounded: no CSS Grid, no `align-content` (a
-wrapped flex container's multiple lines just stack in DOM order along
-the cross axis, no extra distribution control), `flex-wrap` has no
+Flexbox itself is still bounded: no CSS Grid, `align-content` only has
+anything to do in row direction with `flex-wrap: wrap` *and* an explicit
+CSS `height` taller than what the wrapped lines need on their own - an
+auto-height container's cross size already just is its content's, with
+nothing left over to redistribute, matching real CSS. `flex-wrap` has no
 effect in column direction (column's main axis - height - has no fixed
 budget to wrap against, same reason its `justify-content`/`flex-grow`/
-`flex-shrink` already don't apply there), and `flex-grow`/`flex-shrink`
+`flex-shrink` already don't apply there - `align-content` degenerates to
+a no-op there too, for the same reason), and `flex-grow`/`flex-shrink`
 resolve in a single pass, not the iterative min/max-width-clamping
 algorithm real CSS uses (this engine has no `min-width`/`max-width`
 property to clamp against, so a single pass is already exact). No margin
