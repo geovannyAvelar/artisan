@@ -60,6 +60,25 @@ enum class PseudoClassKind {
   kNot,
 };
 
+// `::before`/`::after` (the legacy single-colon `:before`/`:after` forms
+// parse identically - see ParsePseudoClassToken, css.cpp). Unlike every
+// PseudoClassKind above, these don't describe a *condition* an element
+// must meet to match a rule - they name which generated-content slot a
+// rule's `content` declares text for, for a given real element, an
+// entirely different kind of thing from the rest of this file's
+// selector grammar. Real CSS restricts a pseudo-element to appearing
+// only as the last component of a selector's last compound; this parser
+// doesn't reject a malformed selector that puts one elsewhere, it just
+// never looks anywhere but CompoundSelector::pseudoElement on
+// `compounds.back()` (see StyleSheet::Resolve), so one anywhere else is
+// silently inert - same non-strict-validation posture as a malformed
+// :nth-child() argument elsewhere in this file.
+enum class PseudoElementKind {
+  kNone,
+  kBefore,
+  kAfter,
+};
+
 // Declared here (defined below) so PseudoClassSelector::notArgs can
 // point to some - std::shared_ptr/vector only need a complete type
 // where they're actually dereferenced/destroyed (css.cpp), not at this
@@ -101,6 +120,13 @@ struct CompoundSelector {
   std::vector<std::string> classes; // Must all be present on the element.
   std::vector<AttributeSelector> attributes;
   std::vector<PseudoClassSelector> pseudoClasses;
+  // See PseudoElementKind above - only ever consulted on a selector's
+  // *last* compound (StyleSheet::Resolve). Doesn't add to this
+  // compound's own specificity (real CSS gives a pseudo-element
+  // type-selector-level weight; skipped here, same bounded-subset
+  // philosophy as the rest of this file's specificity model - see
+  // SpecificityOfCompound, css.cpp).
+  PseudoElementKind pseudoElement = PseudoElementKind::kNone;
 };
 
 // The live mouse/focus state a match against `:hover`/`:focus` needs -
@@ -236,6 +262,22 @@ struct Declarations {
   float flexShrink = 1.0f;
   bool hasFlexBasis = false;
   float flexBasis = 0.0f;
+
+  // `content` - only meaningful when this Declarations was resolved for
+  // a `::before`/`::after` pseudo-element (StyleSheet::Resolve's `target`
+  // parameter), where it's the literal text a synthetic kText child gets
+  // built from (widget_tree_builder.cpp's BuildChildrenInits) - real
+  // CSS's `attr()`/`counter()`/open-quote/close-quote and any other
+  // dynamic content forms aren't supported, only a plain quoted string
+  // (`content: "..."` or `'...'`) or `content: none`, which resolves to
+  // hasContent=true with an empty string - a real, cascade-competing
+  // "no content" value (able to override a lower-specificity rule's
+  // non-empty content), not the same as this property being unset
+  // entirely. A quoted value shouldn't contain a literal `;` - like the
+  // rest of this file, ParseDeclarations isn't a full CSS tokenizer, and
+  // splits a rule body on `;` without knowing to skip one inside quotes.
+  bool hasContent = false;
+  std::string content;
 };
 
 struct Rule {
@@ -264,9 +306,17 @@ public:
   // unset, not its parent's). `pseudoState` is what `:hover`/`:focus`
   // selectors match against - see PseudoClassState above; omit it (or
   // pass a default-constructed one) to resolve as if nothing is hovered
-  // or focused.
+  // or focused. `target` picks which of `node`'s selectors even compete
+  // at all: kNone (the default) considers only a selector whose last
+  // compound has no pseudo-element, i.e. resolving `node` itself, same
+  // as before this parameter existed; kBefore/kAfter instead considers
+  // only a selector targeting that pseudo-element specifically (e.g.
+  // `.card::before`), letting a caller resolve `node`'s generated
+  // content the exact same way it resolves `node` itself - see
+  // BuildChildrenInits, widget_tree_builder.cpp.
   Declarations Resolve(const Node &node, const Declarations &inherited,
-                        const PseudoClassState &pseudoState = {}) const;
+                        const PseudoClassState &pseudoState = {},
+                        PseudoElementKind target = PseudoElementKind::kNone) const;
 
 private:
   std::vector<Rule> rules_;

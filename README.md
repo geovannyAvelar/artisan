@@ -402,8 +402,41 @@ way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
 in a `<style>` block - `:hover`/`:focus`/`:focus-within` parse there too,
 but always evaluate false: those entry points have no live mouse/focus
 state to match against, unlike a `<style>` block's cascade. Not
-supported: anything beyond this bounded grammar (pseudo-elements like
-`::before`, etc).
+supported: anything beyond this bounded grammar.
+
+`::before`/`::after` (the legacy single-colon `:before`/`:after` forms
+work identically) generate text content via `content: "..."` (or
+`'...'`) - `.card::before { content: "★ "; color: gold; }` prepends a
+gold star to every `.card`; `content: none` explicitly generates
+nothing, and (being a real, cascade-competing value rather than simply
+"unset") can override a lower-specificity rule's own non-empty
+`content`. Only a plain quoted string is supported - real CSS's
+`attr()`, `counter()`, `open-quote`/`close-quote`, and every other
+dynamic content form are not. The generated text becomes a plain text
+node prepended/appended to the element's real children - it inherits
+`color`/`font-weight` from that element the same way any of its real
+text does, but (being plain text, not its own element) never has its
+own box model: `background-color`/`border-color`/width/height/padding/
+margin on a `::before`/`::after` rule are silently inert, the same
+limitation a bare text node always has (see the box model paragraph
+below). A pseudo-element combines with a pseudo-class on the same
+compound normally (`.tab:hover::after { content: " ▾"; }`), but a
+`:hover`-only `content`/`color` change on a *single-line* element (the
+only kind whose own `:hover`/`:focus-within` hit region this renderer
+computes at all - see below) that shifts its `color` away from that
+element's own real text can make its hit region disappear the instant
+it's hovered (this flow model hard-breaks a line wherever its text
+color changes, mid-element or not, and a hit region is only ever
+computed for a still-single-line element after that element finishes
+rendering) - which then immediately un-hovers it next frame, flickering
+indefinitely. Keep a `:hover`-triggered `::before`/`::after`'s `color`
+matching its element's own to avoid this; only `content` and other
+non-color properties changing under `:hover` are unaffected. `::before`/
+`::after` only apply to elements built via the normal nested-children
+path (`<div>`, `<span>`, `<li>`, headings, `<td>`/`<th>`, ...) - not
+`<button>`/`<a>`/`<label>`/`<input>`, whose content is flattened to a
+single string at a different point in the pipeline that generated
+content isn't wired into.
 `:hover`/`:focus`/`:focus-within` styling also only reaches elements the
 renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, block-level

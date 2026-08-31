@@ -186,6 +186,22 @@ bool ParseNthArg(const std::string &arg, int *outA, int *outB) {
 // this bounded grammar supports.
 void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector) {
   std::string lower = ToLower(token);
+  // `::before`/`::after` tokenize identically to a single-colon
+  // `:before`/`:after` by the time either reaches here - the first `:`
+  // of a `::` pair produces its own, separate empty token that
+  // ParseCompoundSelector's caller already discards before ever calling
+  // this function (see its own comment) - so this one check handles
+  // both forms. Unlike everything else in this function, this sets
+  // CompoundSelector::pseudoElement, not a PseudoClassSelector - see
+  // PseudoElementKind (css.h) for why that's a different kind of thing.
+  if (lower == "before") {
+    selector.pseudoElement = PseudoElementKind::kBefore;
+    return;
+  }
+  if (lower == "after") {
+    selector.pseudoElement = PseudoElementKind::kAfter;
+    return;
+  }
   PseudoClassSelector pc;
   if (lower == "first-child") {
     pc.kind = PseudoClassKind::kFirstChild;
@@ -666,6 +682,22 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.hasFlexBasis = false;
       } else {
         decl.hasFlexBasis = ParsePixelLength(value, decl.flexBasis);
+      }
+    } else if (property == "content") {
+      // Only a plain quoted string or `none` - real CSS's attr()/
+      // counter()/open-quote/close-quote and any other dynamic content
+      // form are all unsupported, same bounded-subset philosophy as the
+      // rest of this parser (see Declarations::content, css.h, for why
+      // `none` still sets hasContent rather than leaving it unset).
+      std::string trimmed = Trim(value);
+      if (ToLower(trimmed) == "none") {
+        decl.hasContent = true;
+        decl.content.clear();
+      } else if (trimmed.size() >= 2 &&
+                 (trimmed.front() == '"' || trimmed.front() == '\'') &&
+                 trimmed.back() == trimmed.front()) {
+        decl.hasContent = true;
+        decl.content = trimmed.substr(1, trimmed.size() - 2);
       }
     }
     // Any other property is silently ignored, same as a browser skipping
@@ -1382,10 +1414,12 @@ StyleSheet StyleSheet::Parse(const std::string &css) {
 }
 
 Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited,
-                                  const PseudoClassState &pseudoState) const {
+                                  const PseudoClassState &pseudoState,
+                                  PseudoElementKind target) const {
   Declarations own;
 
   PropertyWinner colorWin, boldWin, bgWin, borderColorWin, borderWidthWin;
+  PropertyWinner contentWin;
   PropertyWinner widthWin, heightWin;
   PropertyWinner paddingTopWin, paddingRightWin, paddingBottomWin, paddingLeftWin;
   PropertyWinner marginTopWin, marginRightWin, marginBottomWin, marginLeftWin;
@@ -1399,6 +1433,17 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
 
     int matchedSpecificity = -1;
     for (const Selector &selector : rule.selectors) {
+      // A selector's pseudo-element (if any) only ever lives on its last
+      // compound (see PseudoElementKind, css.h) - a selector targeting
+      // something other than what this call is resolving for doesn't
+      // compete at all, the same way a selector for a completely
+      // different tag/class wouldn't.
+      PseudoElementKind selectorTarget = selector.compounds.empty()
+                                              ? PseudoElementKind::kNone
+                                              : selector.compounds.back().pseudoElement;
+      if (selectorTarget != target) {
+        continue;
+      }
       if (MatchesChain(selector, node, pseudoState)) {
         matchedSpecificity = std::max(matchedSpecificity, Specificity(selector));
       }
@@ -1531,6 +1576,11 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         flexBasisWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasFlexBasis = true;
       own.flexBasis = rule.declarations.flexBasis;
+    }
+    if (rule.declarations.hasContent &&
+        contentWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasContent = true;
+      own.content = rule.declarations.content;
     }
   }
 

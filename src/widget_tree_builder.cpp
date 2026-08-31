@@ -577,6 +577,24 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
                                         const Declarations &inheritedStyle) {
   std::vector<Widget> inits;
 
+  // ::before - a synthetic kText child inserted ahead of `parent`'s real
+  // children, built exactly like a real text node would be (MakeText),
+  // just from CSS-generated text instead of markup. `inheritedStyle` is
+  // `parent`'s own already-resolved style (see this function's callers -
+  // every one of them passes the Declarations it just resolved for the
+  // element that owns these children, not some more distant ancestor's),
+  // exactly the base a `::before`/`::after` should inherit color/
+  // font-weight from in real CSS. Only text-level styling ever paints -
+  // this becomes a plain kText widget, which (like any bare text node -
+  // see widget.h) never gets its own box model, so background/border/
+  // width/height/margin/padding on a `::before`/`::after` rule are
+  // silently inert, not a bug.
+  Declarations beforeStyle =
+      sheet.Resolve(parent, inheritedStyle, pseudoState, PseudoElementKind::kBefore);
+  if (beforeStyle.hasContent && !beforeStyle.content.empty()) {
+    inits.push_back(MakeText(tree, beforeStyle.content, fontSize, beforeStyle));
+  }
+
   for (const auto &childPtr : parent.children()) {
     const Node &child = *childPtr;
 
@@ -655,6 +673,14 @@ std::vector<Widget> BuildChildrenInits(const Node &parent, WidgetTree &tree,
                                      IsBlockTag(tag), focus, pseudoState,
                                      sheet, style));
     }
+  }
+
+  // ::after - same as ::before above, just appended once `parent`'s real
+  // children are all in place.
+  Declarations afterStyle =
+      sheet.Resolve(parent, inheritedStyle, pseudoState, PseudoElementKind::kAfter);
+  if (afterStyle.hasContent && !afterStyle.content.empty()) {
+    inits.push_back(MakeText(tree, afterStyle.content, fontSize, afterStyle));
   }
 
   return inits;
