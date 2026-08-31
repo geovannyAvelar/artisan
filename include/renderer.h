@@ -18,6 +18,12 @@ class IRenderer {
 public:
   virtual ~IRenderer() = default;
 
+  // `y` is the top of the text's line box - the same convention every
+  // other Draw* method here uses for its own top edge (and that callers
+  // already use for state.y in widget_renderer.cpp), not a font baseline.
+  // Implementations that paint via a baseline-relative API are
+  // responsible for converting internally, using real font metrics
+  // rather than an approximation.
   virtual void DrawText(const std::string &text, float x, float y,
                          float fontSize, bool bold, const Color &color) = 0;
 

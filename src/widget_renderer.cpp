@@ -1113,8 +1113,8 @@ public:
 
     if (!label.empty()) {
       Color textColor = widget.hasColor ? widget.color : kDefaultTextColor;
-      state.renderer.DrawText(label, textX, textY + widget.fontSize,
-                               widget.fontSize, widget.bold, textColor);
+      state.renderer.DrawText(label, textX, textY, widget.fontSize,
+                               widget.bold, textColor);
     }
 
     if (widget.cursorPos >= 0 && !hasSelection) {
@@ -1191,7 +1191,7 @@ void RenderTextLikeBox(const Widget &widget, LayoutState &state,
 
   if (!label.empty()) {
     Color color = widget.hasColor ? widget.color : kDefaultTextColor;
-    state.renderer.DrawText(label, textX, textY + widget.fontSize,
+    state.renderer.DrawText(label, textX, textY,
                              widget.fontSize, widget.bold, color);
     if (underline) {
       state.renderer.DrawFilledRect(textX, textY + lineHeight - kLinkUnderlineHeight,

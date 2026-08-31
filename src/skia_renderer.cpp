@@ -6,6 +6,7 @@
 #include "include/codec/SkWebpDecoder.h"
 #include "include/core/SkData.h"
 #include "include/core/SkFont.h"
+#include "include/core/SkFontMetrics.h"
 #include "include/core/SkFontMgr.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkPaint.h"
@@ -61,8 +62,16 @@ void SkiaRenderer::DrawText(const std::string &text, float x, float y,
   paint.setColor(SkColorSetRGB(color.r, color.g, color.b));
   paint.setAntiAlias(true);
 
-  canvas_->drawString(text.c_str(), x, y,
-                       MakeFont(TypefaceFor(bold), fontSize), paint);
+  SkFont font = MakeFont(TypefaceFor(bold), fontSize);
+
+  // IRenderer::DrawText's `y` is the top of the text's line box, but
+  // Skia's drawString takes a baseline - fAscent is the (typically
+  // negative) distance from baseline to the top of the font's em box, so
+  // subtracting it moves top-of-line down to the baseline.
+  SkFontMetrics metrics;
+  font.getMetrics(&metrics);
+
+  canvas_->drawString(text.c_str(), x, y - metrics.fAscent, font, paint);
 }
 
 float SkiaRenderer::MeasureText(const std::string &text, float fontSize,
