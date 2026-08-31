@@ -366,10 +366,16 @@ specifically for the `class` attribute, `[href^="https://"]` prefix,
 `[href$=".pdf"]` suffix, `[href*="example"]` substring anywhere - no
 case-insensitive `i` flag, and no `|=` dash-match, a rare enough
 operator to leave out of this bounded grammar), structural
-pseudo-classes (`:first-child`, `:last-child`,
-`:nth-child(2)`, `:nth-child(even)`/`:nth-child(odd)` - literal
-integers and the even/odd keywords only, not the full `an+b` algebra),
-and the two interactive pseudo-classes, `:hover` and `:focus` - a
+pseudo-classes (`:first-child`, `:last-child`, `:nth-child(2)`,
+`:nth-child(even)`/`:nth-child(odd)`, and `:nth-of-type` with the same
+argument grammar - literal integers and the even/odd keywords only, not
+the full `an+b` algebra. `:nth-of-type` counts only same-tag siblings
+- `p:nth-of-type(2)` is the second `<p>` among its siblings, whatever
+else is mixed in between; `:nth-child` counts every element sibling
+regardless of tag. There's no separate `:first-of-type`/`:last-of-type`
+- write `:nth-of-type(1)` for the former; there's no general "last" form
+without the full `an+b` algebra), and the two interactive pseudo-classes,
+`:hover` and `:focus` - a
 `<style>` block rule like `.card:hover { background-color: ... }` or
 `#name:focus { border-color: ... }` re-resolves live as the mouse moves
 or focus changes, same as real CSS, including `:hover` bubbling to
@@ -380,7 +386,7 @@ way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
 in a `<style>` block - `:hover`/`:focus` parse there too, but always
 evaluate false: those entry points have no live mouse/focus state to
 match against, unlike a `<style>` block's cascade. Not supported:
-anything beyond this bounded grammar (`:nth-of-type`, `|=`, `:focus-within`,
+anything beyond this bounded grammar (`|=`, `:focus-within`, `:not()`,
 etc). `:hover`/`:focus` styling
 also only reaches elements the renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level

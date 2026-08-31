@@ -39,11 +39,23 @@ struct AttributeSelector {
   AttributeOperator op = AttributeOperator::kEquals;
 };
 
-enum class PseudoClassKind { kFirstChild, kLastChild, kNthChild, kHover, kFocus };
+enum class PseudoClassKind {
+  kFirstChild,
+  kLastChild,
+  kNthChild,
+  kNthOfType,
+  kHover,
+  kFocus,
+};
 
-// nthA/nthB implement "an+b" - :nth-child(2) is {a=0, b=2};
-// :nth-child(even)/:nth-child(odd) are {a=2, b=0}/{a=2, b=1}. Only used
-// when kind == kNthChild.
+// nthA/nthB implement "an+b" - :nth-child(2)/:nth-of-type(2) are
+// {a=0, b=2}; the "even"/"odd" keyword forms are {a=2, b=0}/{a=2, b=1}.
+// Only used when kind is kNthChild or kNthOfType. The two differ in what
+// they count: kNthChild's index/count are among *all* element siblings;
+// kNthOfType's are among only the siblings that share this element's own
+// tag name (real CSS semantics - `p:nth-of-type(2)` is the second `<p>`
+// among its siblings, not the second element overall) - see
+// MatchesPseudoClass in css.cpp for where that split actually happens.
 struct PseudoClassSelector {
   PseudoClassKind kind;
   int nthA = 0;

@@ -154,13 +154,36 @@ bool ParseLengthOrPercent(const std::string &raw, float &outValue,
   return ParsePixelLength(value, outValue);
 }
 
+// Parses an nth-*() argument - a literal integer, or the "even"/"odd"
+// keywords - into (nthA, nthB), the same v1 grammar nth-child and
+// nth-of-type both share (not the full "an+b" algebra). Returns false
+// (leaving *outA/*outB untouched) for anything else.
+bool ParseNthArg(const std::string &arg, int *outA, int *outB) {
+  if (arg == "even") {
+    *outA = 2;
+    *outB = 0;
+    return true;
+  }
+  if (arg == "odd") {
+    *outA = 2;
+    *outB = 1;
+    return true;
+  }
+  try {
+    *outA = 0;
+    *outB = std::stoi(arg);
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
 // Parses a pseudo-class token (the text after ':', e.g. "first-child",
-// "nth-child(2)", "nth-child(even)", "hover", "focus") and appends it to
-// `selector` - silently ignored (matching this file's "skip what we
-// don't understand" philosophy elsewhere, e.g. ParseDeclarations) if it
-// isn't one of the pseudo-classes this bounded grammar supports.
-// nth-child's v1 grammar: a literal integer, or the "even"/"odd"
-// keywords - not the full "an+b" algebra.
+// "nth-child(2)", "nth-child(even)", "nth-of-type(3)", "hover", "focus")
+// and appends it to `selector` - silently ignored (matching this file's
+// "skip what we don't understand" philosophy elsewhere, e.g.
+// ParseDeclarations) if it isn't one of the pseudo-classes this bounded
+// grammar supports.
 void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector) {
   std::string lower = ToLower(token);
   PseudoClassSelector pc;
@@ -176,19 +199,15 @@ void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector)
              lower.back() == ')') {
     std::string arg = Trim(lower.substr(10, lower.size() - 10 - 1));
     pc.kind = PseudoClassKind::kNthChild;
-    if (arg == "even") {
-      pc.nthA = 2;
-      pc.nthB = 0;
-    } else if (arg == "odd") {
-      pc.nthA = 2;
-      pc.nthB = 1;
-    } else {
-      try {
-        pc.nthA = 0;
-        pc.nthB = std::stoi(arg);
-      } catch (const std::exception &) {
-        return;
-      }
+    if (!ParseNthArg(arg, &pc.nthA, &pc.nthB)) {
+      return;
+    }
+  } else if (lower.rfind("nth-of-type(", 0) == 0 && !lower.empty() &&
+             lower.back() == ')') {
+    std::string arg = Trim(lower.substr(12, lower.size() - 12 - 1));
+    pc.kind = PseudoClassKind::kNthOfType;
+    if (!ParseNthArg(arg, &pc.nthA, &pc.nthB)) {
+      return;
     }
   } else {
     return;
@@ -525,14 +544,23 @@ Declarations ParseDeclarations(const std::string &body) {
   return decl;
 }
 
+// Whether `index` (1-based) satisfies nth-child/nth-of-type's "an+b"
+// v1 grammar (a literal index, or the even/odd keywords - see
+// ParseNthArg). nthA == 0 means a literal index (match that one
+// position only); otherwise nthA is always 2 (even/odd) - both
+// non-negative, so plain modulo is safe here (no negative-operand sign
+// concerns a general "an+b" would have to worry about).
+bool MatchesNth(const PseudoClassSelector &pc, int index) {
+  return pc.nthA == 0 ? index == pc.nthB : (index % pc.nthA) == pc.nthB;
+}
+
 // Whether `node` is at the position `pc` describes among its parent's
 // *element* siblings (1-based - real CSS's :nth-child counts only
 // element children). A node with no parent (root/detached) is treated
 // as its own only sibling, so :first-child/:last-child/:nth-child(1)
 // all vacuously match it - same as real CSS resolves an unparented
 // element. `state` supplies what :hover/:focus need (see
-// PseudoClassState, css.h) - the other three kinds ignore it entirely,
-// same as they always have.
+// PseudoClassState, css.h) - the other kinds ignore it entirely.
 bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
                          const PseudoClassState &state) {
   if (pc.kind == PseudoClassKind::kHover) {
@@ -552,6 +580,34 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
     // own (that's :focus-within, a separate pseudo-class not implemented
     // here) - only the exact focused node matches.
     return state.focused == &node;
+  }
+  if (pc.kind == PseudoClassKind::kNthOfType) {
+    // Same shape as the kFirstChild/kLastChild/kNthChild counting below,
+    // but counting only same-tag siblings - `p:nth-of-type(2)` is the
+    // second <p> among its siblings, not the second element overall,
+    // real CSS's actual definition (unlike :nth-child, there's no
+    // separate :first-of-type/:last-of-type here, just this one).
+    const Node *parent = node.parent();
+    int index = 1;
+    if (parent != nullptr) {
+      index = 0;
+      int typeCount = 0;
+      for (const auto &siblingPtr : parent->children()) {
+        const Node *sibling = siblingPtr.get();
+        if (sibling->type() != NodeType::kElement ||
+            sibling->tagName() != node.tagName()) {
+          continue;
+        }
+        ++typeCount;
+        if (sibling == &node) {
+          index = typeCount;
+        }
+      }
+      if (index == 0) {
+        return false;
+      }
+    }
+    return MatchesNth(pc, index);
   }
 
   const Node *parent = node.parent();
@@ -585,14 +641,12 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
   case PseudoClassKind::kLastChild:
     return index == elementCount;
   case PseudoClassKind::kNthChild:
-    // v1 grammar only ever produces nthA == 0 (a literal index) or
-    // nthA == 2 (even/odd) - both non-negative, so plain modulo is safe
-    // (no negative-operand sign concerns a general "an+b" would have).
-    return pc.nthA == 0 ? index == pc.nthB : (index % pc.nthA) == pc.nthB;
+    return MatchesNth(pc, index);
+  case PseudoClassKind::kNthOfType:
   case PseudoClassKind::kHover:
   case PseudoClassKind::kFocus:
-    // Handled by the two early returns above - unreachable here, but
-    // listed so this switch stays exhaustive (no -Wswitch warning) as
+    // Handled by the early returns above - unreachable here, but listed
+    // so this switch stays exhaustive (no -Wswitch warning) as
     // PseudoClassKind grows.
     return false;
   }
