@@ -1188,17 +1188,63 @@ public:
       return;
     }
 
+    if (!suppressSpacing) {
+      state.y += kBlockSpacing;
+    }
+
+    // Margin: outside the table's own border box, same semantics as
+    // ContainerWidgetHandler's - the table (unlike a kContainer) still
+    // only ever shrinks to fit its grid's content, never stretches to
+    // fill boxMaxWidth on its own, so an explicit width is the only way
+    // to make it wider than its natural content (see outerWidth below).
+    const float boxX = state.x + table.marginLeft;
+    float boxMaxWidth =
+        std::max(0.0f, state.maxWidth - table.marginLeft - table.marginRight);
+    state.y += table.marginTop;
+    const float boxTopY = state.y;
+
+    if (table.hasWidth) {
+      float resolvedWidth = table.widthIsPercent
+                                 ? state.maxWidth * table.width / 100.0f
+                                 : table.width;
+      boxMaxWidth = std::min(boxMaxWidth, std::max(0.0f, resolvedWidth));
+    }
+
+    // Padding: inside the border box, insetting the whole grid (every
+    // column/row offset below is relative to this, not to boxX/boxTopY
+    // directly). Unlike the table itself, a <caption> (rendered earlier,
+    // as plain inline text at the original state.x) isn't inset by this -
+    // real CSS treats a caption as part of the table box, but folding it
+    // into this margin/padding treatment too is a bigger change than this
+    // pass makes; caption positioning is unchanged from before.
+    const float contentMaxWidth =
+        std::max(0.0f, boxMaxWidth - table.paddingLeft - table.paddingRight);
+
     // Column width = widest single-column cell's natural (unwrapped, up to
-    // the page width) content width, plus padding, across every row.
+    // the available content width) content width plus that cell's own
+    // padding (kCellPadding's intrinsic default plus whatever CSS adds -
+    // same "add on top" contract kBox's own padding has), across every
+    // row - or, if a cell sets an explicit width, that outright instead
+    // of its measured content width (real CSS: an author width always
+    // wins over shrink-to-fit).
     std::vector<float> columnWidths(columnCount, kCellMinWidth);
     for (int r = 0; r < table.childCount; ++r) {
       for (const PlacedCell &placed : grid.row(r)) {
         if (std::max(1, placed.cell->colSpan) != 1) {
           continue;
         }
-        float width = MeasureNaturalWidth(*placed.cell, state.renderer,
-                                           state.maxWidth) +
-                       2.0f * kCellPadding;
+        float padLeft = kCellPadding + placed.cell->paddingLeft;
+        float padRight = kCellPadding + placed.cell->paddingRight;
+        float width;
+        if (placed.cell->hasWidth) {
+          width = placed.cell->widthIsPercent
+                      ? contentMaxWidth * placed.cell->width / 100.0f
+                      : placed.cell->width;
+        } else {
+          width = MeasureNaturalWidth(*placed.cell, state.renderer,
+                                       contentMaxWidth) +
+                  padLeft + padRight;
+        }
         columnWidths[placed.col] = std::max(columnWidths[placed.col], width);
       }
     }
@@ -1211,9 +1257,18 @@ public:
         if (colSpan <= 1) {
           continue;
         }
-        float needed = MeasureNaturalWidth(*placed.cell, state.renderer,
-                                            state.maxWidth) +
-                        2.0f * kCellPadding;
+        float padLeft = kCellPadding + placed.cell->paddingLeft;
+        float padRight = kCellPadding + placed.cell->paddingRight;
+        float needed;
+        if (placed.cell->hasWidth) {
+          needed = placed.cell->widthIsPercent
+                       ? contentMaxWidth * placed.cell->width / 100.0f
+                       : placed.cell->width;
+        } else {
+          needed = MeasureNaturalWidth(*placed.cell, state.renderer,
+                                        contentMaxWidth) +
+                   padLeft + padRight;
+        }
 
         float available = 0.0f;
         for (int c = placed.col; c < placed.col + colSpan; ++c) {
@@ -1229,20 +1284,21 @@ public:
       }
     }
 
-    // Natural width is measured per cell against the full page width, with
-    // no idea how many other columns need to share that space - so the
-    // total can easily exceed what's actually available. Scale every
-    // column down proportionally to fit rather than overflowing the page;
+    // Natural width is measured per cell against the available content
+    // width, with no idea how many other columns need to share that space
+    // - so the total can easily exceed what's actually available. Scale
+    // every column down proportionally to fit rather than overflowing;
     // MeasureHeightAt below then wraps each cell to its real, final width.
     float totalWidth = 0.0f;
     for (float width : columnWidths) {
       totalWidth += width;
     }
-    if (totalWidth > state.maxWidth) {
-      float scale = state.maxWidth / totalWidth;
+    if (totalWidth > contentMaxWidth) {
+      float scale = contentMaxWidth / totalWidth;
       for (float &width : columnWidths) {
         width *= scale;
       }
+      totalWidth = contentMaxWidth;
     }
 
     std::vector<float> columnX(columnCount);
@@ -1257,6 +1313,9 @@ public:
     // rowspan cell is excluded here (see below) - it's sized from summing
     // the rows it crosses instead, so only unusually tall rowspan content
     // can still overflow past them, which this simplified model accepts.
+    // A cell's explicit height (like width above) is a floor over its
+    // natural content height, never a shrink - there's no wrapping left to
+    // reclaim space from once a column's width is already fixed.
     std::vector<float> rowHeights(table.childCount, kCellMinHeight);
     for (int r = 0; r < table.childCount; ++r) {
       for (const PlacedCell &placed : grid.row(r)) {
@@ -1270,10 +1329,17 @@ public:
           cellWidth += columnWidths[c];
         }
 
+        float padTop = kCellPadding + placed.cell->paddingTop;
+        float padBottom = kCellPadding + placed.cell->paddingBottom;
+        float padLeft = kCellPadding + placed.cell->paddingLeft;
+        float padRight = kCellPadding + placed.cell->paddingRight;
         float height = MeasureHeightAt(*placed.cell, state.renderer,
-                                        std::max(0.0f, cellWidth -
-                                                            2.0f * kCellPadding)) +
-                        2.0f * kCellPadding;
+                                        std::max(0.0f, cellWidth - padLeft -
+                                                            padRight)) +
+                        padTop + padBottom;
+        if (placed.cell->hasHeight) {
+          height = std::max(height, placed.cell->height);
+        }
         rowHeights[r] = std::max(rowHeights[r], height);
       }
     }
@@ -1286,9 +1352,32 @@ public:
     }
     float tableHeight = y;
 
-    if (!suppressSpacing) {
-      state.y += kBlockSpacing;
+    // The table's own border/background box - shrinks to fit the grid's
+    // actual content width (like kBox/kLink, not kContainer's fill-
+    // available default) unless an explicit width says otherwise, per
+    // the comment on boxMaxWidth above.
+    float outerWidth = table.hasWidth
+                            ? boxMaxWidth
+                            : std::min(boxMaxWidth, totalWidth +
+                                                         table.paddingLeft +
+                                                         table.paddingRight);
+    float naturalOuterHeight =
+        tableHeight + table.paddingTop + table.paddingBottom;
+    float outerHeight = table.hasHeight
+                             ? std::max(naturalOuterHeight, table.height)
+                             : naturalOuterHeight;
+
+    if (table.hasBackgroundColor) {
+      state.renderer.DrawFilledRect(boxX, boxTopY, outerWidth, outerHeight,
+                                     table.backgroundColor);
     }
+    if (table.hasBorderColor) {
+      state.renderer.DrawRect(boxX, boxTopY, outerWidth, outerHeight,
+                               table.borderWidth, table.borderColor);
+    }
+
+    const float gridX = boxX + table.paddingLeft;
+    const float gridY = boxTopY + table.paddingTop;
 
     for (int r = 0; r < table.childCount; ++r) {
       for (const PlacedCell &placed : grid.row(r)) {
@@ -1302,8 +1391,12 @@ public:
         }
         float cellHeight = rowY[endRow - 1] + rowHeights[endRow - 1] - rowY[r];
 
-        float cellX = state.x + columnX[placed.col];
-        float cellY = state.y + rowY[r];
+        float cellX = gridX + columnX[placed.col];
+        float cellY = gridY + rowY[r];
+
+        float padTop = kCellPadding + placed.cell->paddingTop;
+        float padLeft = kCellPadding + placed.cell->paddingLeft;
+        float padRight = kCellPadding + placed.cell->paddingRight;
 
         if (placed.cell->hasBackgroundColor) {
           state.renderer.DrawFilledRect(cellX, cellY, cellWidth, cellHeight,
@@ -1314,13 +1407,14 @@ public:
                                      : kDefaultBorderColor;
         state.renderer.DrawRect(cellX, cellY, cellWidth, cellHeight,
                                  placed.cell->borderWidth, cellBorderColor);
-        RenderContentAt(*placed.cell, state.renderer, cellX + kCellPadding,
-                         cellY + kCellPadding,
-                         std::max(0.0f, cellWidth - 2.0f * kCellPadding));
+        RenderContentAt(*placed.cell, state.renderer, cellX + padLeft,
+                         cellY + padTop,
+                         std::max(0.0f, cellWidth - padLeft - padRight));
       }
     }
 
-    state.y += tableHeight;
+    state.y = boxTopY + outerHeight;
+    state.y += table.marginBottom;
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }

@@ -445,22 +445,39 @@ camelCase property (`style.paddingTop`, `style.flexGrow`, ...), same as
 the original five - see [Using JavaScript](#using-javascript).
 
 The box model and flexbox reach `kContainer` (`<div>`, `<p>`, `<span>`,
-etc.), `<input>`/`<button>`/checkbox/radio, and `<a>`/`<label>`; still
-not `<table>`/text directly. A text `<input>`/`<button>` has its own
-built-in default padding (independent of CSS) so it stays usable
-unstyled - `padding` on one of these *adds* to that default rather than
-replacing it, unlike `kContainer`/`<a>`/`<label>` where unset padding is
-genuinely zero (a link/label isn't a boxy control with a built-in inset
-of its own). Explicit `width`/`height` on any of these overrides their
-normal content-driven (shrink-to-fit label) sizing outright, the same as
-on a `kContainer`, and all participate correctly as flex items
-(`flex-grow`/`flex-shrink`/`align-items: stretch` all resize them, not
-just a `kContainer` child). `background-color`/`border-color`/
-`border-width` now paint on `<a>`/`<label>` too - a link's underline is
-drawn inside its padding box, same relative position as before this
-existed. A checkbox/radio's fixed-size indicator only honors `margin` -
-its width/height/padding aren't meaningful for a native-style toggle
-glyph.
+etc.), `<input>`/`<button>`/checkbox/radio, `<a>`/`<label>`, and
+`<table>`/`<td>`/`<th>`; still not `kText`/`<hr>`/`<img>` directly. A
+text `<input>`/`<button>` (and a table cell's own `padding`, see below)
+has its own built-in default padding (independent of CSS) so it stays
+usable unstyled - `padding` on one of these *adds* to that default
+rather than replacing it, unlike `kContainer`/`<a>`/`<label>`/`<table>`
+where unset padding is genuinely zero (none of those is a boxy control
+with a built-in inset of its own). Explicit `width`/`height` on any of
+these overrides their normal content-driven (shrink-to-fit label)
+sizing outright, the same as on a `kContainer`, and all participate
+correctly as flex items (`flex-grow`/`flex-shrink`/`align-items: stretch`
+all resize them, not just a `kContainer` child). `background-color`/
+`border-color`/`border-width` now paint on `<a>`/`<label>`/`<table>`
+too - a link's underline is drawn inside its padding box, same relative
+position as before this existed. A checkbox/radio's fixed-size indicator
+only honors `margin` - its width/height/padding aren't meaningful for a
+native-style toggle glyph.
+
+A `<table>`'s own box model works like `<a>`/`<label>`'s: it shrinks to
+fit its grid's actual content width rather than filling available space
+like a `kContainer` does, so an explicit `width` wider than the grid's
+natural content leaves visible empty space inside the border rather than
+stretching columns to fill it (real browsers redistribute the extra
+width across columns instead - out of scope here). A `<td>`/`<th>`'s own
+explicit `width`/`height` becomes a floor for its whole column/row (every
+cell sharing that column/row is sized to match, same as real HTML table
+layout), and a spanning cell's explicit width is honored too, distributed
+across the columns it crosses exactly like its natural content width
+already was. A cell's `margin` has no effect (matching real CSS - margin
+doesn't apply to table cells); a `<table>`'s own `margin` does. A
+`<caption>` is unaffected by any of this - it still renders as plain
+text above the grid, at the table's original position rather than inside
+its margin/padding/border box, a simplification real CSS doesn't make.
 Flexbox itself is still bounded: no CSS Grid, `align-content` only has
 anything to do in row direction with `flex-wrap: wrap` *and* an explicit
 CSS `height` taller than what the wrapped lines need on their own - an
