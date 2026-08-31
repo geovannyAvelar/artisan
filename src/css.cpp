@@ -155,25 +155,35 @@ bool ParseLengthOrPercent(const std::string &raw, float &outValue,
 }
 
 // Parses a grid-template-columns/rows track list - space-separated
-// tokens, each either a plain pixel length (bare number or "...px") or
-// an "Nfr" fractional unit (e.g. "2fr") - see GridTrack (widget.h) for
-// what each becomes. Real CSS's repeat()/minmax()/auto/percentage
-// tracks and named lines aren't supported. A token matching neither
-// form is silently skipped rather than failing the whole list, same
-// "parse whatever we understand" posture ParseDeclarations already has
-// for an unrecognized property - so a list mixing a supported and an
-// unsupported token still produces however many tracks it can. Returns
-// false (leaving `out` untouched) only when nothing in `raw` parsed to
-// a single valid track.
+// tokens, each a plain pixel length (bare number or "...px"), an "Nfr"
+// fractional unit (e.g. "2fr"), or the `min-content`/`max-content`
+// keywords - see GridTrack (widget.h) for what each becomes. Real CSS's
+// repeat()/minmax()/auto/percentage tracks and named lines aren't
+// supported. A token matching none of these forms is silently skipped
+// rather than failing the whole list, same "parse whatever we
+// understand" posture ParseDeclarations already has for an unrecognized
+// property - so a list mixing a supported and an unsupported token
+// still produces however many tracks it can. Returns false (leaving
+// `out` untouched) only when nothing in `raw` parsed to a single valid
+// track.
 bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
   std::vector<GridTrack> tracks;
   std::istringstream tokens(raw);
   std::string token;
   while (tokens >> token) {
     std::string lower = ToLower(token);
+    if (lower == "min-content") {
+      tracks.push_back({GridTrackKind::kMinContent, 0.0f});
+      continue;
+    }
+    if (lower == "max-content") {
+      tracks.push_back({GridTrackKind::kMaxContent, 0.0f});
+      continue;
+    }
     if (lower.size() >= 3 && lower.substr(lower.size() - 2) == "fr") {
       try {
-        tracks.push_back({true, std::stof(lower.substr(0, lower.size() - 2))});
+        tracks.push_back(
+            {GridTrackKind::kFraction, std::stof(lower.substr(0, lower.size() - 2))});
       } catch (const std::exception &) {
         // Not a valid "Nfr" token - skip it.
       }
@@ -181,7 +191,7 @@ bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
     }
     float px;
     if (ParsePixelLength(token, px)) {
-      tracks.push_back({false, px});
+      tracks.push_back({GridTrackKind::kFixed, px});
     }
   }
   if (tracks.empty()) {

@@ -918,32 +918,80 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   }
 
   // Column widths: a fixed (px) track takes its own value outright; a
-  // fractional (fr) track shares whatever's left after every fixed
-  // track and gap is subtracted, proportionally to its own fr count -
-  // the same leftover-space-by-weight idea flex-grow already uses for
-  // item sizing (LayoutFlexLine above), just applied to track sizing.
-  // Falls back to equal-width columns whenever grid-template-columns
-  // doesn't name exactly `columnCount` tracks - either because it's
-  // unset entirely (the pre-named-areas single-full-width-column
-  // behavior is just this formula's columnCount == 1 case), or an area
-  // template implies a column count it doesn't match.
+  // min-content/max-content track sizes to the narrowest/widest any
+  // single-column-span cell actually placed in it would be (measured
+  // below, via MeasureItemFitContentWidth - cap 0 forces every word
+  // onto its own "line" during that dry run, so the widest such line it
+  // reports back is exactly the widest unbreakable word, i.e.
+  // min-content; an effectively-infinite cap instead reports the width
+  // with no wrapping at all, i.e. max-content - the same function
+  // already used for a flex/non-stretched-grid item's own fit-content
+  // width, just fed a different cap); a fractional (fr) track shares
+  // whatever's left after every fixed/min-content/max-content track and
+  // gap is subtracted, proportionally to its own fr count - the same
+  // leftover-space-by-weight idea flex-grow already uses for item
+  // sizing (LayoutFlexLine above), just applied to track sizing. Falls
+  // back to equal-width columns whenever grid-template-columns doesn't
+  // name exactly `columnCount` tracks - either because it's unset
+  // entirely (the pre-named-areas single-full-width-column behavior is
+  // just this formula's columnCount == 1 case), or an area template
+  // implies a column count it doesn't match.
   float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
   std::vector<float> columnWidths(columnCount);
   if (static_cast<int>(widget.gridTemplateColumns.size()) == columnCount) {
+    // Min-content/max-content columns first, from actual cell content -
+    // single-column-span placements only (a spanning item doesn't
+    // contribute here, the same base-pass-excludes-spans shape the row
+    // heights' own measurement below uses; unlike rows, no shortfall
+    // pass follows for columns - a spanning item's content simply wraps
+    // at whatever width its crossed columns add up to, same as it
+    // always has). A column nothing single-span ever lands in (empty,
+    // or crossed only by spanning items) resolves to 0, matching row
+    // heights' own "nothing landed here" default.
+    for (int c = 0; c < columnCount; ++c) {
+      GridTrackKind kind = widget.gridTemplateColumns[c].kind;
+      if (kind != GridTrackKind::kMinContent && kind != GridTrackKind::kMaxContent) {
+        continue;
+      }
+      float cap = kind == GridTrackKind::kMaxContent ? 1e7f : 0.0f;
+      float measured = 0.0f;
+      for (int i = 0; i < n; ++i) {
+        const GridItemPlacement &p = placements[i];
+        if (p.colSpan != 1 || p.col != c) {
+          continue;
+        }
+        measured = std::max(
+            measured, MeasureItemFitContentWidth(widget.children[i], state.renderer, cap));
+      }
+      columnWidths[c] = measured;
+    }
+
     float totalFixed = 0.0f;
     float totalFr = 0.0f;
-    for (const GridTrack &track : widget.gridTemplateColumns) {
-      if (track.isFraction) {
+    for (int c = 0; c < columnCount; ++c) {
+      const GridTrack &track = widget.gridTemplateColumns[c];
+      if (track.kind == GridTrackKind::kFraction) {
         totalFr += track.value;
-      } else {
+      } else if (track.kind == GridTrackKind::kFixed) {
         totalFixed += track.value;
+      } else {
+        // kMinContent/kMaxContent - already resolved into columnWidths
+        // above; counts toward totalFixed the same way a literal px
+        // track would, since fr's own leftover-space math needs to
+        // subtract every already-sized column, content-driven or not.
+        totalFixed += columnWidths[c];
       }
     }
     float leftover = std::max(0.0f, state.maxWidth - totalFixed - totalColumnGap);
     float perFr = totalFr > 0.0f ? leftover / totalFr : 0.0f;
     for (int c = 0; c < columnCount; ++c) {
       const GridTrack &track = widget.gridTemplateColumns[c];
-      columnWidths[c] = track.isFraction ? track.value * perFr : track.value;
+      if (track.kind == GridTrackKind::kFraction) {
+        columnWidths[c] = track.value * perFr;
+      } else if (track.kind == GridTrackKind::kFixed) {
+        columnWidths[c] = track.value;
+      }
+      // kMinContent/kMaxContent: columnWidths[c] already resolved above.
     }
   } else {
     float each =
@@ -1011,9 +1059,15 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   for (int r = 0; r < rowCount && r < static_cast<int>(widget.gridTemplateRows.size());
        ++r) {
     const GridTrack &track = widget.gridTemplateRows[r];
-    if (!track.isFraction) {
+    if (track.kind == GridTrackKind::kFixed) {
       rowHeights[r] = std::max(rowHeights[r], track.value);
     }
+    // kFraction/kMinContent/kMaxContent all resolve like an ordinary
+    // auto-sized row here (rowHeights[r] is already that, from the
+    // measurement above) - see GridTrack's own doc comment (widget.h)
+    // for why min-content/max-content aren't independently meaningful
+    // on the row axis in this bounded subset, the same reasoning
+    // fr rows already didn't resolve before this property existed.
   }
   // Row heights, spanning pass: a rowSpan > 1 item's own natural height
   // may need more room than the rows it crosses already have (from the

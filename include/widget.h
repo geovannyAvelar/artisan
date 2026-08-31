@@ -37,12 +37,13 @@ struct Color {
 // CSS Grid (display: grid, below) is a second, independent layout mode
 // alongside flexbox - kContainer only, same as flexbox, and a bounded
 // subset in the same spirit: grid-template-columns/rows accept only a
-// space-separated list of fixed px tracks and/or `fr` (fractional)
-// tracks (see GridTrack) - no repeat()/minmax()/auto/percentage tracks,
-// no named lines. grid-template-areas/grid-area name cells; grid-column/
-// grid-row place by numeric grid line instead (see GridLinePlacement) -
-// either way, anything unplaced still auto-places into cells in document
-// order, row-major (see RenderGridContainer, widget_renderer.cpp).
+// space-separated list of fixed px, `fr` (fractional), and min-content/
+// max-content tracks (see GridTrack) - no repeat()/minmax()/auto/
+// percentage tracks, no named lines. grid-template-areas/grid-area name
+// cells; grid-column/grid-row place by numeric grid line instead (see
+// GridLinePlacement) - either way, anything unplaced still auto-places
+// into cells in document order, along whichever axis grid-auto-flow
+// names (see GridAutoFlow, RenderGridContainer in widget_renderer.cpp).
 // justify-items/align-items (reusing this same AlignItems enum and,
 // for align-items, the very same Widget field flexbox's own cross-axis
 // alignment already uses - see Widget::alignItems below) control
@@ -67,16 +68,31 @@ enum class AlignContent {
 };
 enum class FlexWrap { kNowrap, kWrap };
 
-// A single grid-template-columns/rows track's sizing function - a fixed
-// pixel size, or a fractional (fr) unit that shares whatever space is
-// left over after every fixed track (and every inter-track gap) is
-// subtracted, proportionally to its own fr count relative to every
-// other fr track's - the same "distribute leftover space by weight"
-// idea flex-grow already uses for item sizing, just applied to track
-// sizing instead (see RenderGridContainer, widget_renderer.cpp).
+// A single grid-template-columns/rows track's sizing function - real
+// CSS's four most useful ones (see ParseGridTrackList, css.cpp; not
+// repeat()/minmax()/auto/percentage tracks or named lines):
+//   kFixed - a plain pixel size (`value`).
+//   kFraction - an `Nfr` unit (`value` is the fr count) that shares
+//     whatever space is left over after every fixed/min-content/
+//     max-content track (and every inter-track gap) is subtracted,
+//     proportionally to its own fr count relative to every other fr
+//     track's - the same "distribute leftover space by weight" idea
+//     flex-grow already uses for item sizing, just applied to track
+//     sizing instead.
+//   kMinContent - sized to the narrowest any single cell placed in this
+//     track could be without overflowing (its widest unbreakable word,
+//     for text) - columns only; a row track resolves this identically
+//     to an ordinary auto-sized row (see RenderGridContainer's own doc
+//     comment on why rows don't get an independently-meaningful
+//     min/max-content of their own in this bounded subset).
+//   kMaxContent - sized to the widest any single cell placed in this
+//     track would be with no wrapping at all - same columns-only scope
+//     as kMinContent above.
+// `value` is unused for kMinContent/kMaxContent.
+enum class GridTrackKind { kFixed, kFraction, kMinContent, kMaxContent };
 struct GridTrack {
-  bool isFraction = false;
-  float value = 0.0f; // Pixels, or the fr count.
+  GridTrackKind kind = GridTrackKind::kFixed;
+  float value = 0.0f; // Pixels (kFixed) or the fr count (kFraction).
 };
 
 // A grid-column/grid-row value - real CSS's numeric, line-based

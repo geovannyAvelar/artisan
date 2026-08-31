@@ -562,14 +562,23 @@ already has.
 layout mode alongside flexbox (kContainer only, same as everything
 above). `grid-template-columns`/`grid-template-rows` each take a plain
 space-separated track list - a fixed pixel size (`100px`, or a bare
-number) and/or an `Nfr` fractional unit, e.g.
-`grid-template-columns: 100px 1fr 2fr;` - not real CSS's `repeat()`,
-`minmax()`, `auto`, percentage tracks, or named lines; a token matching
-neither form is skipped rather than failing the whole list. `fr` only
-resolves for columns, against the container's own available width
-(always known); a fractional row track is treated as `auto`
-(content-sized) instead, since resolving it meaningfully would need a
-known total container height most grids never set. `gap` (reused from
+number), an `Nfr` fractional unit, or the `min-content`/`max-content`
+keywords, e.g. `grid-template-columns: max-content 1fr;` (a classic
+content-sized-sidebar-plus-flexible-remainder pattern) - not real CSS's
+`repeat()`, `minmax()`, `auto`, percentage tracks, or named lines; a
+token matching none of these forms is skipped rather than failing the
+whole list. `min-content`/`max-content` and `fr` only resolve for
+columns, against the container's own available width (always known); on
+a row track, all three are treated as `auto` (content-sized, the same
+as an unspecified row) instead, since resolving any of them
+meaningfully on the row axis would need a known total container height
+most grids never set. A `min-content` column sizes to the narrowest a
+single-column-span cell placed in it could be without overflowing (for
+text, the width of its single widest unbreakable word); `max-content`
+sizes to the widest such cell would be with no wrapping at all - a
+spanning cell crossing either kind of column doesn't grow it, and
+simply wraps at whatever width its crossed columns add up to, same as
+it always has. `gap` (reused from
 flexbox) applies between both columns and rows - there's no separate
 `row-gap`/`column-gap`. A child with no placement of its own (see
 `grid-template-areas`/`grid-area` and `grid-column`/`grid-row` below)
