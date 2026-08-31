@@ -813,51 +813,74 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // however many tracks grid-template-columns names (or one full-width
   // column if unset) for columns, and however many rows the children
   // actually need at that many per row for rows.
-  int columnCount;
+  // The column count auto-placement's own row-major wrapping uses -
+  // never itself extended by an explicit grid-column/grid-row/grid-area
+  // placement below (only the *final* columnCount, after every item's
+  // placement is known, is - see below): an auto-placed item's own
+  // column is always `< autoPlaceColumnCount` by construction (a mod
+  // result), so it can never be what asks for more columns than this.
+  int autoPlaceColumnCount;
   if (hasAreas) {
     // The widest row, not just the first - ParseGridTemplateAreas
     // (css.cpp) doesn't validate every row is the same length, so a
     // malformed template could have a later row longer than the first;
-    // sizing columnCount off of *any* narrower row would let
+    // sizing this off of *any* narrower row would let
     // FindGridAreaPlacement return a column index the columnWidths/
     // columnX vectors below aren't actually sized to hold.
-    columnCount = 0;
+    autoPlaceColumnCount = 0;
     for (const auto &row : widget.gridTemplateAreas) {
-      columnCount = std::max(columnCount, static_cast<int>(row.size()));
+      autoPlaceColumnCount = std::max(autoPlaceColumnCount, static_cast<int>(row.size()));
     }
   } else {
-    columnCount = widget.gridTemplateColumns.empty()
-                       ? 1
-                       : static_cast<int>(widget.gridTemplateColumns.size());
+    autoPlaceColumnCount = widget.gridTemplateColumns.empty()
+                                ? 1
+                                : static_cast<int>(widget.gridTemplateColumns.size());
   }
-  columnCount = std::max(1, columnCount);
+  autoPlaceColumnCount = std::max(1, autoPlaceColumnCount);
 
-  // Resolve every item's placement first - needed before row count can
-  // be known when there's no area template (row count depends on the
-  // highest auto-placed row any item actually lands in).
+  // Resolve every item's placement. Precedence, matching GridLinePlacement's
+  // own doc comment (widget.h): a grid-area match wins first; otherwise
+  // an explicit grid-column/grid-row start line places the item outright
+  // (the other axis, if it has no explicit start of its own, defaults to
+  // line 1); otherwise a bare `span N` (no explicit start on either
+  // axis) still auto-places in document order, just at that span instead
+  // of always 1x1; otherwise plain 1x1 auto-placement, same as an item
+  // with none of this set at all.
   std::vector<GridItemPlacement> placements(n);
   int nextAutoIndex = 0;
   for (int i = 0; i < n; ++i) {
+    const Widget &child = widget.children[i];
     GridItemPlacement found;
-    if (hasAreas && !widget.children[i].gridArea.empty() &&
-        FindGridAreaPlacement(widget.gridTemplateAreas, widget.children[i].gridArea,
-                               found)) {
+    if (hasAreas && !child.gridArea.empty() &&
+        FindGridAreaPlacement(widget.gridTemplateAreas, child.gridArea, found)) {
       placements[i] = found;
       continue;
     }
+
+    int colSpan = std::max(1, child.gridColumn.span);
+    int rowSpan = std::max(1, child.gridRow.span);
+    if (child.gridColumn.hasStart || child.gridRow.hasStart) {
+      int col = child.gridColumn.hasStart ? std::max(0, child.gridColumn.start - 1) : 0;
+      int row = child.gridRow.hasStart ? std::max(0, child.gridRow.start - 1) : 0;
+      placements[i] = {row, col, rowSpan, colSpan};
+      continue;
+    }
+
     int idx = nextAutoIndex++;
-    placements[i] = {idx / columnCount, idx % columnCount, 1, 1};
+    placements[i] = {idx / autoPlaceColumnCount, idx % autoPlaceColumnCount, rowSpan,
+                      colSpan};
   }
 
-  // A named placement is always within the area template's own bounds
-  // by construction (FindGridAreaPlacement only ever searches rows that
-  // already exist), so this only actually extends rowCount past the
-  // template's own size when an auto-placed item (an unnamed one, or
-  // one whose name isn't in the template - see the placements loop
-  // above) overflows past it, the same way rowCount is derived purely
-  // from placements when there's no area template at all.
+  // Final column/row counts: at least as many as an area template
+  // implies (rows) or auto-placement's own wrapping used (columns), but
+  // extended to fit every item's actual placement - which an explicit
+  // grid-column/grid-row can push past either of those (a named
+  // placement never can, by construction: FindGridAreaPlacement only
+  // ever searches rows/columns that already exist in the template).
+  int columnCount = autoPlaceColumnCount;
   int rowCount = hasAreas ? static_cast<int>(widget.gridTemplateAreas.size()) : 1;
   for (const GridItemPlacement &p : placements) {
+    columnCount = std::max(columnCount, p.col + p.colSpan);
     rowCount = std::max(rowCount, p.row + p.rowSpan);
   }
 

@@ -241,6 +241,79 @@ bool ParseGridTemplateAreas(const std::string &raw,
   return true;
 }
 
+// One side of a grid-column/grid-row value - either a bare integer
+// (a 1-indexed line number) or a "span N" token. Returns false (leaving
+// `isSpan`/`value` untouched) for anything else, including a bare
+// "span" with no following number.
+bool ParseGridLineSide(const std::string &side, bool &isSpan, int &value) {
+  if (side.empty()) {
+    return false;
+  }
+  std::string lower = ToLower(side);
+  if (lower.rfind("span", 0) == 0) {
+    try {
+      value = std::stoi(Trim(lower.substr(4)));
+      isSpan = true;
+      return value >= 1;
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  try {
+    value = std::stoi(side);
+    isSpan = false;
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// Parses a grid-column/grid-row value - see GridLinePlacement (widget.h)
+// for the forms supported: a bare line number, "span N", "<line> /
+// <line>", "<line> / span N", or "span N / <line>" (the last resolves
+// to an explicit start by subtracting the span from the end line, since
+// GridLinePlacement itself only ever stores a start + span, not two
+// independent line numbers). "span N / span N" (two spans, no line at
+// all) isn't meaningful in real CSS either - falls back to treating the
+// first side as a plain span with no explicit start. Real CSS's named
+// lines and negative (counted-from-the-end) line numbers aren't
+// supported. Returns false (leaving `out` untouched) if the left side
+// (or the only side, when there's no '/') doesn't parse at all.
+bool ParseGridLinePlacement(const std::string &raw, GridLinePlacement &out) {
+  std::string text = Trim(raw);
+  size_t slash = text.find('/');
+  std::string left = Trim(slash == std::string::npos ? text : text.substr(0, slash));
+  std::string right =
+      slash == std::string::npos ? std::string() : Trim(text.substr(slash + 1));
+
+  bool leftIsSpan = false;
+  int leftValue = 0;
+  if (!ParseGridLineSide(left, leftIsSpan, leftValue)) {
+    return false;
+  }
+
+  bool rightIsSpan = false;
+  int rightValue = 0;
+  bool haveRight = !right.empty() && ParseGridLineSide(right, rightIsSpan, rightValue);
+
+  if (!haveRight) {
+    out = leftIsSpan ? GridLinePlacement{false, 0, std::max(1, leftValue)}
+                      : GridLinePlacement{true, leftValue, 1};
+    return true;
+  }
+  if (!leftIsSpan && !rightIsSpan) {
+    out = {true, leftValue, std::max(1, rightValue - leftValue)};
+  } else if (!leftIsSpan && rightIsSpan) {
+    out = {true, leftValue, std::max(1, rightValue)};
+  } else if (leftIsSpan && !rightIsSpan) {
+    int span = std::max(1, leftValue);
+    out = {true, std::max(1, rightValue - span), span};
+  } else {
+    out = {false, 0, std::max(1, leftValue)};
+  }
+  return true;
+}
+
 // Parses an nth-*() argument - a literal integer, or the "even"/"odd"
 // keywords - into (nthA, nthB), the same v1 grammar nth-child and
 // nth-of-type both share (not the full "an+b" algebra). Returns false
@@ -702,6 +775,10 @@ Declarations ParseDeclarations(const std::string &body) {
           ParseGridTemplateAreas(value, decl.gridTemplateAreas);
     } else if (property == "grid-area") {
       decl.gridArea = value;
+    } else if (property == "grid-column") {
+      decl.hasGridColumn = ParseGridLinePlacement(value, decl.gridColumn);
+    } else if (property == "grid-row") {
+      decl.hasGridRow = ParseGridLinePlacement(value, decl.gridRow);
     } else if (property == "flex-direction") {
       std::string lower = ToLower(value);
       if (lower == "row") {
@@ -1409,6 +1486,14 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
   if (!inlineStyle.gridArea.empty()) {
     declarations.gridArea = inlineStyle.gridArea;
   }
+  if (inlineStyle.hasGridColumn) {
+    declarations.hasGridColumn = true;
+    declarations.gridColumn = inlineStyle.gridColumn;
+  }
+  if (inlineStyle.hasGridRow) {
+    declarations.hasGridRow = true;
+    declarations.gridRow = inlineStyle.gridRow;
+  }
 }
 
 namespace {
@@ -1543,6 +1628,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
   PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin, gridTemplateAreasWin;
   PropertyWinner gridAreaWin;
+  PropertyWinner gridColumnWin, gridRowWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
     const Rule &rule = rules_[i];
@@ -1712,6 +1798,16 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
     if (!rule.declarations.gridArea.empty() &&
         gridAreaWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.gridArea = rule.declarations.gridArea;
+    }
+    if (rule.declarations.hasGridColumn &&
+        gridColumnWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGridColumn = true;
+      own.gridColumn = rule.declarations.gridColumn;
+    }
+    if (rule.declarations.hasGridRow &&
+        gridRowWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasGridRow = true;
+      own.gridRow = rule.declarations.gridRow;
     }
     if (rule.declarations.hasContent &&
         contentWin.ShouldTake(matchedSpecificity, ruleIndex)) {

@@ -572,10 +572,9 @@ resolves for columns, against the container's own available width
 known total container height most grids never set. `gap` (reused from
 flexbox) applies between both columns and rows - there's no separate
 `row-gap`/`column-gap`. A child with no placement of its own (see
-`grid-template-areas`/`grid-area` below) auto-places into the next cell
-in document order, row-major, wrapping to a new row whenever the current
-one runs out of columns - there's no line-based `grid-column`/
-`grid-row` placement (`grid-column: 2 / 4`, `span 2`, etc.). Every item
+`grid-template-areas`/`grid-area` and `grid-column`/`grid-row` below)
+auto-places into the next cell in document order, row-major, wrapping to
+a new row whenever the current one runs out of columns. Every item
 always stretches to fill its own cell(s) on both axes - there's no
 `justify-items`/`align-items`. A row named by `grid-template-rows` is a
 *floor*, not an exact height (content taller than it still reserves its
@@ -609,6 +608,32 @@ has none at all - still auto-places into the next free-by-index cell in
 document order the same as it would without any area template, so named
 and unnamed children can mix, though placement for the unnamed ones
 doesn't try to route around cells a named child already claimed.
+
+`grid-column`/`grid-row` place a child by numeric, 1-indexed grid line
+instead of a name - line 1 is before the first track, line 2 between
+the first and second, and so on. `grid-column: 2` places at column line
+2 (span 1); `grid-column: 2 / 4` spans from line 2 to line 4 (2
+columns); `grid-column: span 2` spans 2 columns with no explicit start,
+auto-placed the same way an item with no placement at all is, just at
+that span instead of always 1x1; `grid-column: 2 / span 2` combines an
+explicit start with an explicit span. `grid-row` works identically for
+rows. Real CSS's named lines and negative (counted-from-the-end) line
+numbers aren't supported, and neither is `grid-area`'s equivalent
+numeric `row / col / row-end / col-end` form - only these two named
+longhands parse line-based placement. A `grid-template-columns`/
+`grid-template-rows` track list too short for an explicit placement (or
+a `grid-template-areas`-derived one) grows to fit - e.g. `grid-column:
+5` with only 3 columns declared adds two more, equal-width, the same
+fallback an unmatched track count anywhere else in this bounded subset
+already uses. When only one of `grid-column`/`grid-row` has an explicit
+start, the other defaults to line 1 rather than being auto-placed on
+its own axis - real CSS's actual algorithm for a partially-explicit
+item is a lot more elaborate than this implements. A `grid-area` match
+always wins over `grid-column`/`grid-row` on the same element; below
+that, explicit placement of any kind (named or line-based) is exactly
+as prone to overlapping an auto-placed sibling as `grid-template-areas`
+already documents above, for the same reason (auto-placement is a
+simple next-free-index counter, not occupancy-aware).
 
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see

@@ -75,6 +75,21 @@ struct GridTrack {
   float value = 0.0f; // Pixels, or the fr count.
 };
 
+// A grid-column/grid-row value - real CSS's numeric, line-based
+// placement (1-indexed grid lines - line 1 is before the first track,
+// line 2 between the first and second, etc.), a bounded subset: an
+// explicit start line and/or a span count, e.g. `grid-column: 2` (start
+// line 2, span 1), `grid-column: 2 / 4` (start line 2, span 2 - the
+// lines it spans between), `grid-column: span 2` (no explicit start,
+// span 2), `grid-column: 2 / span 2` (start line 2, span 2). Real CSS's
+// named lines and negative (counted-from-the-end) line numbers aren't
+// supported - see ParseGridLinePlacement, css.cpp.
+struct GridLinePlacement {
+  bool hasStart = false;
+  int start = 0; // 1-indexed grid line; only meaningful when hasStart.
+  int span = 1;  // Always >= 1.
+};
+
 enum class WidgetKind {
   kContainer,  // Groups children (div, span, body, ...); no text of its own.
   kText,       // A leaf that paints `text` at `fontSize` (word-wrapped).
@@ -300,8 +315,29 @@ struct Widget {
   // contain - falls back to ordinary row-major auto-placement, the same
   // as every item already gets without named areas at all. Only the
   // named-area form is supported, not real CSS's row-start/column-
-  // start/row-end/column-end line-based shorthand.
+  // start/row-end/column-end line-based shorthand - that's grid-column/
+  // grid-row below instead, kept as separate fields since real CSS
+  // keeps them separate properties too (grid-area is just a shorthand
+  // that can also set them, which this parser doesn't support - see
+  // ParseDeclarations, css.cpp).
   std::string gridArea;
+
+  // grid-column/grid-row - see GridLinePlacement above. Item
+  // properties, same "read by the parent's RenderGridContainer" shape
+  // gridArea above already has. Precedence when more than one kind of
+  // placement applies to the same item: a matching gridArea wins first;
+  // otherwise, either of these having an explicit start line places the
+  // item outright (the *other* axis, if it has no explicit start of its
+  // own, defaults to line 1 rather than participating in auto-
+  // placement - real CSS's own algorithm for a partially-explicit item
+  // is a lot more elaborate than this bounded subset implements);
+  // otherwise, a span with no explicit start on either axis still
+  // auto-places (in document order, same as ever) but at that span
+  // rather than always 1x1; otherwise, plain 1x1 auto-placement, same
+  // as an item with none of this set at all. See RenderGridContainer,
+  // widget_renderer.cpp, for exactly where each case is decided.
+  GridLinePlacement gridColumn;
+  GridLinePlacement gridRow;
 };
 
 } // namespace artisan

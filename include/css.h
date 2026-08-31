@@ -280,6 +280,17 @@ struct Declarations {
   // "not set" (real CSS has no way to write a meaningful empty area
   // name), so a separate presence flag would be redundant.
   std::string gridArea;
+  // grid-column/grid-row - GridLinePlacement's own hasStart already
+  // distinguishes "no explicit start line" from "start line 1", but a
+  // rule can also set only a bare `span N` (hasStart stays false, span
+  // != 1) - that's still a real, cascade-competing value a lower-
+  // specificity rule's own placement could lose to, so this still needs
+  // its own top-level hasXxx flag the same as every numeric/enum
+  // property does, unlike gridArea's plain string above.
+  bool hasGridColumn = false;
+  GridLinePlacement gridColumn;
+  bool hasGridRow = false;
+  GridLinePlacement gridRow;
 
   // `content` - only meaningful when this Declarations was resolved for
   // a `::before`/`::after` pseudo-element (StyleSheet::Resolve's `target`
