@@ -807,6 +807,24 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
 // axis outright, or keeps its own fit-content size and is
 // start/center/end-positioned within the cell instead - see the
 // itemWidth/xOffset/yOffset computation below. No justify-self/
+//
+// Track alignment: widget.justifyContent/alignContent (flex-start by
+// default, matching this Widget field's own pre-grid default - see
+// Widget::alignContent's doc comment, widget.h) redistribute any
+// leftover space the resolved columns/rows don't already consume as a
+// *group*, along their own leading/between-track edges - genuinely the
+// same properties RenderFlexContainer's own isRow justify-content/
+// align-content switches already implement, just reused for grid's
+// columns/rows-as-a-whole instead of a flex line's items (see the
+// columnLeading/rowLeading computation below). justify-content only
+// ever has anything to redistribute when the resolved columns don't
+// already fill state.maxWidth on their own (an fr track or the equal-
+// width fallback already do, by construction); align-content only ever
+// does when this container has an explicit CSS height taller than what
+// the rows naturally needed, the same gating flex's own align-content
+// already uses - this bounded subset's rows have no other source of
+// extra height to distribute, being always content-auto-sized
+// otherwise (see GridTrack's own doc comment, widget.h). No justify-self/
 // align-self - only the container-level properties, the same
 // container-only-alignment scope RenderFlexContainer's own alignItems
 // already has.
@@ -1044,11 +1062,41 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       columnWidths[c] = each;
     }
   }
+  // justify-content: see this function's own doc comment above for the
+  // full contract. columnFreeSpace is 0 (a no-op leadingOffset/gap
+  // below) for every columnWidths source except fixed/min-content/
+  // max-content/subgrid tracks that don't already sum to state.maxWidth
+  // - an fr track or the equal-width fallback already consume all of it
+  // by construction.
+  float totalColumnWidth = totalColumnGap;
+  for (float w : columnWidths) {
+    totalColumnWidth += w;
+  }
+  float columnFreeSpace = std::max(0.0f, state.maxWidth - totalColumnWidth);
+  float columnLeading = 0.0f;
+  float columnGap = widget.gap;
+  if (columnFreeSpace > 0.0f) {
+    switch (widget.justifyContent) {
+    case JustifyContent::kFlexStart:
+      break;
+    case JustifyContent::kCenter:
+      columnLeading = columnFreeSpace / 2.0f;
+      break;
+    case JustifyContent::kFlexEnd:
+      columnLeading = columnFreeSpace;
+      break;
+    case JustifyContent::kSpaceBetween:
+      if (columnCount > 1) {
+        columnGap = widget.gap + columnFreeSpace / static_cast<float>(columnCount - 1);
+      }
+      break;
+    }
+  }
   std::vector<float> columnX(columnCount);
-  float x = 0.0f;
+  float x = columnLeading;
   for (int c = 0; c < columnCount; ++c) {
     columnX[c] = x;
-    x += columnWidths[c] + widget.gap;
+    x += columnWidths[c] + columnGap;
   }
 
   // Each item's own resolved render width - its full cell width when
@@ -1136,11 +1184,58 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       }
     }
   }
+  // align-content: see this function's own doc comment above for the
+  // full contract - only ever nonzero when widget.hasHeight names more
+  // height than the rows naturally needed. kStretch grows rowHeights
+  // itself (rather than just the leading/between-row gaps the other
+  // cases use), so it needs to happen before rowY is built below - the
+  // per-item loop further down reads rowHeights again for its own
+  // cellHeight, so a stretched row correctly grows any align-items:
+  // stretch item placed in it too, the same way an explicit
+  // grid-template-rows track already does.
+  float totalRowHeight = static_cast<float>(rowCount - 1) * widget.gap;
+  for (float h : rowHeights) {
+    totalRowHeight += h;
+  }
+  float rowFreeSpace =
+      widget.hasHeight ? std::max(0.0f, widget.height - totalRowHeight) : 0.0f;
+  float rowLeading = 0.0f;
+  float rowGap = widget.gap;
+  if (rowFreeSpace > 0.0f) {
+    switch (widget.alignContent) {
+    case AlignContent::kFlexStart:
+      break;
+    case AlignContent::kCenter:
+      rowLeading = rowFreeSpace / 2.0f;
+      break;
+    case AlignContent::kFlexEnd:
+      rowLeading = rowFreeSpace;
+      break;
+    case AlignContent::kSpaceBetween:
+      if (rowCount > 1) {
+        rowGap = widget.gap + rowFreeSpace / static_cast<float>(rowCount - 1);
+      }
+      break;
+    case AlignContent::kSpaceAround: {
+      float perRowGap = rowFreeSpace / static_cast<float>(rowCount);
+      rowLeading = perRowGap / 2.0f;
+      rowGap = widget.gap + perRowGap;
+      break;
+    }
+    case AlignContent::kStretch: {
+      float perRowStretch = rowFreeSpace / static_cast<float>(rowCount);
+      for (float &h : rowHeights) {
+        h += perRowStretch;
+      }
+      break;
+    }
+    }
+  }
   std::vector<float> rowY(rowCount);
-  float y = 0.0f;
+  float y = rowLeading;
   for (int r = 0; r < rowCount; ++r) {
     rowY[r] = y;
-    y += rowHeights[r] + widget.gap;
+    y += rowHeights[r] + rowGap;
   }
 
   for (int i = 0; i < n; ++i) {

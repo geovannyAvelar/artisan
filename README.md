@@ -714,6 +714,36 @@ and can subgrid only one axis while sizing the other normally in the
 same declaration; neither is supported here, only the single
 all-or-nothing `subgrid` keyword on `grid-template-columns`.
 
+`justify-content`/`align-content` distribute any leftover space the
+resolved columns/rows don't already consume, as a *group* - genuinely
+the same properties flexbox's own main-axis `justify-content` and
+multi-line `align-content` already are (same fields, same accepted
+keywords: `flex-start`/`center`/`flex-end`/`space-between` for
+`justify-content`, plus `space-around`/`stretch` for `align-content`),
+interpreted differently here the same way `align-items` already is
+depending on which layout mode is active. `justify-content` only ever
+has anything to redistribute when the columns don't already fill the
+container's own width on their own - a `fr` track or the equal-width
+fallback (unset/mismatched `grid-template-columns`) already do, by
+construction, so it only matters with fixed-pixel, min-content/
+max-content, or subgrid-adopted columns narrower than the container;
+`space-between` widens the gaps between columns rather than the
+columns themselves. `align-content` only ever has anything to
+redistribute when the container has an explicit CSS `height` taller
+than what the rows naturally needed - this bounded subset's rows are
+otherwise always content-auto-sized (see `grid-template-rows` above),
+so there's no other source of extra height for it to distribute;
+`stretch` grows every row track itself by an equal share of that
+leftover height (so an `align-items: stretch` item placed in one
+genuinely gets taller, not just repositioned), the other keywords just
+reposition/gap the rows without changing their own height. Real CSS's
+`justify-content`/`align-content` also accept `start`/`end` (this
+engine's flexbox-inherited `flex-start`/`flex-end` spelling is what's
+recognized instead - see `justify-items`'s own note above for the same
+`start`/`end`-vs-`flex-start`/`flex-end` split) and further keywords
+(`normal`, `space-evenly`) neither this engine's flexbox nor its grid
+support.
+
 `<style>` only works inside `<body>` - a `<head><style>` never reaches
 the document at all, since `<head>` itself is discarded (see
 `html_document.cpp`). There's also no shared stylesheet across pages -
