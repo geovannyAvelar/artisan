@@ -407,13 +407,19 @@ supported: anything beyond this bounded grammar (pseudo-elements like
 `:hover`/`:focus`/`:focus-within` styling also only reaches elements the
 renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, block-level
-containers (`<div>`, `<p>`, `<li>`, ...), and now `<tr>`/`<td>`/`<th>`
-too, but still not yet an inline element (`<span>`) on its own (though a
-`<span>` still inherits `:hover`/`:focus-within` correctly from a
-hoverable/focus-containing *ancestor*, e.g. `p:hover span` - it just
-can't be the direct target of the mouse/focus itself, the same
-simplification that used to also apply to table rows/cells before they
-gained their own hit regions).
+containers (`<div>`, `<p>`, `<li>`, ...), `<tr>`/`<td>`/`<th>`, and now
+an inline element (`<span>`) too, as long as its own text fits on a
+single line - a `<span>` whose content wraps across more than one line
+gets no hit region at all for that render (rather than a wrong or
+partial one), the one remaining gap in hit-testing coverage. A `<span>`
+still separately inherits `:hover`/`:focus-within` from a
+hoverable/focus-containing *ancestor* regardless (e.g. `p:hover span`),
+same as ever. Painting is unaffected either way: an inline element never
+applies box-model properties (see below) even under `:hover`, so
+`background-color`/`border-color`/width/height/padding/margin changes on
+a `:hover`'d `<span>` have no visual effect - only `color`/`font-weight`
+(and anything else a `<span>`'s inline text painting already honors)
+actually show up.
 
 Properties: `color`, `background-color`, `font-weight` (`bold`/
 `normal`), `border-color`, `border-width`, and a box model/flexbox pass -

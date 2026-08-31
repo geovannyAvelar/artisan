@@ -1563,8 +1563,49 @@ public:
     // reasoning the background/border-box painting below already used
     // before box-model properties existed.
     if (!widget.blockSpacing) {
+      // A hit region for :hover/:focus-within, covering exactly the
+      // pixels this span's own text occupies - measured as the
+      // difference between the pending line's width just before this
+      // span's children render and just after, so it needs no changes
+      // to AppendWrappedText/FlushLine at all (both are unaware of
+      // spans; this just brackets one of their callers). Only valid
+      // when state.y hasn't moved across that window: pendingLine only
+      // ever *grows* (more text appended, same line) while y stays
+      // fixed - the moment y changes, something flushed (a wrap from
+      // running out of width, or a font/color-change flush at the
+      // span's own first word), and whatever was measured as this
+      // span's start offset no longer describes a prefix of the current
+      // pendingLine, so a wrapped/multi-line span silently gets no hit
+      // region at all rather than a wrong (or multi-rect, which nothing
+      // here supports) one - the same "skip rather than mis-render"
+      // simplification kImage's own background/border already makes.
+      float startOffset =
+          state.pendingLine.empty()
+              ? 0.0f
+              : state.renderer.MeasureText(state.pendingLine,
+                                            state.pendingFontSize,
+                                            state.pendingBold);
+      float startY = state.y;
+
       for (int i = 0; i < widget.childCount; ++i) {
         RenderWidget(widget.children[i], state);
+      }
+
+      if (state.boxRegions != nullptr && widget.userData != nullptr &&
+          state.y == startY) {
+        float endOffset =
+            state.pendingLine.empty()
+                ? 0.0f
+                : state.renderer.MeasureText(state.pendingLine,
+                                              state.pendingFontSize,
+                                              state.pendingBold);
+        if (endOffset > startOffset) {
+          float lineHeight = state.renderer.LineHeight(state.pendingFontSize,
+                                                         state.pendingBold);
+          state.boxRegions->push_back({widget.userData,
+                                        state.x + startOffset, state.y,
+                                        endOffset - startOffset, lineHeight});
+        }
       }
       return;
     }
