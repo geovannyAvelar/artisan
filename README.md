@@ -564,10 +564,19 @@ above). `grid-template-columns`/`grid-template-rows` each take a plain
 space-separated track list - a fixed pixel size (`100px`, or a bare
 number), an `Nfr` fractional unit, or the `min-content`/`max-content`
 keywords, e.g. `grid-template-columns: max-content 1fr;` (a classic
-content-sized-sidebar-plus-flexible-remainder pattern) - not real CSS's
-`repeat()`, `minmax()`, `auto`, percentage tracks, or named lines; a
-token matching none of these forms is skipped rather than failing the
-whole list. `min-content`/`max-content` and `fr` only resolve for
+content-sized-sidebar-plus-flexible-remainder pattern) - or `repeat(N,
+track-list)`, expanding inline to `N` copies of its (possibly
+multi-track) inner list at that position in the outer list, e.g.
+`grid-template-columns: 50px repeat(2, 1fr) 100px;` is exactly
+`50px 1fr 1fr 100px`; `N` has to be a literal positive integer - real
+CSS's `auto-fill`/`auto-fit` repeat counts need to know how much space
+is available to decide how many copies fit, which isn't known yet at
+parse time, so both are unsupported and the whole `repeat()` is skipped
+like any other unrecognized token, and nesting `repeat()` inside
+`repeat()` isn't supported either. Otherwise this still isn't real
+CSS's `minmax()`, `auto`, percentage tracks, or named lines; a token
+matching none of these forms (bare, or inside a `repeat()`) is skipped
+rather than failing the whole list. `min-content`/`max-content` and `fr` only resolve for
 columns, against the container's own available width (always known); on
 a row track, all three are treated as `auto` (content-sized, the same
 as an unspecified row) instead, since resolving any of them

@@ -154,45 +154,107 @@ bool ParseLengthOrPercent(const std::string &raw, float &outValue,
   return ParsePixelLength(value, outValue);
 }
 
+// Parses one non-repeat() track token - a plain pixel length (bare
+// number or "...px"), an "Nfr" fractional unit (e.g. "2fr"), or the
+// `min-content`/`max-content` keywords - see GridTrack (widget.h) for
+// what each becomes. A token matching none of these forms is silently
+// skipped, same "parse whatever we understand" posture
+// ParseDeclarations already has for an unrecognized property.
+void ParseGridTrackToken(const std::string &token, std::vector<GridTrack> &tracks) {
+  std::string lower = ToLower(token);
+  if (lower == "min-content") {
+    tracks.push_back({GridTrackKind::kMinContent, 0.0f});
+    return;
+  }
+  if (lower == "max-content") {
+    tracks.push_back({GridTrackKind::kMaxContent, 0.0f});
+    return;
+  }
+  if (lower.size() >= 3 && lower.substr(lower.size() - 2) == "fr") {
+    try {
+      tracks.push_back(
+          {GridTrackKind::kFraction, std::stof(lower.substr(0, lower.size() - 2))});
+    } catch (const std::exception &) {
+      // Not a valid "Nfr" token - skip it.
+    }
+    return;
+  }
+  float px;
+  if (ParsePixelLength(token, px)) {
+    tracks.push_back({GridTrackKind::kFixed, px});
+  }
+}
+
 // Parses a grid-template-columns/rows track list - space-separated
-// tokens, each a plain pixel length (bare number or "...px"), an "Nfr"
-// fractional unit (e.g. "2fr"), or the `min-content`/`max-content`
-// keywords - see GridTrack (widget.h) for what each becomes. Real CSS's
-// repeat()/minmax()/auto/percentage tracks and named lines aren't
-// supported. A token matching none of these forms is silently skipped
-// rather than failing the whole list, same "parse whatever we
-// understand" posture ParseDeclarations already has for an unrecognized
-// property - so a list mixing a supported and an unsupported token
-// still produces however many tracks it can. Returns false (leaving
-// `out` untouched) only when nothing in `raw` parsed to a single valid
-// track.
+// tokens as ParseGridTrackToken understands them, plus `repeat(N,
+// track-list)` (integer N only - `auto-fill`/`auto-fit` need to know
+// how much space is available to size the repeat count, which isn't
+// known yet at parse time, so they're left unsupported and the whole
+// repeat() is skipped, same as any other unrecognized token) expanding
+// inline to N copies of its inner track list at that position. Nesting
+// repeat() inside repeat() isn't supported (real CSS itself only allows
+// it in the auto-fill/auto-fit form this engine already excludes) - an
+// inner list containing "repeat(" is skipped whole. Real CSS's
+// minmax()/auto/percentage tracks and named lines still aren't
+// supported. Returns false (leaving `out` untouched) only when nothing
+// in `raw` parsed to a single valid track.
 bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
   std::vector<GridTrack> tracks;
-  std::istringstream tokens(raw);
-  std::string token;
-  while (tokens >> token) {
-    std::string lower = ToLower(token);
-    if (lower == "min-content") {
-      tracks.push_back({GridTrackKind::kMinContent, 0.0f});
+  size_t i = 0;
+  while (i < raw.size()) {
+    if (std::isspace(static_cast<unsigned char>(raw[i]))) {
+      i++;
       continue;
     }
-    if (lower == "max-content") {
-      tracks.push_back({GridTrackKind::kMaxContent, 0.0f});
-      continue;
-    }
-    if (lower.size() >= 3 && lower.substr(lower.size() - 2) == "fr") {
-      try {
-        tracks.push_back(
-            {GridTrackKind::kFraction, std::stof(lower.substr(0, lower.size() - 2))});
-      } catch (const std::exception &) {
-        // Not a valid "Nfr" token - skip it.
+    if (raw.size() - i >= 7 && ToLower(raw.substr(i, 7)) == "repeat(") {
+      size_t depth = 1;
+      size_t j = i + 7;
+      while (j < raw.size() && depth > 0) {
+        if (raw[j] == '(') {
+          depth++;
+        } else if (raw[j] == ')') {
+          depth--;
+        }
+        j++;
       }
-      continue;
+      if (depth == 0) {
+        std::string inner = raw.substr(i + 7, (j - 1) - (i + 7));
+        size_t comma = inner.find(',');
+        if (comma != std::string::npos) {
+          std::string countStr = Trim(inner.substr(0, comma));
+          std::string listStr = inner.substr(comma + 1);
+          int count = 0;
+          bool validCount = false;
+          try {
+            size_t pos;
+            count = std::stoi(countStr, &pos);
+            validCount = pos == countStr.size() && count > 0;
+          } catch (const std::exception &) {
+            // Not a bare integer (e.g. "auto-fill"/"auto-fit") - unsupported.
+          }
+          if (validCount && ToLower(listStr).find("repeat(") == std::string::npos) {
+            std::vector<GridTrack> innerTracks;
+            std::istringstream listTokens(listStr);
+            std::string tok;
+            while (listTokens >> tok) {
+              ParseGridTrackToken(tok, innerTracks);
+            }
+            for (int n = 0; n < count; n++) {
+              tracks.insert(tracks.end(), innerTracks.begin(), innerTracks.end());
+            }
+          }
+        }
+        i = j;
+        continue;
+      }
+      // Unbalanced parens - fall through and consume it as a regular
+      // (invalid, so skipped) whitespace-delimited token below.
     }
-    float px;
-    if (ParsePixelLength(token, px)) {
-      tracks.push_back({GridTrackKind::kFixed, px});
+    size_t start = i;
+    while (i < raw.size() && !std::isspace(static_cast<unsigned char>(raw[i]))) {
+      i++;
     }
+    ParseGridTrackToken(raw.substr(start, i - start), tracks);
   }
   if (tracks.empty()) {
     return false;
