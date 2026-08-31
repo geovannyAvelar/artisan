@@ -46,6 +46,7 @@ enum class PseudoClassKind {
   kNthOfType,
   kHover,
   kFocus,
+  kFocusWithin,
 };
 
 // nthA/nthB implement "an+b" - :nth-child(2)/:nth-of-type(2) are
@@ -88,8 +89,10 @@ struct PseudoClassState {
   // see MatchesPseudoClass in css.cpp for the walk that implements that.
   const Node *hovered = nullptr;
   // The node that currently has focus, if any. Matches `:focus` on this
-  // exact node only - unlike hover, real CSS doesn't bubble focus to
-  // ancestors on its own (that's `:focus-within`, not implemented here).
+  // exact node only - `:focus` itself doesn't bubble to ancestors, but
+  // `:focus-within` (same field, different pseudo-class - see
+  // MatchesPseudoClass in css.cpp) matches this node and every one of
+  // its ancestors, the same walk `:hover` does above.
   const Node *focused = nullptr;
 };
 

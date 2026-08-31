@@ -179,11 +179,11 @@ bool ParseNthArg(const std::string &arg, int *outA, int *outB) {
 }
 
 // Parses a pseudo-class token (the text after ':', e.g. "first-child",
-// "nth-child(2)", "nth-child(even)", "nth-of-type(3)", "hover", "focus")
-// and appends it to `selector` - silently ignored (matching this file's
-// "skip what we don't understand" philosophy elsewhere, e.g.
-// ParseDeclarations) if it isn't one of the pseudo-classes this bounded
-// grammar supports.
+// "nth-child(2)", "nth-child(even)", "nth-of-type(3)", "hover", "focus",
+// "focus-within") and appends it to `selector` - silently ignored
+// (matching this file's "skip what we don't understand" philosophy
+// elsewhere, e.g. ParseDeclarations) if it isn't one of the pseudo-classes
+// this bounded grammar supports.
 void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector) {
   std::string lower = ToLower(token);
   PseudoClassSelector pc;
@@ -195,6 +195,8 @@ void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector)
     pc.kind = PseudoClassKind::kHover;
   } else if (lower == "focus") {
     pc.kind = PseudoClassKind::kFocus;
+  } else if (lower == "focus-within") {
+    pc.kind = PseudoClassKind::kFocusWithin;
   } else if (lower.rfind("nth-child(", 0) == 0 && !lower.empty() &&
              lower.back() == ')') {
     std::string arg = Trim(lower.substr(10, lower.size() - 10 - 1));
@@ -554,6 +556,20 @@ bool MatchesNth(const PseudoClassSelector &pc, int index) {
   return pc.nthA == 0 ? index == pc.nthB : (index % pc.nthA) == pc.nthB;
 }
 
+// Whether `node` is `from` itself, or one of `from`'s ancestors -
+// shared by :hover (from = the hovered node) and :focus-within
+// (from = the focused node), which both bubble to every containing
+// element the same way. `from` is nullptr when nothing is
+// hovered/focused, in which case nothing ever matches.
+bool MatchesSelfOrAncestor(const Node *from, const Node &node) {
+  for (const Node *n = from; n != nullptr; n = n->parent()) {
+    if (n == &node) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Whether `node` is at the position `pc` describes among its parent's
 // *element* siblings (1-based - real CSS's :nth-child counts only
 // element children). A node with no parent (root/detached) is treated
@@ -566,20 +582,21 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
   if (pc.kind == PseudoClassKind::kHover) {
     // :hover matches `node` itself and every one of its ancestors -
     // hovering a child counts as hovering its containers too, same as
-    // real CSS. state.hovered is the exact (deepest) node the pointer is
-    // over; walking up from there and comparing by identity covers both.
-    for (const Node *n = state.hovered; n != nullptr; n = n->parent()) {
-      if (n == &node) {
-        return true;
-      }
-    }
-    return false;
+    // real CSS.
+    return MatchesSelfOrAncestor(state.hovered, node);
   }
   if (pc.kind == PseudoClassKind::kFocus) {
-    // Unlike :hover, real CSS doesn't bubble :focus to ancestors on its
-    // own (that's :focus-within, a separate pseudo-class not implemented
-    // here) - only the exact focused node matches.
+    // Unlike :hover, real CSS doesn't bubble plain :focus to ancestors -
+    // only the exact focused node matches (see kFocusWithin below for
+    // the pseudo-class that does bubble).
     return state.focused == &node;
+  }
+  if (pc.kind == PseudoClassKind::kFocusWithin) {
+    // Same walk :hover uses, just off state.focused instead of
+    // state.hovered - matches `node` and every one of its ancestors, so
+    // a form wrapper can style itself while any field inside it has
+    // focus.
+    return MatchesSelfOrAncestor(state.focused, node);
   }
   if (pc.kind == PseudoClassKind::kNthOfType) {
     // Same shape as the kFirstChild/kLastChild/kNthChild counting below,
@@ -645,6 +662,7 @@ bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
   case PseudoClassKind::kNthOfType:
   case PseudoClassKind::kHover:
   case PseudoClassKind::kFocus:
+  case PseudoClassKind::kFocusWithin:
     // Handled by the early returns above - unreachable here, but listed
     // so this switch stays exhaustive (no -Wswitch warning) as
     // PseudoClassKind grows.

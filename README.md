@@ -374,27 +374,29 @@ the full `an+b` algebra. `:nth-of-type` counts only same-tag siblings
 else is mixed in between; `:nth-child` counts every element sibling
 regardless of tag. There's no separate `:first-of-type`/`:last-of-type`
 - write `:nth-of-type(1)` for the former; there's no general "last" form
-without the full `an+b` algebra), and the two interactive pseudo-classes,
-`:hover` and `:focus` - a
-`<style>` block rule like `.card:hover { background-color: ... }` or
+without the full `an+b` algebra), and three interactive pseudo-classes,
+`:hover`, `:focus`, and `:focus-within` - a `<style>` block rule like
+`.card:hover { background-color: ... }` or
 `#name:focus { border-color: ... }` re-resolves live as the mouse moves
-or focus changes, same as real CSS, including `:hover` bubbling to
-ancestors (`.card:hover .title` matches while hovering anywhere inside
-`.card`, not just `.card` itself) - `:focus` doesn't bubble the same way
-(no `:focus-within`). Comma-separated lists (`h1, .card`) work the same
+or focus changes, same as real CSS, including bubbling to ancestors for
+`:hover` (`.card:hover .title` matches while hovering anywhere inside
+`.card`, not just `.card` itself) and `:focus-within` (`.form:focus-within
+{ ... }` matches while focus is anywhere inside `.form`, not just on
+`.form` itself) - plain `:focus` doesn't bubble the same way, only the
+exact focused element. Comma-separated lists (`h1, .card`) work the same
 way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
-in a `<style>` block - `:hover`/`:focus` parse there too, but always
-evaluate false: those entry points have no live mouse/focus state to
-match against, unlike a `<style>` block's cascade. Not supported:
-anything beyond this bounded grammar (`|=`, `:focus-within`, `:not()`,
-etc). `:hover`/`:focus` styling
-also only reaches elements the renderer actually hit-tests - every
+in a `<style>` block - `:hover`/`:focus`/`:focus-within` parse there too,
+but always evaluate false: those entry points have no live mouse/focus
+state to match against, unlike a `<style>` block's cascade. Not
+supported: anything beyond this bounded grammar (`|=`, `:not()`, etc).
+`:hover`/`:focus`/`:focus-within` styling also only reaches elements the
+renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level
 containers (`<div>`, `<p>`, `<li>`, ...), but not yet an inline element
 (`<span>`) or a table row/cell on its own (though a `<td>` still
-inherits `:hover` correctly from a hoverable *ancestor*, e.g.
-`.row:hover td` - it just can't be the direct target of the mouse
-itself).
+inherits `:hover`/`:focus-within` correctly from a hoverable/
+focus-containing *ancestor*, e.g. `.row:hover td` - it just can't be the
+direct target of the mouse/focus itself).
 
 Properties: `color`, `background-color`, `font-weight` (`bold`/
 `normal`), `border-color`, `border-width`, and a box model/flexbox pass -
