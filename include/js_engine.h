@@ -108,11 +108,18 @@ namespace artisan {
 //                                            position/modifiers) and
 //                                            "keydown" (fired whenever a
 //                                            focused input gets a key
-//                                            press, informational only
-//                                            for now - preventDefault()
-//                                            on it doesn't yet suppress
-//                                            the built-in editing
-//                                            behavior)
+//                                            press - calling
+//                                            preventDefault() on it
+//                                            suppresses main.cpp's own
+//                                            built-in editing for that
+//                                            key: character insertion,
+//                                            backspace/delete, arrow/
+//                                            home/end cursor movement,
+//                                            and the ctrl+a/c/x/v
+//                                            shortcuts alike, same as a
+//                                            real browser suppressing
+//                                            its default keydown
+//                                            handling on an <input>)
 //   node.removeEventListener(type, fn, captureOrOptions)
 //   node.dispatchEvent(event) -> !defaultPrevented; walks the same
 //                                            capturing/target/bubbling

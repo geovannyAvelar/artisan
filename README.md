@@ -294,9 +294,12 @@ below. `fn` receives a real event object (`type`/`target`/`bubbles`/
 `stopImmediatePropagation()`/`defaultPrevented`, plus MouseEvent/
 KeyboardEvent data - `clientX`/`clientY`/`ctrlKey`/`shiftKey`/`altKey`/
 `metaKey`/`key`/`code`, `0`/`false`/`""` on an event that isn't one of
-those - populated on `"click"` and `"keydown"`; `"keydown"`'s
-`preventDefault()` doesn't yet suppress the built-in text-editing
-behavior), dispatched through the usual capturing/target/bubbling
+those - populated on `"click"` and `"keydown"`; calling
+`preventDefault()` on `"keydown"` suppresses the built-in editing that
+key would otherwise do - character insertion, backspace/delete, arrow/
+home/end cursor movement, and the ctrl+a/c/x/v shortcuts alike - same as
+a real browser's default keydown handling on an `<input>`), dispatched
+through the usual capturing/target/bubbling
 phases. `element.dispatchEvent(event)` fires a script-built
 `new Event(type, {bubbles, cancelable})` or `new CustomEvent(type,
 {detail, bubbles, cancelable})` (both default `bubbles`/`cancelable` to

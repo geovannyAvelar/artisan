@@ -388,6 +388,16 @@ int main(int argc, char *argv[]) {
   InputFocus focus;
   bool isSelecting = false;
 
+  // Set for one event by SDL_KEYDOWN below when a script's "keydown"
+  // listener called preventDefault() - real DOM's `keydown`
+  // preventDefault() suppresses the browser's own default handling of
+  // that key, and for a text field that includes the character SDL is
+  // about to report separately via its own SDL_TEXTINPUT event (SDL
+  // splits "a key went down" and "this produced text" into two events;
+  // real DOM doesn't). Consumed (and cleared) by the very next
+  // SDL_TEXTINPUT - see the two cases below.
+  bool suppressNextTextInput = false;
+
   float scrollY = 0.0f;
   float contentHeight = static_cast<float>(kInitialHeight);
   constexpr float kWheelStep = 40.0f;
@@ -438,6 +448,7 @@ int main(int argc, char *argv[]) {
 
     focus = InputFocus{};
     isSelecting = false;
+    suppressNextTextInput = false;
     scrollY = 0.0f;
     needsRedraw = true;
   };
@@ -554,13 +565,20 @@ int main(int argc, char *argv[]) {
           break;
         }
 
-        // Informational for now - not wired to suppress the built-in
-        // editing below via preventDefault() (a bigger change: this
-        // handler mixes real key events with hardcoded shortcuts like
-        // ctrl+a/c/x/v, and untangling which of those a script should
-        // be able to override is its own follow-up, not attempted
-        // here). A listener still gets real key/code/modifier data.
-        focus.node->DispatchKeyEvent("keydown", MakeKeyEventInit(event.key.keysym));
+        // A listener calling preventDefault() here suppresses every bit
+        // of this handler's own built-in editing below for this key -
+        // backspace/delete, arrow/home/end cursor movement, and the
+        // ctrl+a/c/x/v shortcuts alike - the same as a real browser
+        // suppressing its default keydown handling on an <input>.
+        // suppressNextTextInput carries that same decision one step
+        // further, to the character insertion SDL reports via a
+        // separate SDL_TEXTINPUT event (see its declaration above).
+        bool keyDefaultPrevented = focus.node->DispatchKeyEvent(
+            "keydown", MakeKeyEventInit(event.key.keysym));
+        suppressNextTextInput = keyDefaultPrevented;
+        if (keyDefaultPrevented) {
+          break;
+        }
 
         std::string value = GetValue(focus.node);
         bool valueChanged = false;
@@ -678,6 +696,14 @@ int main(int argc, char *argv[]) {
       }
 
       case SDL_TEXTINPUT:
+        // Consume, not just check: this suppression is one-shot, for the
+        // single character the keydown that set it was about to produce
+        // - an unrelated later SDL_TEXTINPUT (from some subsequent key
+        // press) should insert normally.
+        if (suppressNextTextInput) {
+          suppressNextTextInput = false;
+          break;
+        }
         if (focus.node != nullptr) {
           std::string value = GetValue(focus.node);
           EraseSelection(focus, value);
