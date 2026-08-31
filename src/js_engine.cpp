@@ -42,6 +42,10 @@ JSClassID g_styleClassId = 0;
 // snapshot.
 JSClassID g_liveChildrenClassId = 0;
 
+// Single JS class ("DOMStringMap") backing node.dataset - see
+// "--- dataset ---" below.
+JSClassID g_datasetClassId = 0;
+
 // A JSContext only has room for one opaque pointer (JS_SetContextOpaque/
 // JS_GetContextOpaque) - document.getElementById and setTimeout/
 // setInterval both need to reach something engine-wide, so they share
@@ -177,6 +181,10 @@ void LiveChildrenFinalizer(JSRuntime * /*rt*/, JSValueConst val) {
       JS_GetOpaque(val, g_liveChildrenClassId));
 }
 
+void DatasetFinalizer(JSRuntime * /*rt*/, JSValueConst val) {
+  delete static_cast<AttributeViewHandle *>(JS_GetOpaque(val, g_datasetClassId));
+}
+
 Node *GetClassListNode(JSContext *ctx, JSValueConst val) {
   auto *handle = static_cast<AttributeViewHandle *>(
       JS_GetOpaque2(ctx, val, g_classListClassId));
@@ -198,6 +206,14 @@ Node *GetStyleNode(JSContext *ctx, JSValueConst val) {
 Node *GetLiveChildrenNode(JSValueConst val) {
   auto *handle =
       static_cast<AttributeViewHandle *>(JS_GetOpaque(val, g_liveChildrenClassId));
+  return handle != nullptr ? handle->node : nullptr;
+}
+
+// Same non-throwing shape as GetLiveChildrenNode, for the same reason -
+// dataset's exotic hooks below.
+Node *GetDatasetNode(JSValueConst val) {
+  auto *handle =
+      static_cast<AttributeViewHandle *>(JS_GetOpaque(val, g_datasetClassId));
   return handle != nullptr ? handle->node : nullptr;
 }
 
@@ -1114,9 +1130,10 @@ JSValue JsNodeGetStyle(JSContext *ctx, JSValueConst this_val) {
   return obj;
 }
 
-// dataset's data-* convention, method-based rather than true
-// `dataset.fooBar` property syntax (see js_engine.h's doc comment for
-// why) - "fooBar" <-> "data-foo-bar".
+// dataset's data-* convention - "fooBar" <-> "data-foo-bar". Used both by
+// getData/setData below (a method-based way to reach the same thing) and
+// by the real `node.dataset.fooBar` property syntax ("--- dataset ---"
+// further down).
 std::string DataNameToAttribute(const std::string &name) {
   std::string result = "data-";
   for (char c : name) {
@@ -1163,6 +1180,169 @@ JSValue JsNodeSetData(JSContext *ctx, JSValueConst this_val,
   JS_FreeCString(ctx, name);
   JS_FreeCString(ctx, value);
   return JS_UNDEFINED;
+}
+
+// --- dataset (real `node.dataset.fooBar` property syntax) ---
+//
+// Same exotic-hooks approach "--- children ---" above uses for
+// node.children, applied to a different shape: instead of numeric
+// indices over a child list, this is named properties over the node's
+// `data-*` attributes. Reading `dataset.fooBar` reads attribute
+// `data-foo-bar` live (no caching); writing or deleting it writes/
+// removes that attribute; enumerating it walks every `data-*` attribute
+// the node currently has. Unlike children (read-only, non-configurable
+// indices), dataset properties are writable and configurable - real
+// dataset supports `dataset.foo = "x"` and `delete dataset.foo`.
+
+// The reverse of DataNameToAttribute above ("data-foo-bar" -> "fooBar")
+// - only enumeration (JsDatasetGetOwnPropertyNames below) ever needs
+// this direction; a get/set/delete always starts from the camelCase
+// name and goes the other way. nullopt for an attribute that isn't a
+// `data-*` one at all (not every attribute on a node belongs in
+// dataset).
+std::optional<std::string> AttributeToDataName(const std::string &attr) {
+  constexpr size_t kPrefixLen = 5; // strlen("data-")
+  if (attr.compare(0, kPrefixLen, "data-") != 0) {
+    return std::nullopt;
+  }
+  std::string result;
+  for (size_t i = kPrefixLen; i < attr.size(); ++i) {
+    if (attr[i] == '-' && i + 1 < attr.size()) {
+      result += static_cast<char>(std::toupper(static_cast<unsigned char>(attr[i + 1])));
+      ++i;
+    } else {
+      result += attr[i];
+    }
+  }
+  return result;
+}
+
+// Converts a property atom (whatever a script wrote as `dataset.xyz` or
+// `dataset["xyz"]`) to the attribute name it maps to. Only fails if the
+// atom can't be read as a string at all (a symbol atom, in practice) -
+// any *string* atom, however unlikely a real dataset key (an empty
+// string, "0", ...), still maps to *some* attribute name, exactly as
+// real dataset would let you round-trip through.
+bool AtomToDataAttribute(JSContext *ctx, JSAtom prop, std::string *outAttr) {
+  const char *name = JS_AtomToCString(ctx, prop);
+  if (name == nullptr) {
+    return false;
+  }
+  *outAttr = DataNameToAttribute(name);
+  JS_FreeCString(ctx, name);
+  return true;
+}
+
+int JsDatasetGetOwnProperty(JSContext *ctx, JSPropertyDescriptor *desc,
+                             JSValueConst obj, JSAtom prop) {
+  Node *node = GetDatasetNode(obj);
+  if (node == nullptr) {
+    return false;
+  }
+  std::string attr;
+  if (!AtomToDataAttribute(ctx, prop, &attr)) {
+    return false;
+  }
+  const std::string *value = node->GetAttribute(attr);
+  if (value == nullptr) {
+    return false;
+  }
+  if (desc != nullptr) {
+    desc->flags = JS_PROP_ENUMERABLE | JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE;
+    desc->value = JS_NewString(ctx, value->c_str());
+    desc->getter = JS_UNDEFINED;
+    desc->setter = JS_UNDEFINED;
+  }
+  return true;
+}
+
+// `dataset.foo = "bar"` (and Object.defineProperty(dataset, "foo",
+// {value: "bar"})) both come through here as a plain data-value
+// descriptor - the only shape dataset supports. An accessor descriptor
+// (a getter/setter) or a value-less reconfigure isn't something real
+// dataset accepts either, so those are rejected the same way
+// get_own_property already rejects a name with no matching attribute:
+// return false rather than defining anything.
+int JsDatasetDefineOwnProperty(JSContext *ctx, JSValueConst this_obj,
+                                JSAtom prop, JSValueConst val,
+                                JSValueConst /*getter*/,
+                                JSValueConst /*setter*/, int flags) {
+  Node *node = GetDatasetNode(this_obj);
+  if (node == nullptr || !(flags & JS_PROP_HAS_VALUE)) {
+    return false;
+  }
+  std::string attr;
+  if (!AtomToDataAttribute(ctx, prop, &attr)) {
+    return false;
+  }
+  const char *text = JS_ToCString(ctx, val);
+  if (text == nullptr) {
+    return -1; // val's own ToString threw.
+  }
+  node->SetAttribute(attr, text);
+  JS_FreeCString(ctx, text);
+  return true;
+}
+
+// `delete dataset.foo`. Configurable and always present-or-absent (no
+// non-configurable dataset property exists to refuse deleting), so this
+// always succeeds - same as deleting any ordinary, possibly-already-
+// absent property would.
+int JsDatasetDeleteProperty(JSContext *ctx, JSValueConst obj, JSAtom prop) {
+  Node *node = GetDatasetNode(obj);
+  if (node != nullptr) {
+    std::string attr;
+    if (AtomToDataAttribute(ctx, prop, &attr)) {
+      node->RemoveAttribute(attr);
+    }
+  }
+  return true;
+}
+
+int JsDatasetGetOwnPropertyNames(JSContext *ctx, JSPropertyEnum **ptab,
+                                  uint32_t *plen, JSValueConst obj) {
+  Node *node = GetDatasetNode(obj);
+  std::vector<std::string> names;
+  if (node != nullptr) {
+    for (const auto &entry : node->attributes()) {
+      std::optional<std::string> dataName = AttributeToDataName(entry.first);
+      if (dataName.has_value()) {
+        names.push_back(*dataName);
+      }
+    }
+  }
+  JSPropertyEnum *tab = static_cast<JSPropertyEnum *>(
+      js_malloc(ctx, sizeof(JSPropertyEnum) * (names.empty() ? 1 : names.size())));
+  if (tab == nullptr) {
+    return -1;
+  }
+  for (size_t i = 0; i < names.size(); ++i) {
+    tab[i].is_enumerable = true;
+    tab[i].atom = JS_NewAtom(ctx, names[i].c_str());
+  }
+  *ptab = tab;
+  *plen = static_cast<uint32_t>(names.size());
+  return 0;
+}
+
+const JSClassExoticMethods kDatasetExotic = {
+    .get_own_property = JsDatasetGetOwnProperty,
+    .get_own_property_names = JsDatasetGetOwnPropertyNames,
+    .delete_property = JsDatasetDeleteProperty,
+    .define_own_property = JsDatasetDefineOwnProperty,
+};
+
+JSValue JsNodeGetDataset(JSContext *ctx, JSValueConst this_val) {
+  Node *node = GetNode(ctx, this_val);
+  if (node == nullptr) {
+    return JS_EXCEPTION;
+  }
+  JSValue obj = JS_NewObjectClass(ctx, g_datasetClassId);
+  if (JS_IsException(obj)) {
+    return obj;
+  }
+  JS_SetOpaque(obj, new AttributeViewHandle{node});
+  return obj;
 }
 
 JSValue JsNodeQuerySelector(JSContext *ctx, JSValueConst this_val,
@@ -1422,6 +1602,7 @@ const JSCFunctionListEntry kNodeProto[] = {
     JS_CGETSET_DEF("nodeType", JsNodeGetNodeType, nullptr),
     JS_CGETSET_DEF("classList", JsNodeGetClassList, nullptr),
     JS_CGETSET_DEF("style", JsNodeGetStyle, nullptr),
+    JS_CGETSET_DEF("dataset", JsNodeGetDataset, nullptr),
     JS_PROP_INT32_DEF("ELEMENT_NODE", 1, JS_PROP_CONFIGURABLE),
     JS_PROP_INT32_DEF("TEXT_NODE", 3, JS_PROP_CONFIGURABLE),
 };
@@ -1700,6 +1881,20 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   JS_SetPropertyFunctionList(impl_->ctx, liveChildrenProto, kLiveChildrenProto,
                               static_cast<int>(std::size(kLiveChildrenProto)));
   JS_SetClassProto(impl_->ctx, g_liveChildrenClassId, liveChildrenProto);
+
+  JS_NewClassID(impl_->rt, &g_datasetClassId);
+  JSClassDef datasetClassDef{};
+  datasetClassDef.class_name = "DOMStringMap";
+  datasetClassDef.finalizer = DatasetFinalizer;
+  datasetClassDef.exotic = const_cast<JSClassExoticMethods *>(&kDatasetExotic);
+  JS_NewClass(impl_->rt, g_datasetClassId, &datasetClassDef);
+
+  // No own methods/getters - every dataset property is a named `data-*`
+  // attribute handled entirely by the exotic hooks above, so the
+  // prototype just needs to exist (JS_NewObjectClass requires a class to
+  // have one), not carry anything.
+  JSValue datasetProto = JS_NewObject(impl_->ctx);
+  JS_SetClassProto(impl_->ctx, g_datasetClassId, datasetProto);
 
   JSValue documentObj = JS_NewObject(impl_->ctx);
   JS_SetPropertyFunctionList(impl_->ctx, documentObj, kDocumentFuncs,

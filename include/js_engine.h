@@ -63,11 +63,28 @@ namespace artisan {
 //                                            css.h's Declarations
 //                                            understands, camelCase -
 //                                            see css.h/ParseDeclarations)
+//   node.dataset.fooBar                    (read/write/delete; real
+//                                            property syntax over the
+//                                            node's data-* attributes -
+//                                            "fooBar" <-> "data-foo-bar",
+//                                            same mapping getData/setData
+//                                            below use. `delete
+//                                            node.dataset.foo` removes
+//                                            the attribute.
+//                                            Object.keys/for-in/
+//                                            JSON.stringify all see
+//                                            exactly the node's data-*
+//                                            keys, camelCased - not
+//                                            iterable (no for-of/spread),
+//                                            same simplification as
+//                                            node.children below)
 //   node.getData(name) / setData(name, value)
-//                                           (dataset's data-* attributes,
-//                                            but method-based rather than
-//                                            true dataset.foo property
-//                                            syntax - see js_engine.cpp)
+//                                           (an older, method-based way
+//                                            to reach the exact same
+//                                            data-* attributes as
+//                                            node.dataset above - kept
+//                                            for existing callers, not
+//                                            because dataset can't do it)
 //   node.appendChild(child) / insertBefore(child, referenceOrNull)
 //   node.removeChild(child) / remove()     -> the removed node, still
 //                                            alive and re-appendable

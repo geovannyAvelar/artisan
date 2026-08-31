@@ -175,6 +175,14 @@ public:
   void SetAttribute(const std::string &name, const std::string &value);
   void RemoveAttribute(const std::string &name);
 
+  // Every attribute this node has - the enumeration counterpart to
+  // GetAttribute's single-name lookup above. Used for e.g. `node.dataset`
+  // needing to list its `data-*` keys (js_engine.cpp) rather than just
+  // read/write one at a time.
+  const std::map<std::string, std::string> &attributes() const {
+    return attributes_;
+  }
+
   // kElement only: raw encoded (PNG/JPEG/GIF/WebP) image bytes this node
   // displays - set by artisanc for an <img> compiled from markup (the
   // file's bytes embedded into the binary's .rodata at build time, so no

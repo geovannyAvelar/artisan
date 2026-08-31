@@ -271,9 +271,14 @@ also `Node.ELEMENT_NODE`/`Node.TEXT_NODE`), `textContent`,
 `backgroundColor`/`fontWeight`/`borderColor`/`borderWidth`/`cssText`
 (exactly the five properties [Using CSS](#using-css) below supports,
 merged into the cascade at the highest precedence, same as real inline
-style), `getData(name)`/`setData(name, value)` (a `data-*` attribute,
-`fooBar` <-> `data-foo-bar` - method-based, not true
-`dataset.fooBar` property syntax), `appendChild`/`insertBefore`/
+style), `dataset.fooBar` (real read/write/delete property syntax over a
+node's `data-*` attributes - `fooBar` <-> `data-foo-bar`; `delete
+node.dataset.foo` removes the attribute, and `Object.keys`/`for-in` see
+exactly the node's `data-*` keys, camelCased - not iterable, though, no
+`for-of`/spread, same as `children` below), plus the older method-based
+`getData(name)`/`setData(name, value)` pair reaching the same
+attributes, kept alongside `dataset` for existing callers,
+`appendChild`/`insertBefore`/
 `removeChild`/`remove()` (the removed node stays alive and
 re-appendable), `cloneNode(deep)`, `matches(selector)`/
 `closest(selector)`, `parentNode`/`nextSibling`/`previousSibling`/
