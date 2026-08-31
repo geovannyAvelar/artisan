@@ -11,9 +11,12 @@ extern "C" {
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <iterator>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 
 namespace artisan {
@@ -34,15 +37,39 @@ JSClassID g_eventClassId = 0;
 JSClassID g_classListClassId = 0;
 JSClassID g_styleClassId = 0;
 
+// Single JS class ("HTMLCollection") backing node.children - see
+// LiveChildrenExotic* below for what makes it live rather than a
+// snapshot.
+JSClassID g_liveChildrenClassId = 0;
+
 // A JSContext only has room for one opaque pointer (JS_SetContextOpaque/
 // JS_GetContextOpaque) - document.getElementById and setTimeout/
 // setInterval both need to reach something engine-wide, so they share
 // this one struct instead of fighting over the single slot. Owned by
 // JsEngine::Impl, one instance per JsEngine (see JsEngine's constructor).
+//
+// `nodeWrapperCache` is what makes node identity work: WrapExistingNode/
+// WrapOwnedNode (below) consult it before building a new "Node" object,
+// so two independently-obtained references to the same underlying
+// artisan::Node (`document.getElementById(id)` called twice, a
+// dispatched event's `.target` vs. a script's own saved reference, ...)
+// come back as the *same* JS object - `===` between them now holds. It's
+// a weak map, not a normal cache: inserting never bumps the stored
+// JSValue's refcount (see CacheNodeWrapper), so a wrapper with no other
+// referent still gets garbage collected exactly as before, at which
+// point NodeFinalizer erases its entry. The other half of keeping this
+// safe is Node::SetDestroyHook (dom_node.h): the *node* side can go away
+// first too (a C++/Go caller discarding a RemoveChild return, a whole
+// subtree being torn down, ...), and when it does, the hook installed by
+// CacheNodeWrapper erases the entry before that address could ever be
+// reused by an unrelated later Node - see ~Impl() for why that hook also
+// has to be cleared, not just relied on, once this EngineContext itself
+// is going away.
 struct EngineContext {
   Node *document;
   TimerQueue *timers;
   AnimationFrameQueue *animationFrames;
+  std::unordered_map<Node *, JSValue> nodeWrapperCache;
 };
 
 EngineContext *ContextOpaque(JSContext *ctx) {
@@ -62,8 +89,25 @@ struct NodeHandle {
   std::unique_ptr<Node> owned;
 };
 
-void NodeFinalizer(JSRuntime * /*rt*/, JSValueConst val) {
-  delete static_cast<NodeHandle *>(JS_GetOpaque(val, g_nodeClassId));
+void NodeFinalizer(JSRuntime *rt, JSValueConst val) {
+  NodeHandle *handle = static_cast<NodeHandle *>(JS_GetOpaque(val, g_nodeClassId));
+  if (handle != nullptr) {
+    // Mirror of CacheNodeWrapper's insert: this wrapper is going away, so
+    // drop its (weak, non-refcounted) cache entry too - but only if the
+    // entry still actually points at *this* object. It normally does;
+    // the guard just protects against the (currently never hit, but
+    // cheap to guard against) case of some other path having already
+    // replaced it with a different wrapper for the same node.
+    auto *engine = static_cast<EngineContext *>(JS_GetRuntimeOpaque(rt));
+    if (engine != nullptr) {
+      auto it = engine->nodeWrapperCache.find(handle->ptr);
+      if (it != engine->nodeWrapperCache.end() &&
+          JS_VALUE_GET_PTR(it->second) == JS_VALUE_GET_PTR(val)) {
+        engine->nodeWrapperCache.erase(it);
+      }
+    }
+  }
+  delete handle;
 }
 
 // An "Event" JS object's opaque data. `ptr` points at the live
@@ -128,6 +172,11 @@ void StyleFinalizer(JSRuntime * /*rt*/, JSValueConst val) {
   delete static_cast<AttributeViewHandle *>(JS_GetOpaque(val, g_styleClassId));
 }
 
+void LiveChildrenFinalizer(JSRuntime * /*rt*/, JSValueConst val) {
+  delete static_cast<AttributeViewHandle *>(
+      JS_GetOpaque(val, g_liveChildrenClassId));
+}
+
 Node *GetClassListNode(JSContext *ctx, JSValueConst val) {
   auto *handle = static_cast<AttributeViewHandle *>(
       JS_GetOpaque2(ctx, val, g_classListClassId));
@@ -140,6 +189,18 @@ Node *GetStyleNode(JSContext *ctx, JSValueConst val) {
   return handle != nullptr ? handle->node : nullptr;
 }
 
+// Unlike GetClassListNode/GetStyleNode, this is called from exotic
+// property hooks - which are also reachable for a plain `JS_GetOpaque`
+// failure (e.g. something holding this class's prototype rather than an
+// instance), so it uses the non-throwing JS_GetOpaque, not
+// JS_GetOpaque2, and lets its caller decide what "not a real instance"
+// means for that particular hook.
+Node *GetLiveChildrenNode(JSValueConst val) {
+  auto *handle =
+      static_cast<AttributeViewHandle *>(JS_GetOpaque(val, g_liveChildrenClassId));
+  return handle != nullptr ? handle->node : nullptr;
+}
+
 void PrintException(JSContext *ctx) {
   JSValue exception = JS_GetException(ctx);
   const char *message = JS_ToCString(ctx, exception);
@@ -149,15 +210,35 @@ void PrintException(JSContext *ctx) {
   JS_FreeValue(ctx, exception);
 }
 
+// Registers `obj` (a just-built, not-yet-cached "Node" wrapper for
+// `node`) in the identity cache - see EngineContext's doc comment for the
+// overall scheme. Stores the JSValue without duping it (a weak entry:
+// this cache must never be the thing keeping a wrapper alive) and points
+// `node`'s destroy hook back at this same cache, so whichever of "the JS
+// wrapper gets collected" (NodeFinalizer) or "the node itself gets
+// destroyed" (~Node) happens first is the one that cleans the entry up.
+void CacheNodeWrapper(JSContext *ctx, Node *node, JSValueConst obj) {
+  EngineContext *engine = ContextOpaque(ctx);
+  engine->nodeWrapperCache[node] = obj;
+  node->SetDestroyHook(
+      [engine](Node *n) { engine->nodeWrapperCache.erase(n); });
+}
+
 JSValue WrapExistingNode(JSContext *ctx, Node *node) {
   if (node == nullptr) {
     return JS_NULL;
+  }
+  EngineContext *engine = ContextOpaque(ctx);
+  auto it = engine->nodeWrapperCache.find(node);
+  if (it != engine->nodeWrapperCache.end()) {
+    return JS_DupValue(ctx, it->second);
   }
   JSValue obj = JS_NewObjectClass(ctx, g_nodeClassId);
   if (JS_IsException(obj)) {
     return obj;
   }
   JS_SetOpaque(obj, new NodeHandle{node, nullptr});
+  CacheNodeWrapper(ctx, node, obj);
   return obj;
 }
 
@@ -168,6 +249,13 @@ JSValue WrapOwnedNode(JSContext *ctx, std::unique_ptr<Node> node) {
   }
   Node *ptr = node.get();
   JS_SetOpaque(obj, new NodeHandle{ptr, std::move(node)});
+  // A brand-new node (createElement/createTextNode/cloneNode) can't
+  // already be in the cache - it's a fresh heap allocation - but it
+  // still needs to go *into* the cache now, so a later WrapExistingNode
+  // for this same node (e.g. document.getElementById after it's been
+  // appended and given an id) finds and reuses this exact wrapper
+  // instead of minting a second, `===`-unequal one.
+  CacheNodeWrapper(ctx, ptr, obj);
   return obj;
 }
 
@@ -570,6 +658,143 @@ const JSCFunctionListEntry kClassListProto[] = {
     JS_CFUNC_DEF("contains", 1, JsClassListContains),
     JS_CFUNC_DEF("toggle", 1, JsClassListToggle),
     JS_CGETSET_DEF("length", JsClassListGetLength, nullptr),
+};
+
+// --- children (a live HTMLCollection, not a snapshot) ---
+//
+// node.children used to just be BuildNodeArray(node->children()) - a
+// real JS array, but a snapshot: fixed at the moment of the call, deaf
+// to any append/remove that happens afterward, same as querySelectorAll
+// (which is correctly a snapshot in real DOM too - it's `children` that
+// isn't). This section makes it live instead, by *not* pre-populating
+// any index/length data at all: the object below carries only a Node*
+// (which child list to read), and every `[i]`/`.length` access re-reads
+// node->children() at that moment via QuickJS's exotic-object hooks
+// (JSClassExoticMethods) - the same mechanism real engines use for
+// String's `str[i]` and Proxy. `Object.keys`, `for...in`, and
+// `Array.from` all work off of get_own_property_names below and don't
+// need anything else; `for...of`/`.forEach()`/spread do NOT work - those
+// need Symbol.iterator, which this class doesn't implement (matching
+// real HTMLCollection, which - unlike NodeList - was never iterable
+// either, before browsers added it as a later, separate addition).
+
+// Parses `prop` as an array-index property name ("0", "1", "23", ... -
+// not "01", "-1", "1.5", or anything non-numeric), the same restricted
+// grammar real array-index properties use. Needed because - unlike
+// quickjs.c's own exotic classes (js_string_get_own_property and
+// friends) - this file has no access to quickjs.c's internal tagged-atom
+// fast path (__JS_AtomIsTaggedInt/__JS_AtomToUInt32 aren't part of the
+// public quickjs.h), so it goes through the atom's string form instead.
+bool AtomToIndex(JSContext *ctx, JSAtom prop, uint32_t *outIndex) {
+  const char *str = JS_AtomToCString(ctx, prop);
+  if (str == nullptr) {
+    return false;
+  }
+  bool ok = false;
+  if (str[0] != '\0' && !(str[0] == '0' && str[1] != '\0')) {
+    const char *p = str;
+    while (*p != '\0' && std::isdigit(static_cast<unsigned char>(*p))) {
+      ++p;
+    }
+    if (*p == '\0') {
+      char *end = nullptr;
+      unsigned long value = std::strtoul(str, &end, 10);
+      if (*end == '\0' && value <= UINT32_MAX) {
+        *outIndex = static_cast<uint32_t>(value);
+        ok = true;
+      }
+    }
+  }
+  JS_FreeCString(ctx, str);
+  return ok;
+}
+
+// Exotic get_own_property: only ever claims numeric-index properties -
+// "length" deliberately isn't handled here (see kLiveChildrenProto's
+// getter below instead) so that a lookup for it, or for anything else
+// (a method, Symbol.iterator, ...), falls through to this class's
+// prototype the normal way, exactly as if this hook didn't exist for
+// that property.
+int JsLiveChildrenGetOwnProperty(JSContext *ctx, JSPropertyDescriptor *desc,
+                                  JSValueConst obj, JSAtom prop) {
+  Node *node = GetLiveChildrenNode(obj);
+  if (node == nullptr) {
+    return false;
+  }
+  uint32_t index = 0;
+  if (!AtomToIndex(ctx, prop, &index)) {
+    return false;
+  }
+  const auto &kids = node->children();
+  if (index >= kids.size()) {
+    return false;
+  }
+  if (desc != nullptr) {
+    desc->flags = JS_PROP_ENUMERABLE;
+    desc->value = WrapExistingNode(ctx, kids[index].get());
+    desc->getter = JS_UNDEFINED;
+    desc->setter = JS_UNDEFINED;
+  }
+  return true;
+}
+
+// Exotic get_own_property_names: reports index 0..length-1 as this
+// object's own keys - what Object.keys/for-in/Array.from actually walk.
+// "length" isn't included, matching real Array (its own `length` is a
+// non-enumerable data property, invisible to all three of those) - ours
+// lives on the prototype instead (see kLiveChildrenProto), so it's
+// already correctly excluded without special-casing it here.
+int JsLiveChildrenGetOwnPropertyNames(JSContext *ctx, JSPropertyEnum **ptab,
+                                       uint32_t *plen, JSValueConst obj) {
+  Node *node = GetLiveChildrenNode(obj);
+  size_t count = node != nullptr ? node->children().size() : 0;
+  JSPropertyEnum *tab = static_cast<JSPropertyEnum *>(
+      js_malloc(ctx, sizeof(JSPropertyEnum) * (count > 0 ? count : 1)));
+  if (tab == nullptr) {
+    return -1;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    tab[i].is_enumerable = true;
+    tab[i].atom = JS_NewAtomUInt32(ctx, static_cast<uint32_t>(i));
+  }
+  *ptab = tab;
+  *plen = static_cast<uint32_t>(count);
+  return 0;
+}
+
+const JSClassExoticMethods kLiveChildrenExotic = {
+    .get_own_property = JsLiveChildrenGetOwnProperty,
+    .get_own_property_names = JsLiveChildrenGetOwnPropertyNames,
+    // delete_property/define_own_property/has_property/get_property/
+    // set_property all left null: nulling delete_property/
+    // define_own_property doesn't make index assignment/delete
+    // *rejected* so much as *ordinary* - `list[0] = x` falls back to
+    // JS_DefineProperty's default path, which (per get_own_property
+    // above reporting every index as non-writable/non-configurable)
+    // still correctly no-ops rather than actually mutating the tree,
+    // same net effect real HTMLCollection has, just arrived at through
+    // "can't overwrite a non-writable property" rather than a
+    // hand-written rejection.
+};
+
+Node *GetLiveChildrenNodeThrowing(JSContext *ctx, JSValueConst val) {
+  Node *node = GetLiveChildrenNode(val);
+  if (node == nullptr) {
+    JS_ThrowTypeError(ctx, "not an HTMLCollection");
+  }
+  return node;
+}
+
+JSValue JsLiveChildrenGetLength(JSContext *ctx, JSValueConst this_val) {
+  Node *node = GetLiveChildrenNodeThrowing(ctx, this_val);
+  if (node == nullptr) {
+    return JS_EXCEPTION;
+  }
+  return JS_NewInt32(ctx, static_cast<int32_t>(node->children().size()));
+}
+
+const JSCFunctionListEntry kLiveChildrenProto[] = {
+    JS_CGETSET_DEF("length", JsLiveChildrenGetLength, nullptr),
 };
 
 // --- style ---
@@ -1125,11 +1350,18 @@ JSValue JsNodeGetChildren(JSContext *ctx, JSValueConst this_val) {
   if (node == nullptr) {
     return JS_EXCEPTION;
   }
-  std::vector<Node *> children;
-  for (const auto &child : node->children()) {
-    children.push_back(child.get());
+  // A live HTMLCollection (see "--- children ---" above), not a snapshot
+  // array - a fresh small wrapper object per access, same simplification
+  // node.classList/node.style already make (their doc comment on
+  // AttributeViewHandle explains why that's fine): what matters is that
+  // *reads through it* stay live, not that repeated `node.children`
+  // accesses return the same object.
+  JSValue obj = JS_NewObjectClass(ctx, g_liveChildrenClassId);
+  if (JS_IsException(obj)) {
+    return obj;
   }
-  return BuildNodeArray(ctx, children);
+  JS_SetOpaque(obj, new AttributeViewHandle{node});
+  return obj;
 }
 
 JSValue JsNodeGetTagName(JSContext *ctx, JSValueConst this_val) {
@@ -1371,7 +1603,7 @@ JSValue JsCancelAnimationFrame(JSContext *ctx, JSValueConst /*this_val*/,
 struct JsEngine::Impl {
   JSRuntime *rt = nullptr;
   JSContext *ctx = nullptr;
-  EngineContext engineContext{nullptr, nullptr, nullptr};
+  EngineContext engineContext{nullptr, nullptr, nullptr, {}};
 
   ~Impl() {
     if (ctx != nullptr) {
@@ -1379,6 +1611,19 @@ struct JsEngine::Impl {
     }
     if (rt != nullptr) {
       JS_FreeRuntime(rt);
+    }
+    // Freeing the context/runtime above finalizes every JS-side wrapper
+    // that was still alive, which (via NodeFinalizer) already erased its
+    // own cache entry. Anything left in nodeWrapperCache now belongs to a
+    // node with no surviving wrapper - i.e. a node the C++ tree itself
+    // still owns, which per JsEngine's constructor contract can outlive
+    // this JsEngine. Its destroy hook closes over `engineContext`
+    // (CacheNodeWrapper), which is about to be destroyed along with the
+    // rest of this Impl - clear the hook now so that node's *real*
+    // destruction, whenever it eventually happens, doesn't call back into
+    // freed memory.
+    for (auto &entry : engineContext.nodeWrapperCache) {
+      entry.first->SetDestroyHook(nullptr);
     }
   }
 };
@@ -1389,8 +1634,15 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   impl_->rt = JS_NewRuntime();
   impl_->ctx = JS_NewContext(impl_->rt);
 
-  impl_->engineContext = EngineContext{&document, &timers, &animationFrames};
+  impl_->engineContext.document = &document;
+  impl_->engineContext.timers = &timers;
+  impl_->engineContext.animationFrames = &animationFrames;
   JS_SetContextOpaque(impl_->ctx, &impl_->engineContext);
+  // NodeFinalizer runs with only the JSRuntime, not this JSContext (see
+  // its doc comment) - give it a second way to reach the same
+  // EngineContext (and therefore nodeWrapperCache) so it can keep the
+  // identity cache in sync with the JS heap's own GC.
+  JS_SetRuntimeOpaque(impl_->rt, &impl_->engineContext);
 
   JS_NewClassID(impl_->rt, &g_nodeClassId);
   JSClassDef nodeClassDef{};
@@ -1435,6 +1687,19 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   JS_SetPropertyFunctionList(impl_->ctx, styleProto, kStyleProto,
                               static_cast<int>(std::size(kStyleProto)));
   JS_SetClassProto(impl_->ctx, g_styleClassId, styleProto);
+
+  JS_NewClassID(impl_->rt, &g_liveChildrenClassId);
+  JSClassDef liveChildrenClassDef{};
+  liveChildrenClassDef.class_name = "HTMLCollection";
+  liveChildrenClassDef.finalizer = LiveChildrenFinalizer;
+  liveChildrenClassDef.exotic =
+      const_cast<JSClassExoticMethods *>(&kLiveChildrenExotic);
+  JS_NewClass(impl_->rt, g_liveChildrenClassId, &liveChildrenClassDef);
+
+  JSValue liveChildrenProto = JS_NewObject(impl_->ctx);
+  JS_SetPropertyFunctionList(impl_->ctx, liveChildrenProto, kLiveChildrenProto,
+                              static_cast<int>(std::size(kLiveChildrenProto)));
+  JS_SetClassProto(impl_->ctx, g_liveChildrenClassId, liveChildrenProto);
 
   JSValue documentObj = JS_NewObject(impl_->ctx);
   JS_SetPropertyFunctionList(impl_->ctx, documentObj, kDocumentFuncs,

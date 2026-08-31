@@ -8,6 +8,12 @@ namespace artisan {
 Node::Node(NodeType type, std::string tagName, std::string text)
     : type_(type), tagName_(std::move(tagName)), text_(std::move(text)) {}
 
+Node::~Node() {
+  if (destroyHook_) {
+    destroyHook_(this);
+  }
+}
+
 std::unique_ptr<Node> Node::CreateElement(const std::string &tagName) {
   return std::unique_ptr<Node>(new Node(NodeType::kElement, tagName, ""));
 }

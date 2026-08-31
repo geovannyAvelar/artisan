@@ -21,10 +21,36 @@ namespace artisan {
 //                                            also the ELEMENT_NODE/
 //                                            TEXT_NODE constants below)
 //   node.textContent                       (read/write)
-//   node.parentNode / nextSibling / previousSibling / children
-//                                           (read-only; snapshots, not a
-//                                            live view - see QuerySelector
-//                                            in css.h for what that means)
+//   node.parentNode / nextSibling / previousSibling
+//                                           (read-only; re-read from the
+//                                            tree on every access, so
+//                                            already "live" in the only
+//                                            sense that means anything
+//                                            for a single node reference)
+//   node.children                          (read-only; a live
+//                                            HTMLCollection-like object -
+//                                            .length and node.children[i]
+//                                            both re-read the tree on
+//                                            every access, so an
+//                                            append/remove after the
+//                                            fact is visible through a
+//                                            `var kids = node.children`
+//                                            held from before it - see
+//                                            "--- children ---" in
+//                                            js_engine.cpp. Not iterable
+//                                            (no for-of/spread/forEach -
+//                                            matches real HTMLCollection,
+//                                            historically; Object.keys/
+//                                            for-in/Array.from all work)
+//                                            and read-only (assigning an
+//                                            index is a silent no-op).
+//                                            querySelector(All) below
+//                                            stay real snapshot arrays,
+//                                            matching real DOM (unlike
+//                                            children/childNodes,
+//                                            querySelectorAll is
+//                                            specified as static, not
+//                                            live)
 //   node.getAttribute(name)                -> string or null
 //   node.setAttribute(name, value)
 //   node.hasAttribute(name) / removeAttribute(name)
@@ -100,16 +126,23 @@ namespace artisan {
 // A few real gaps, not just missing bindings: classList/style cover
 // exactly what the rest of this Node model already covers (the "class"
 // attribute's tokens; the same five properties a <style> block
-// supports) - not real CSS's full surface. And every wrapped node is a
-// fresh JS object per call (WrapExistingNode, js_engine.cpp) - `===`
-// between two references to the same underlying node is always false
-// (this includes a dispatched event's `.target`, and - per listener - a
-// dispatchEvent-driven event itself: every listener invoked by one
-// dispatchEvent(event) call gets its own fresh object carrying the same
-// type/detail/bubbles/cancelable, not `event` itself), and a second,
+// supports) - not real CSS's full surface. And a second,
 // independently-obtained reference to a node removed (see removeChild/
 // remove above) through a *different* reference can dangle if the
 // reference that now owns it gets garbage-collected first.
+//
+// Node identity: WrapExistingNode/WrapOwnedNode (js_engine.cpp) keep a
+// weak Node* -> JSValue cache, so two references to the same underlying
+// node - document.getElementById(id) called twice, a dispatched event's
+// `.target` vs. a script's own saved reference, a node handed back by
+// createElement and then re-found via querySelector - come back as the
+// *same* JS object, and `===` between them holds. What that cache
+// doesn't do: the *Event* object a listener receives is still a fresh
+// object per listener, per dispatchEvent(event) call (carrying the same
+// type/detail/bubbles/cancelable/target - not `event` itself), even
+// though its `.target` property is now the identity-cached node, so
+// `event.target === savedRef` holds even where `event === event` across
+// two listeners of the same dispatch would not.
 class JsEngine {
 public:
   // `document`, `timers`, and `animationFrames` must all outlive this

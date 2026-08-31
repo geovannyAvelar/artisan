@@ -137,6 +137,22 @@ public:
   Node(Node &&) = delete;
   Node &operator=(Node &&) = delete;
 
+  ~Node();
+
+  // Invoked (with `this`) the instant before this node's own state starts
+  // tearing down - lets a single external owner invalidate anything keyed
+  // by this node's address before that address can be reused by an
+  // unrelated later allocation. In practice the only caller is JsEngine's
+  // node-wrapper identity cache (js_engine.cpp): a JS wrapper stays valid
+  // (and `===`-comparable) for as long as the Node it points to is alive,
+  // and this is how the cache finds out that's no longer true. At most one
+  // hook at a time - matching the "one JsEngine per process" assumption
+  // already used for the JS class IDs - setting a new one silently
+  // replaces the old.
+  void SetDestroyHook(std::function<void(Node *)> hook) {
+    destroyHook_ = std::move(hook);
+  }
+
   NodeType type() const { return type_; }
 
   // kElement only ("" for a text node).
@@ -326,6 +342,7 @@ private:
 
   Node *parent_ = nullptr;
   std::vector<std::unique_ptr<Node>> children_;
+  std::function<void(Node *)> destroyHook_;
 };
 
 } // namespace artisan

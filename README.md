@@ -305,18 +305,32 @@ phases. `element.dispatchEvent(event)` fires a script-built
 ms - a callback that calls `requestAnimationFrame` again, the normal way
 to animate, schedules for the *next* one, never the current call).
 
-A few real gaps: `children`/`querySelectorAll` return a
-plain array, a snapshot at call time, not a live list - and every
-wrapped node is a fresh JS object per call, so `===` between two
-references to the same underlying node is always `false` (this includes
-a dispatched event's `.target`, and - within one `dispatchEvent(event)`
-call - `event` itself vs. what each listener actually receives); compare
-`tagName`/`getAttribute` values, or hold onto one reference, instead of
-relying on identity. That also means a *second*, independently-obtained
-reference to a node removed through a different reference can dangle if
-the reference that now owns it gets garbage-collected first - hold onto
-the reference `removeChild`/`remove()` actually returned if you plan to
-keep using the node.
+`querySelectorAll` returns a plain array, a snapshot at call time -
+appending/removing a child afterward doesn't retroactively change an
+array you already have (matching real DOM: `querySelectorAll` is
+specified as static, not live). `children` is the opposite on purpose -
+a live HTMLCollection-like object whose `.length` and `children[i]`
+both re-read the tree on every access, so a `var kids = node.children`
+held from before an append/remove sees it happen. It isn't a real
+`Array` - `Array.isArray(node.children)` is `false`, and there's no
+`for...of`/`.forEach()`/spread (no `Symbol.iterator` - same as real
+HTMLCollection, historically) - but `Object.keys`/`for...in`/
+`Array.from` all work, and writing to an index (`node.children[0] = x`)
+is a silent no-op rather than mutating the tree. Node identity does
+work, though: `document.getElementById(id)` called twice, a dispatched
+event's `.target`, a node handed back by `createElement` and then
+re-found via `querySelector` - every one of those is the *same* wrapped
+JS object as any other live reference to that node, so `===` between
+them holds. The one place identity still doesn't extend is the `Event`
+object itself - within one `dispatchEvent(event)` call, each listener
+gets its own fresh event object (carrying the same
+type/detail/bubbles/cancelable/target, not `event` itself), so
+`event === event` across two listeners of the same dispatch is `false`
+even though `event.target` on both is the same node. Separately, a
+*second*, independently-obtained reference to a node removed through a
+different reference can dangle if the reference that now owns it gets
+garbage-collected first - hold onto the reference `removeChild`/
+`remove()` actually returned if you plan to keep using the node.
 
 ## Using CSS
 
