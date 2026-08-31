@@ -36,6 +36,13 @@ struct BoxRegion {
   float y;
   float width;
   float height;
+
+  // How far a kBox (boxKind kText)'s own text starts inset from `x` -
+  // kBoxPadding plus whatever CSS padding-left the cascade resolved for
+  // it (see BoxWidgetHandler::Render). Left at its default (0) by every
+  // other handler's BoxRegion, which have no such inset to report - only
+  // CharIndexAt (main.cpp) reads this, and only for a text kBox.
+  float textInsetLeft = 0.0f;
 };
 
 // Paints a compiled Widget tree through an IRenderer using a simple top-to-

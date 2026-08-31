@@ -325,7 +325,7 @@ const BoxRegion *HitTestRegion(const std::vector<BoxRegion> &regions,
 // nullptr-canvas constructor note); this never paints with it.
 int CharIndexAt(const artisan::IRenderer &renderer, const BoxRegion &region,
                  const Node *node, float x) {
-  float relativeX = x - (region.x + artisan::kBoxPadding);
+  float relativeX = x - (region.x + region.textInsetLeft);
   return artisan::CharIndexAtX(renderer, GetValue(node),
                                 artisan::kDefaultFontSize, relativeX);
 }

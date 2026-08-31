@@ -802,8 +802,15 @@ void RenderCheckable(const Widget &widget, LayoutState &state, bool suppressSpac
     state.y += kBlockSpacing;
   }
 
+  // Margin only - a checkbox/radio's indicator is a fixed-size native
+  // control (kCheckableSize), so width/height/padding don't apply the
+  // way they do for a text kBox, but margin still spaces it from
+  // whatever comes before/after it same as any other box-model kind.
+  const float boxX = state.x + widget.marginLeft;
+  state.y += widget.marginTop;
+
   Color borderColor = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
-  const float cx = state.x + kCheckableSize / 2.0f;
+  const float cx = boxX + kCheckableSize / 2.0f;
   const float cy = state.y + kCheckableSize / 2.0f;
 
   if (widget.boxKind == BoxKind::kRadio) {
@@ -815,12 +822,12 @@ void RenderCheckable(const Widget &widget, LayoutState &state, bool suppressSpac
           cx, cy, kCheckableSize / 2.0f - kCheckableInset, fillColor);
     }
   } else {
-    state.renderer.DrawRect(state.x, state.y, kCheckableSize, kCheckableSize,
+    state.renderer.DrawRect(boxX, state.y, kCheckableSize, kCheckableSize,
                              widget.borderWidth, borderColor);
     if (widget.checked) {
       Color fillColor = widget.hasColor ? widget.color : kDefaultTextColor;
       state.renderer.DrawFilledRect(
-          state.x + kCheckableInset, state.y + kCheckableInset,
+          boxX + kCheckableInset, state.y + kCheckableInset,
           kCheckableSize - 2.0f * kCheckableInset,
           kCheckableSize - 2.0f * kCheckableInset, fillColor);
     }
@@ -828,10 +835,11 @@ void RenderCheckable(const Widget &widget, LayoutState &state, bool suppressSpac
 
   if (state.boxRegions != nullptr) {
     state.boxRegions->push_back(
-        {widget.userData, state.x, state.y, kCheckableSize, kCheckableSize});
+        {widget.userData, boxX, state.y, kCheckableSize, kCheckableSize});
   }
 
   state.y += kCheckableSize;
+  state.y += widget.marginBottom;
   if (!suppressSpacing) {
     state.y += kBlockSpacing;
   }
@@ -848,26 +856,65 @@ public:
 
     FlushLine(state);
 
+    // Margin: outside the border box, same semantics as
+    // ContainerWidgetHandler's - unlike that handler this kind's box
+    // never fills available width by default (a text input/button
+    // shrinks to fit its label, not its container), so boxMaxWidth here
+    // is only ever consulted below when an explicit width needs clamping
+    // to what margin actually left available.
+    const float boxX = state.x + widget.marginLeft;
+    const float boxMaxWidth =
+        std::max(0.0f, state.maxWidth - widget.marginLeft - widget.marginRight);
+    state.y += widget.marginTop;
+
     const std::string label = widget.text != nullptr ? widget.text : "";
     const float lineHeight = state.renderer.LineHeight(widget.fontSize, widget.bold);
     const float textWidth =
         state.renderer.MeasureText(label, widget.fontSize, widget.bold);
 
-    const float width = std::max(kBoxMinWidth, textWidth + 2.0f * kBoxPadding);
-    const float height = lineHeight + 2.0f * kBoxPadding;
+    // This kind's own intrinsic default (kBoxPadding, same as ever) plus
+    // whatever CSS padding adds on top - unlike kContainer, "unset
+    // resolves to 0" here means "no *extra* padding beyond the built-in
+    // default", not "no padding at all" (a text box with zero inset
+    // around its label wouldn't be usable).
+    const float padTop = kBoxPadding + widget.paddingTop;
+    const float padRight = kBoxPadding + widget.paddingRight;
+    const float padBottom = kBoxPadding + widget.paddingBottom;
+    const float padLeft = kBoxPadding + widget.paddingLeft;
+
+    float width = std::max(kBoxMinWidth, textWidth + padLeft + padRight);
+    float height = lineHeight + padTop + padBottom;
+
+    // Explicit width overrides the content-driven size outright (real
+    // CSS: an author width always wins over shrink-to-fit), clamped to
+    // what margin left available - same clamp formula
+    // ContainerWidgetHandler uses, just against this kind's own
+    // (content-driven, not fill-available) natural width instead of a
+    // starting boxMaxWidth. An explicit height only ever grows the box:
+    // there's no wrapping to reclaim space from, so shrinking below the
+    // label's own natural height would just clip it.
+    if (widget.hasWidth) {
+      float resolvedWidth = widget.widthIsPercent
+                                 ? state.maxWidth * widget.width / 100.0f
+                                 : widget.width;
+      width = std::min(boxMaxWidth, std::max(0.0f, resolvedWidth));
+    }
+    if (widget.hasHeight) {
+      height = std::max(height, widget.height);
+    }
 
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }
 
-    const float textX = state.x + kBoxPadding;
-    const float textY = state.y + kBoxPadding;
+    const float textX = boxX + padLeft;
+    const float textY = state.y + padTop;
     const bool hasSelection = widget.cursorPos >= 0 &&
                                widget.selectionAnchor >= 0 &&
                                widget.selectionAnchor != widget.cursorPos;
 
     if (widget.hasBackgroundColor) {
-      state.renderer.DrawFilledRect(state.x, state.y, width, height,
+      state.renderer.DrawFilledRect(boxX, state.y, width, height,
                                      widget.backgroundColor);
     }
 
@@ -887,7 +934,7 @@ public:
     }
 
     Color borderColor = widget.hasBorderColor ? widget.borderColor : kDefaultBorderColor;
-    state.renderer.DrawRect(state.x, state.y, width, height,
+    state.renderer.DrawRect(boxX, state.y, width, height,
                              widget.borderWidth, borderColor);
 
     if (!label.empty()) {
@@ -907,10 +954,11 @@ public:
 
     if (state.boxRegions != nullptr) {
       state.boxRegions->push_back(
-          {widget.userData, state.x, state.y, width, height});
+          {widget.userData, boxX, state.y, width, height, padLeft});
     }
 
     state.y += height;
+    state.y += widget.marginBottom;
     if (!suppressSpacing) {
       state.y += kBlockSpacing;
     }

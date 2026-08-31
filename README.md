@@ -444,8 +444,18 @@ does. `node.style` (JS) exposes every one of these as a read/write
 camelCase property (`style.paddingTop`, `style.flexGrow`, ...), same as
 the original five - see [Using JavaScript](#using-javascript).
 
-The box model and flexbox are `kContainer`-only for now (a `<div>`,
-`<p>`, `<span>`, etc. - not yet `<input>`/`<table>`/text directly).
+The box model and flexbox reach `kContainer` (`<div>`, `<p>`, `<span>`,
+etc.) and `<input>`/`<button>`/checkbox/radio; still not `<table>`/`<a>`/
+`<label>`/text directly. A text `<input>`/`<button>` has its own built-in
+default padding (independent of CSS) so it stays usable unstyled -
+`padding` on one of these *adds* to that default rather than replacing
+it, unlike `kContainer` where unset padding is genuinely zero. Explicit
+`width`/`height` on one of these overrides its normal content-driven
+(shrink-to-fit label) sizing outright, the same as on a `kContainer`,
+and both participate correctly as flex items (`flex-grow`/`flex-shrink`/
+`align-items: stretch` all resize them, not just a `kContainer` child).
+A checkbox/radio's fixed-size indicator only honors `margin` - its
+width/height/padding aren't meaningful for a native-style toggle glyph.
 Flexbox itself is still bounded: no CSS Grid, `align-content` only has
 anything to do in row direction with `flex-wrap: wrap` *and* an explicit
 CSS `height` taller than what the wrapped lines need on their own - an

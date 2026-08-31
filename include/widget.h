@@ -167,14 +167,18 @@ struct Widget {
   float borderWidth = 1.0f;
 
   // Box model (css.h's Declarations, same widget-build-time resolution)
-  // - kContainer only for now (see widget_renderer.cpp's
-  // ContainerWidgetHandler). Unlike Declarations, padding/margin carry
-  // no hasXxx flag here: by the time BuildWidgetTree copies the
-  // cascade's resolved Declarations onto a Widget, "not set by any
-  // rule" has already resolved to 0 - exactly the inset WidgetRenderer
-  // should add for an unset side, no ambiguity left to preserve.
-  // width/height keep their hasXxx flag since 0 is never a substitute
-  // for "use the natural/inherited size instead".
+  // - kContainer (widget_renderer.cpp's ContainerWidgetHandler) and kBox
+  // (BoxWidgetHandler) so far; other kinds still ignore these fields.
+  // Unlike Declarations, padding/margin carry no hasXxx flag here: by
+  // the time BuildWidgetTree copies the cascade's resolved Declarations
+  // onto a Widget, "not set by any rule" has already resolved to 0 -
+  // exactly the inset WidgetRenderer should add for an unset side, no
+  // ambiguity left to preserve. (BoxWidgetHandler's text kBox is the one
+  // exception: it has its own non-zero intrinsic default padding, kept
+  // as a rendering-time constant rather than a Widget field, that CSS
+  // padding adds to rather than replaces - see its Render().) width/
+  // height keep their hasXxx flag since 0 is never a substitute for "use
+  // the natural/inherited size instead".
   bool hasWidth = false;
   float width = 0.0f;
   bool widthIsPercent = false;
