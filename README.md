@@ -406,12 +406,14 @@ supported: anything beyond this bounded grammar (pseudo-elements like
 `::before`, etc).
 `:hover`/`:focus`/`:focus-within` styling also only reaches elements the
 renderer actually hit-tests - every
-`<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level
-containers (`<div>`, `<p>`, `<li>`, ...), but not yet an inline element
-(`<span>`) or a table row/cell on its own (though a `<td>` still
-inherits `:hover`/`:focus-within` correctly from a hoverable/
-focus-containing *ancestor*, e.g. `.row:hover td` - it just can't be the
-direct target of the mouse/focus itself).
+`<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, block-level
+containers (`<div>`, `<p>`, `<li>`, ...), and now `<tr>`/`<td>`/`<th>`
+too, but still not yet an inline element (`<span>`) on its own (though a
+`<span>` still inherits `:hover`/`:focus-within` correctly from a
+hoverable/focus-containing *ancestor*, e.g. `p:hover span` - it just
+can't be the direct target of the mouse/focus itself, the same
+simplification that used to also apply to table rows/cells before they
+gained their own hit regions).
 
 Properties: `color`, `background-color`, `font-weight` (`bold`/
 `normal`), `border-color`, `border-width`, and a box model/flexbox pass -

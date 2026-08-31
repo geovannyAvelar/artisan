@@ -1512,6 +1512,34 @@ public:
         RenderContentAt(*placed.cell, state.renderer, cellX + padLeft,
                          cellY + padTop,
                          std::max(0.0f, cellWidth - padLeft - padRight));
+
+        // The cell's own hit region - pushed after the row's own above,
+        // and after its content renders, so it wins HitTestRegion's
+        // first-match scan over the row wherever they overlap (a
+        // rowspan/colspan cell can extend past a single row/column, but
+        // never past the grid itself, so this is still always inside the
+        // row region it started in).
+        if (state.boxRegions != nullptr) {
+          state.boxRegions->push_back(
+              {placed.cell->userData, cellX, cellY, cellWidth, cellHeight});
+        }
+      }
+
+      // The row's own hit region, spanning the full grid width - lets
+      // :hover/:focus-within target a <tr> directly rather than only
+      // ever bubbling up to it from a hoverable/focus-containing element
+      // somewhere inside one of its cells (see MatchesSelfOrAncestor,
+      // css.cpp). Pushed once per row, *after* its own cells above (whose
+      // regions nearly always fully overlap it) - HitTestRegion
+      // (main.cpp) returns the first match it finds, so a point inside a
+      // cell needs that cell's own region to come first in the vector,
+      // matching real hit-testing's innermost-element-wins expectation;
+      // this row region only ever actually gets hit within any leftover
+      // sliver a rowspan/colspan cell doesn't cover.
+      if (state.boxRegions != nullptr) {
+        state.boxRegions->push_back({table.children[r].userData, gridX,
+                                      gridY + rowY[r], totalWidth,
+                                      rowHeights[r]});
       }
     }
 

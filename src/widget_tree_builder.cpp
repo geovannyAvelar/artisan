@@ -474,6 +474,12 @@ Widget MakeTableCell(const Node &node, WidgetTree &tree, float fontSize,
                 false,
                 colSpan,
                 rowSpan};
+  // Lets a hit-test (main.cpp, via WidgetRenderer's BoxRegion output)
+  // recover which Node a cell's box belongs to - same use MakeContainer
+  // already puts userData to, needed so :hover/:focus-within can target
+  // a <td>/<th> directly rather than only ever bubbling up to it from a
+  // hoverable/focus-containing element somewhere inside it.
+  widget.userData = &node;
   ApplyStyle(widget, style);
   return widget;
 }
@@ -524,6 +530,12 @@ Widget MakeTable(const Node &node, WidgetTree &tree, float fontSize,
                       false,
                       1,
                       1};
+    // Same reasoning as MakeTableCell's own userData above - lets
+    // :hover/:focus-within target a <tr> directly. This kContainer never
+    // reaches ContainerWidgetHandler's own userData-pushing path (rows
+    // aren't rendered through the generic RenderWidget dispatch - see
+    // TableWidgetHandler), so it needs setting here instead.
+    rowWidget.userData = rowNode;
     ApplyStyle(rowWidget, rowStyle);
     rowInits.push_back(rowWidget);
   }
