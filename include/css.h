@@ -60,10 +60,12 @@ enum class PseudoClassKind {
   kNot,
 };
 
-// Declared here (defined below) so PseudoClassSelector::notArg can point
-// to one - std::shared_ptr only needs a complete type where it's
-// actually dereferenced/destroyed (css.cpp), not at this declaration.
+// Declared here (defined below) so PseudoClassSelector::notArgs can
+// point to some - std::shared_ptr/vector only need a complete type
+// where they're actually dereferenced/destroyed (css.cpp), not at this
+// declaration.
 struct CompoundSelector;
+struct Selector;
 
 // nthA/nthB implement "an+b" - :nth-child(2)/:nth-of-type(2) are
 // {a=0, b=2}; the "even"/"odd" keyword forms are {a=2, b=0}/{a=2, b=1}.
@@ -74,22 +76,23 @@ struct CompoundSelector;
 // among its siblings, not the second element overall) - see
 // MatchesPseudoClass in css.cpp for where that split actually happens.
 //
-// notArg is only used when kind is kNot: `:not(.card)` parses `.card`
-// into its own CompoundSelector (tag/id/class/attribute/pseudo-class
-// parts only - no combinators, no comma-separated lists; `:not(div > p)`
-// or `:not(a, b)` won't parse the way you'd expect) and matching negates
-// whatever that inner compound would have matched. A shared_ptr (not a
-// plain CompoundSelector) because CompoundSelector contains
-// vector<PseudoClassSelector> - embedding one by value here would make
-// the two types recursively infinite-sized; shared_ptr is just this
-// file's way of making a self-referential AST node copyable, not an
-// ownership-sharing decision (nothing else ever points at the same
-// CompoundSelector).
+// notArgs is only used when kind is kNot: `:not(a, b)` parses "a, b" the
+// same way a top-level comma-separated selector list is (full Selector
+// chains, each with its own combinators - not just bare compounds), via
+// ParseSelectorList, and matching negates whatever matching *any* of
+// them would have (real CSS Level 4 semantics: `:not()`'s argument is a
+// full selector list, not just a single simple selector). A shared_ptr
+// (not a plain vector<Selector>) because Selector -> CompoundSelector ->
+// vector<PseudoClassSelector> is a cycle back to this same struct -
+// embedding one by value here would make the types recursively
+// infinite-sized; shared_ptr is just this file's way of making a
+// self-referential AST node copyable, not an ownership-sharing decision
+// (nothing else ever points at the same vector).
 struct PseudoClassSelector {
   PseudoClassKind kind;
   int nthA = 0;
   int nthB = 0;
-  std::shared_ptr<CompoundSelector> notArg;
+  std::shared_ptr<std::vector<Selector>> notArgs;
 };
 
 struct CompoundSelector {

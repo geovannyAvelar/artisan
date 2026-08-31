@@ -217,6 +217,14 @@ void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector)
   selector.pseudoClasses.push_back(pc);
 }
 
+// Forward-declared so ParseCompoundSelector's :not(...) handling can
+// call it - ParseSelectorList itself (defined below) is built out of
+// ParseSelectorChain, which is in turn built out of
+// ParseCompoundSelector, so this is the same "the two need each other"
+// shape MatchesPseudoClass/MatchesChain already have on the matching
+// side.
+std::vector<Selector> ParseSelectorList(const std::string &raw);
+
 // Splits a compound selector ("div.card#hero", ".a.b", "*", "h1",
 // "a[href]", "li:nth-child(2)", "p:not(.intro)") into its tag/id/class/
 // attribute/pseudo-class parts. The leading segment (before the first
@@ -228,10 +236,10 @@ void ParsePseudoClassToken(const std::string &token, CompoundSelector &selector)
 // exception to that below, since its argument routinely contains those
 // marker characters). Used both by StyleSheet::Parse's rule parsing and
 // by ParseSelectorChain below (same grammar, different direction - see
-// css.h). :not(...)'s own argument is parsed by recursing into this same
-// function, so it accepts exactly what a compound selector here always
-// does - no combinators, no comma-separated lists (":not(div > p)" or
-// ":not(a, b)" won't parse the way you'd expect from real CSS).
+// css.h). :not(...)'s own argument is parsed via ParseSelectorList - the
+// same comma-separated-list-of-full-chains grammar a top-level selector
+// gets, real CSS Level 4 semantics (":not(div > p)" and ":not(a, b)"
+// both parse and match the way you'd expect).
 CompoundSelector ParseCompoundSelector(const std::string &raw) {
   CompoundSelector selector;
   std::string value = Trim(raw);
@@ -319,13 +327,14 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
 
     if (marker == ':' && ToLower(value.substr(pos + 1, 4)) == "not(") {
       // :not(...) - find the matching ')' by paren depth (correctly
-      // handles a nested :not(:not(...)), even though that's an unusual
-      // thing to write), then recursively parse whatever's between
-      // "not(" and it as another compound selector (see
-      // PseudoClassSelector::notArg, css.h) rather than falling through
-      // to the generic marker-splitting below - which would otherwise
-      // mis-terminate at the first '.'/'#'/'[' *inside* the argument
-      // (e.g. ":not(.card)" would get cut at the '.' in ".card").
+      // handles nested parens from anything - a nested :not(:not(...)),
+      // an :nth-child(...) inside the argument, ...), then parse
+      // whatever's between "not(" and it as a full comma-separated
+      // selector list (see PseudoClassSelector::notArgs, css.h) rather
+      // than falling through to the generic marker-splitting below -
+      // which would otherwise mis-terminate at the first '.'/'#'/'['
+      // *inside* the argument (e.g. ":not(.card)" would get cut at the
+      // '.' in ".card").
       size_t argStart = pos + 1 + 4;
       size_t i = argStart;
       int depth = 1;
@@ -342,8 +351,8 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
       }
       PseudoClassSelector pc;
       pc.kind = PseudoClassKind::kNot;
-      pc.notArg = std::make_shared<CompoundSelector>(
-          ParseCompoundSelector(value.substr(argStart, i - argStart)));
+      pc.notArgs = std::make_shared<std::vector<Selector>>(
+          ParseSelectorList(value.substr(argStart, i - argStart)));
       selector.pseudoClasses.push_back(std::move(pc));
       pos = (i < value.size()) ? value.find_first_of(".#[:", i + 1)
                                 : std::string::npos;
@@ -375,7 +384,12 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
 // Whitespace/combinator characters inside an unclosed '[' ... ']' don't
 // split a token (so "[title=\"a b\"]" isn't torn in two, even though the
 // bounded grammar inside the brackets - see ParseCompoundSelector -
-// doesn't otherwise support a quoted value containing a space).
+// doesn't otherwise support a quoted value containing a space), and
+// neither do they inside an unclosed '(' ... ')' - :not()'s own argument
+// (see ParseCompoundSelector) can itself be a full chain with
+// combinators/spaces of its own ("div:not(div > p)"), which must stay
+// part of the *outer* selector's single compound token, not get read as
+// more of the outer chain.
 Selector ParseSelectorChain(const std::string &raw) {
   Selector selector;
   std::string text = Trim(raw);
@@ -383,6 +397,7 @@ Selector ParseSelectorChain(const std::string &raw) {
   bool pendingCombinator = false;
   Combinator combinator = Combinator::kDescendant;
   int bracketDepth = 0;
+  int parenDepth = 0;
 
   auto flushToken = [&]() {
     std::string trimmed = Trim(currentToken);
@@ -411,7 +426,19 @@ Selector ParseSelectorChain(const std::string &raw) {
       currentToken += c;
       continue;
     }
-    if (bracketDepth == 0 && (c == '>' || c == '+' || c == '~')) {
+    if (c == '(') {
+      ++parenDepth;
+      currentToken += c;
+      continue;
+    }
+    if (c == ')') {
+      if (parenDepth > 0) {
+        --parenDepth;
+      }
+      currentToken += c;
+      continue;
+    }
+    if (bracketDepth == 0 && parenDepth == 0 && (c == '>' || c == '+' || c == '~')) {
       flushToken();
       combinator = (c == '>')   ? Combinator::kChild
                    : (c == '+') ? Combinator::kAdjacentSibling
@@ -419,7 +446,8 @@ Selector ParseSelectorChain(const std::string &raw) {
       pendingCombinator = true;
       continue;
     }
-    if (bracketDepth == 0 && std::isspace(static_cast<unsigned char>(c))) {
+    if (bracketDepth == 0 && parenDepth == 0 &&
+        std::isspace(static_cast<unsigned char>(c))) {
       if (!currentToken.empty()) {
         flushToken();
       }
@@ -435,24 +463,50 @@ Selector ParseSelectorChain(const std::string &raw) {
 // Splits a comma-separated selector list ("h1, .card") into independent
 // Selectors, each parsed via ParseSelectorChain - shared by
 // StyleSheet::Parse (a rule's selectors, ANY of which puts it in the
-// cascade for a given element) and QuerySelector/QuerySelectorAll/
-// ElementMatches/Closest below (ANY of which counts as a match).
-// Discards a selector that parsed to zero compounds (empty/malformed
-// input) rather than letting it match everything.
+// cascade for a given element), QuerySelector/QuerySelectorAll/
+// ElementMatches/Closest below (ANY of which counts as a match), and
+// ParseCompoundSelector's own :not(...) handling (:not()'s argument is
+// itself a comma-separated list - see PseudoClassSelector::notArgs,
+// css.h). A comma inside an unclosed '(' ... ')' or '[' ... ']' doesn't
+// split the list - "div:not(a, b), span" is two alternatives (the first
+// itself containing a nested, un-split list inside :not()), not four,
+// and "[title=\"a,b\"]" isn't torn in two either, mirroring
+// ParseSelectorChain's identical bracket/paren-awareness for
+// combinators/whitespace. Discards a selector that parsed to zero
+// compounds (empty/malformed input) rather than letting it match
+// everything.
 std::vector<Selector> ParseSelectorList(const std::string &raw) {
   std::vector<Selector> result;
-  std::stringstream ss(raw);
-  std::string part;
-  while (std::getline(ss, part, ',')) {
+  auto flushPart = [&](const std::string &part) {
     std::string trimmed = Trim(part);
     if (trimmed.empty()) {
-      continue;
+      return;
     }
     Selector selector = ParseSelectorChain(trimmed);
     if (!selector.compounds.empty()) {
       result.push_back(std::move(selector));
     }
+  };
+
+  std::string part;
+  int depth = 0;
+  for (char c : raw) {
+    if (c == '(' || c == '[') {
+      ++depth;
+      part += c;
+    } else if (c == ')' || c == ']') {
+      if (depth > 0) {
+        --depth;
+      }
+      part += c;
+    } else if (c == ',' && depth == 0) {
+      flushPart(part);
+      part.clear();
+    } else {
+      part += c;
+    }
   }
+  flushPart(part);
   return result;
 }
 
@@ -646,11 +700,14 @@ bool MatchesSelfOrAncestor(const Node *from, const Node &node) {
 }
 
 // Forward-declared so MatchesPseudoClass's kNot case can call back into
-// it - CompoundMatches itself (below) is what actually invokes
-// MatchesPseudoClass for each of a compound's pseudo-classes, so the two
-// are mutually recursive (":not(.card:nth-child(2))" needs both).
-bool CompoundMatches(const CompoundSelector &selector, const Node &node,
-                      const PseudoClassState &state);
+// it - CompoundMatches (below) is what actually invokes
+// MatchesPseudoClass for each of a compound's pseudo-classes, and
+// MatchesChain (further below, built out of CompoundMatches) is what
+// kNot itself needs - full selector-chain matching, combinators and
+// all, for each alternative in notArgs. All mutually recursive
+// (":not(div > p:nth-child(2))" needs every layer of it).
+bool MatchesChain(const Selector &selector, const Node &node,
+                   const PseudoClassState &state);
 
 // Whether `node` is at the position `pc` describes among its parent's
 // *element* siblings (1-based - real CSS's :nth-child counts only
@@ -662,11 +719,23 @@ bool CompoundMatches(const CompoundSelector &selector, const Node &node,
 bool MatchesPseudoClass(const PseudoClassSelector &pc, const Node &node,
                          const PseudoClassState &state) {
   if (pc.kind == PseudoClassKind::kNot) {
-    // notArg is only null if `:not()` had no parseable argument (e.g.
-    // ":not()" itself, or something ParseCompoundSelector reduced to
-    // nothing) - treat that degenerate case as never negating anything,
-    // i.e. :not() with no real constraint matches like a bare "*" would.
-    return pc.notArg == nullptr || !CompoundMatches(*pc.notArg, node, state);
+    // notArgs is null, or empty, only when `:not()` had no parseable
+    // argument (e.g. ":not()" itself, or a comma list where every part
+    // was empty/malformed) - treat that degenerate case as never
+    // negating anything, i.e. :not() with no real constraint matches
+    // like a bare "*" would. Otherwise: matches unless `node` matches
+    // *any* of the alternatives - full chain matching, combinators and
+    // all, not just a bare compound (real CSS Level 4's :not(list)
+    // semantics - see ParseSelectorList/PseudoClassSelector::notArgs).
+    if (pc.notArgs == nullptr || pc.notArgs->empty()) {
+      return true;
+    }
+    for (const Selector &alternative : *pc.notArgs) {
+      if (MatchesChain(alternative, node, state)) {
+        return false;
+      }
+    }
+    return true;
   }
   if (pc.kind == PseudoClassKind::kHover) {
     // :hover matches `node` itself and every one of its ancestors -
@@ -933,6 +1002,12 @@ bool MatchesChain(const Selector &selector, const Node &node,
                                &node, state);
 }
 
+// Forward-declared so SpecificityOfCompound's kNot case can call it -
+// Specificity (below) is built out of SpecificityOfCompound, so the two
+// need each other the same way MatchesPseudoClass/MatchesChain already
+// do on the matching side.
+int Specificity(const Selector &selector);
+
 int SpecificityOfCompound(const CompoundSelector &compound) {
   int score = 0;
   if (!compound.id.empty()) {
@@ -940,16 +1015,24 @@ int SpecificityOfCompound(const CompoundSelector &compound) {
   }
   score += static_cast<int>(compound.classes.size()) * 10;
   score += static_cast<int>(compound.attributes.size()) * 10;
-  // Real CSS treats :not(...) as contributing its *argument's*
-  // specificity, not a flat pseudo-class point - :not(#foo) counts as
-  // an id (100), :not(div) as a tag (1), matching what :not() actually
-  // does semantically (it's the thing inside that determines how
-  // "specific" the constraint is). Every other pseudo-class here is a
-  // flat 10, same as a class or attribute selector.
+  // Real CSS treats :not(...) as contributing whichever of its
+  // argument's alternatives is *most* specific, not a flat pseudo-class
+  // point - :not(#foo) counts as an id (100), :not(div) as a tag (1),
+  // :not(#foo, div) as an id (100, the larger of the two) - matching
+  // what :not() actually does semantically (it's the thing inside that
+  // determines how "specific" the constraint is). Every other
+  // pseudo-class here is a flat 10, same as a class or attribute
+  // selector.
   for (const PseudoClassSelector &pc : compound.pseudoClasses) {
-    score += (pc.kind == PseudoClassKind::kNot && pc.notArg != nullptr)
-                 ? SpecificityOfCompound(*pc.notArg)
-                 : 10;
+    if (pc.kind == PseudoClassKind::kNot && pc.notArgs != nullptr) {
+      int best = 0;
+      for (const Selector &alternative : *pc.notArgs) {
+        best = std::max(best, Specificity(alternative));
+      }
+      score += best;
+    } else {
+      score += 10;
+    }
   }
   if (!compound.tag.empty()) {
     score += 1;
