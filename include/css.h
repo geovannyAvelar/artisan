@@ -10,13 +10,11 @@
 
 namespace artisan {
 
-// The relational operators an attribute selector's value can use -
-// real CSS's `~=`/`^=`/`$=`/`*=`, plus plain `=`. Only meaningful when
+// The relational operators an attribute selector's value can use - real
+// CSS's `~=`/`^=`/`$=`/`*=`/`|=`, plus plain `=`. Only meaningful when
 // AttributeSelector::value is set (a bare "[name]" - presence only -
-// ignores this entirely). `|=` (dash-match, mainly used for `lang`
-// attributes) isn't supported - a rare enough operator that it's left
-// out of this bounded grammar, same as the missing case-insensitive "i"
-// flag.
+// ignores this entirely). No case-insensitive "i" flag, a bounded subset
+// same as the rest of this file's CSS support.
 enum class AttributeOperator {
   kEquals,    // [name=value]  - exact match.
   kIncludes,  // [name~=value] - value is one of the attribute's
@@ -25,6 +23,10 @@ enum class AttributeOperator {
   kPrefix,    // [name^=value] - attribute starts with value.
   kSuffix,    // [name$=value] - attribute ends with value.
   kSubstring, // [name*=value] - attribute contains value anywhere.
+  kDashMatch, // [name|=value] - attribute equals value exactly, or
+              // starts with value immediately followed by a hyphen
+              // ("en" matches "en" or "en-US", not "english") - mainly
+              // used for `lang`, its original purpose in real CSS.
 };
 
 // A single compound selector, e.g. "div.card#hero" - a tag name (optional

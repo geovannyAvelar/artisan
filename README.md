@@ -363,9 +363,10 @@ compound can carry attribute selectors (`[href]` presence,
 `[type="text"]` exact match, `[class~="card"]` one of a whitespace-
 separated list of tokens - the general form of what `.card` does
 specifically for the `class` attribute, `[href^="https://"]` prefix,
-`[href$=".pdf"]` suffix, `[href*="example"]` substring anywhere - no
-case-insensitive `i` flag, and no `|=` dash-match, a rare enough
-operator to leave out of this bounded grammar), structural
+`[href$=".pdf"]` suffix, `[href*="example"]` substring anywhere,
+`[lang|="en"]` exactly that value or that value followed by a hyphen
+(`"en"` or `"en-US"`, not `"english"` - `lang` is real CSS's original
+use case for this operator) - no case-insensitive `i` flag), structural
 pseudo-classes (`:first-child`, `:last-child`, `:nth-child(2)`,
 `:nth-child(even)`/`:nth-child(odd)`, and `:nth-of-type` with the same
 argument grammar - literal integers and the even/odd keywords only, not
@@ -397,7 +398,8 @@ way in `querySelector`/`querySelectorAll`/`matches`/`closest` as they do
 in a `<style>` block - `:hover`/`:focus`/`:focus-within` parse there too,
 but always evaluate false: those entry points have no live mouse/focus
 state to match against, unlike a `<style>` block's cascade. Not
-supported: anything beyond this bounded grammar (`|=`, etc).
+supported: anything beyond this bounded grammar (the case-insensitive
+`i` attribute flag, combinators/comma-lists inside `:not()`, etc).
 `:hover`/`:focus`/`:focus-within` styling also only reaches elements the
 renderer actually hit-tests - every
 `<input>`/`<button>`/`<a>`/`<label>`/checkbox/radio, and block-level

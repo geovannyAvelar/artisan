@@ -257,7 +257,7 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
       if (eq == std::string::npos) {
         attr.name = ToLower(Trim(inner));
       } else {
-        // The operator character (~^$*), if any, sits directly before
+        // The operator character (~^$*|), if any, sits directly before
         // '=' - not itself part of the name. Plain "[name=value]" has
         // none, leaving nameEnd at eq and op at its default (kEquals).
         size_t nameEnd = eq;
@@ -277,6 +277,10 @@ CompoundSelector ParseCompoundSelector(const std::string &raw) {
             break;
           case '*':
             attr.op = AttributeOperator::kSubstring;
+            nameEnd = eq - 1;
+            break;
+          case '|':
+            attr.op = AttributeOperator::kDashMatch;
             nameEnd = eq - 1;
             break;
           default:
@@ -773,6 +777,16 @@ bool AttributeValueMatches(const std::string &value, const AttributeSelector &at
            value.compare(value.size() - want.size(), want.size(), want) == 0;
   case AttributeOperator::kSubstring:
     return !want.empty() && value.find(want) != std::string::npos;
+  case AttributeOperator::kDashMatch:
+    // Exactly `want`, or `want` followed immediately by a hyphen -
+    // "en" matches "en"/"en-US" but not "english"/"en2". Unlike
+    // ^=/$=/*= above, an empty `want` isn't special-cased to never
+    // match: by this same rule, it matches an empty value or any value
+    // starting with "-", which is a real (if unusual) answer, not a
+    // vacuous "matches everything".
+    return value == want || (value.size() > want.size() &&
+                              value.compare(0, want.size(), want) == 0 &&
+                              value[want.size()] == '-');
   }
   return false;
 }
