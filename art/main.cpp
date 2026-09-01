@@ -8,6 +8,7 @@
 
 #include "ast.h"
 #include "codegen.h"
+#include "module_resolver.h"
 #include "parser.h"
 #include "sema.h"
 #include "tokenizer.h"
@@ -123,8 +124,29 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  // A file with no `import`s at all goes through exactly the single-file
+  // path this always has - the ModuleResolver below (and the per-file
+  // visibility enforcement it enables) is opt-in, triggered only by a
+  // program actually using it, so nothing about compiling a plain,
+  // import-free .art file changes at all, error message formatting
+  // included (ModuleResolver's own diagnostics are prefixed with each
+  // file's canonical path, not necessarily the same spelling `opts.
+  // inputPath` used on the command line).
+  const std::unordered_map<std::string, std::unordered_set<std::string>> *visibility = nullptr;
+  std::unordered_map<std::string, std::unordered_set<std::string>> visibilityStorage;
+  if (!program.imports.empty()) {
+    ART::ModuleResolver resolver;
+    program = resolver.ResolveAndMerge(opts.inputPath);
+    if (!resolver.Diagnostics().empty()) {
+      for (const std::string &d : resolver.Diagnostics()) std::cerr << d << "\n";
+      return 1;
+    }
+    visibilityStorage = resolver.Visibility();
+    visibility = &visibilityStorage;
+  }
+
   ART::Sema sema;
-  if (!sema.Check(program)) {
+  if (!sema.Check(program, visibility)) {
     ReportDiagnostics(opts.inputPath, sema.Diagnostics());
     return 1;
   }

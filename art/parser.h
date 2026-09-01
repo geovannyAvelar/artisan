@@ -38,6 +38,7 @@ private:
   const Token &Expect(TokenKind kind, const std::string &context);
   [[noreturn]] void Fail(const std::string &message, SourceLoc loc);
 
+  std::unique_ptr<ImportDecl> ParseImport();
   std::unique_ptr<InterfaceDecl> ParseInterface();
   std::unique_ptr<FunctionDecl> ParseFunction();
   std::unique_ptr<InterfaceDecl> ParseDeclareType();

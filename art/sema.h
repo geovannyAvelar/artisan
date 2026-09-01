@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ast.h"
@@ -16,7 +17,18 @@ public:
   // resolvedType, every Stmt's resolvedVarType, and every
   // Param/InterfaceField's resolvedType. Returns true iff Diagnostics() is
   // empty.
-  bool Check(Program &program);
+  //
+  // `visibility`, if given (see ModuleResolver::Visibility), maps each
+  // declaration's own sourceFile to the set of names legally referenceable
+  // from it (its own top-level names plus whatever it actually imported) -
+  // every identifier/type/call lookup is checked against it in addition
+  // to existing name resolution, so a name that exists somewhere in the
+  // merged program but wasn't imported into the file trying to use it is
+  // still rejected as inaccessible. Null (the default, and always the
+  // case for a single file with no imports at all) disables this check
+  // entirely - the original, fully flat/global behavior.
+  bool Check(Program &program,
+             const std::unordered_map<std::string, std::unordered_set<std::string>> *visibility = nullptr);
 
   const std::vector<std::string> &Diagnostics() const { return diagnostics; }
 
@@ -91,6 +103,27 @@ private:
   // checking (TypeParam only ever appears when there's no substitution
   // active - see ResolveType).
   const std::unordered_map<std::string, ResolvedType> *currentSubstitution = nullptr;
+
+  // See Check()'s own doc comment. Null unless a module graph was
+  // resolved. `currentFile` is which declaration's own sourceFile is
+  // presently being checked - always kept in lexical sync with whatever
+  // TypeNode/Expr/Stmt is actually being resolved right now, including
+  // through a generic instantiation's clone (checked against the
+  // *template's* sourceFile, not the call site's - a generic function's
+  // free identifiers resolve against where it was written, same as any
+  // other function's would).
+  const std::unordered_map<std::string, std::unordered_set<std::string>> *visibility = nullptr;
+  std::string currentFile;
+  std::unordered_set<std::string> builtinNames; // always visible regardless of `visibility` - see SeedBuiltins
+
+  // True if `name` may be referenced from `currentFile` right now - see
+  // the `visibility` member's own doc comment.
+  bool IsVisible(const std::string &name) const;
+  // "" if `name` is simply undeclared anywhere; otherwise a clarifying
+  // suffix for an "undefined identifier" message, since `name` does
+  // exist somewhere in the program but isn't visible from `currentFile` -
+  // almost always a missing import rather than a typo.
+  std::string VisibilityHint(const std::string &name) const;
 
   void Error(SourceLoc loc, const std::string &message);
 

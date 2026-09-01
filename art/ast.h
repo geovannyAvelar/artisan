@@ -150,6 +150,10 @@ struct Stmt {
   std::string varName;
   std::unique_ptr<TypeNode> declaredType; // optional
   ResolvedType resolvedVarType;
+  // Only meaningful for a top-level VarDecl (a Program::globals entry) -
+  // see FunctionDecl's own isExported/sourceFile for what these mean.
+  bool isExported = false;
+  std::string sourceFile;
 
   // If / While / For share cond + body; If additionally uses elseBranch
   std::unique_ptr<Expr> cond;
@@ -193,6 +197,14 @@ struct FunctionDecl {
   ResolvedType resolvedReturnType;
   std::unique_ptr<Stmt> body; // Block; always null for a `declare function` OR an uninstantiated generic template
   SourceLoc loc;
+  // Which file this declaration came from (its resolved, canonical path -
+  // see ModuleResolver), and whether `export` prefixed it - both empty/
+  // false for a single-file compilation with no imports at all (the
+  // ModuleResolver is skipped entirely there - see main.cpp), in which
+  // case Sema enforces no cross-file visibility restriction whatsoever,
+  // matching the language's original single-file-only behavior exactly.
+  std::string sourceFile;
+  bool isExported = false;
 };
 
 // A deep copy of a Stmt/Expr subtree - used to give each concrete
@@ -217,9 +229,34 @@ struct InterfaceDecl {
   SourceLoc loc;
   bool isOpaque = false; // `declare type Name;` - a foreign handle with no
                           // accessible fields, never constructible with `{}`
+  std::string sourceFile; // see FunctionDecl's own doc comment
+  bool isExported = false;
+};
+
+// `import { name, ... } from "path";` - always at the top of a file,
+// before any other declaration (see Parser::ParseProgram). `path` is
+// resolved relative to the importing file's own directory by
+// ModuleResolver, `.art` implied if not written; each `name` must be a
+// top-level declaration in the target file marked `export`.
+struct ImportedName {
+  std::string name;
+  SourceLoc loc;
+};
+
+struct ImportDecl {
+  std::string path;
+  SourceLoc loc;
+  std::vector<ImportedName> names;
 };
 
 struct Program {
+  // Only ever populated by the parser for ONE file at a time - see
+  // ModuleResolver, which resolves/merges every file an entry point
+  // (transitively) imports into a single, final Program with these left
+  // empty (every import already flattened into interfaces/functions/
+  // .../globals below, each tagged with its own sourceFile/isExported).
+  std::vector<std::unique_ptr<ImportDecl>> imports;
+
   std::vector<std::unique_ptr<InterfaceDecl>> interfaces;
   std::vector<std::unique_ptr<FunctionDecl>> functions;
   std::vector<std::unique_ptr<FunctionDecl>> externFunctions; // `declare function ...;` - body is always null

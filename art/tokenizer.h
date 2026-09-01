@@ -32,6 +32,9 @@ enum class TokenKind {
   KwVoid,
   KwDeclare,
   KwType,
+  KwImport,
+  KwFrom,
+  KwExport,
 
   // Punctuation
   LParen,

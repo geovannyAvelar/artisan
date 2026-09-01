@@ -470,6 +470,59 @@ function`, each instantiation used needs its own separately provided,
 separately named extern symbol (`makeBox$number`, ...) - see "Generic
 functions" above.
 
+### Modules (import/export)
+
+A single `.art` file is still a complete, self-contained program - nothing
+below is required. But a project can also be split across multiple files
+and wired together with real `import`/`export`, TS-style:
+
+```ts
+// math.art
+export function add(a: number, b: number): number {
+  return a + b;
+}
+
+function helper(): number { // not exported - private to math.art
+  return 1;
+}
+```
+
+```ts
+// app.art
+import { add } from "./math";
+
+function main(): number {
+  return add(1, 2);
+}
+```
+
+`import`s are always relative (`./`/`../`, `.art` optional) and must come
+before any other top-level declaration in a file. `export` may prefix a
+`function`, `interface`, `declare function`, `declare type`, or top-level
+`let`/`const` - anything left unmarked is private to the file that
+declares it, invisible even to a file that imports something else from
+the same one. This is access control only, not real per-file
+namespacing: every top-level name in a whole project (across every file
+reachable from the entry point) must still be globally unique, the same
+as a single flat file today - `import` decides who's *allowed* to
+reference a name, not which of several same-named things they get.
+
+The entry point passed to `art` (or `app.art` itself, for
+`artisan-cli build`) only needs `import`s at all for this multi-file
+resolution to kick in - compiling a plain file with none is unchanged
+from before this existed, same error messages included. When imports are
+present, `art` first walks the whole file graph (detecting missing
+files, missing/private exports, and circular imports up front, each
+reported with the real file and line involved) before type-checking a
+single merged program - so a name that exists somewhere in the project
+but wasn't actually imported into the file trying to use it is rejected
+with a hint pointing at the likely missing `import`, not a plain
+"undefined identifier". Generic functions/interfaces work across files
+too: a generic's own body/fields always resolve against the file that
+*declared* it, not whichever file happens to instantiate it - so a
+private helper `math.art` uses internally stays unreachable from
+`app.art` even through a generic function `app.art` calls into.
+
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and
 the next, the same way any other global does:

@@ -48,30 +48,75 @@ Program Parser::ParseProgram() {
     if (Cur().kind == TokenKind::Error) {
       Fail(std::string("invalid token: ") + Cur().text, Cur().loc);
     }
+
+    // Every import must come before any other top-level declaration - a
+    // simple, fixed rule (no interleaving) that keeps the "what does
+    // this file depend on" question answerable by scanning its start,
+    // the same reason most real module systems have a similar rule.
+    while (Check(TokenKind::KwImport)) {
+      program.imports.push_back(ParseImport());
+    }
+
     while (!Check(TokenKind::Eof)) {
+      bool exported = Match(TokenKind::KwExport);
+
       if (Check(TokenKind::KwInterface)) {
-        program.interfaces.push_back(ParseInterface());
+        auto decl = ParseInterface();
+        decl->isExported = exported;
+        program.interfaces.push_back(std::move(decl));
       } else if (Check(TokenKind::KwFunction)) {
-        program.functions.push_back(ParseFunction());
+        auto decl = ParseFunction();
+        decl->isExported = exported;
+        program.functions.push_back(std::move(decl));
       } else if (Check(TokenKind::KwLet) || Check(TokenKind::KwConst)) {
-        program.globals.push_back(ParseVarDecl());
+        auto decl = ParseVarDecl();
+        decl->isExported = exported;
+        program.globals.push_back(std::move(decl));
       } else if (Check(TokenKind::KwDeclare)) {
         pos++; // consume 'declare'
         if (Check(TokenKind::KwType)) {
-          program.interfaces.push_back(ParseDeclareType());
+          auto decl = ParseDeclareType();
+          decl->isExported = exported;
+          program.interfaces.push_back(std::move(decl));
         } else if (Check(TokenKind::KwFunction)) {
-          program.externFunctions.push_back(ParseDeclareFunction());
+          auto decl = ParseDeclareFunction();
+          decl->isExported = exported;
+          program.externFunctions.push_back(std::move(decl));
         } else {
           Fail("expected 'type' or 'function' after 'declare'", Cur().loc);
         }
+      } else if (exported) {
+        Fail("expected 'function', 'interface', 'let', 'const', or 'declare' after 'export'", Cur().loc);
+      } else if (Check(TokenKind::KwImport)) {
+        Fail("'import' must come before every other declaration in a file", Cur().loc);
       } else {
-        Fail("expected 'function', 'interface', 'let', 'const', or 'declare' at top level", Cur().loc);
+        Fail("expected 'function', 'interface', 'let', 'const', 'declare', or 'export' at top level", Cur().loc);
       }
     }
   } catch (const ParseError &e) {
     diagnostics.push_back(e.what());
   }
   return program;
+}
+
+std::unique_ptr<ImportDecl> Parser::ParseImport() {
+  auto decl = std::make_unique<ImportDecl>();
+  decl->loc = Cur().loc;
+  Expect(TokenKind::KwImport, "to start an import");
+  Expect(TokenKind::LBrace, "to start an import's name list ('import { a, b } from \"...\";')");
+  if (!Check(TokenKind::RBrace)) {
+    do {
+      ImportedName n;
+      n.loc = Cur().loc;
+      n.name = Expect(TokenKind::Identifier, "as an imported name").text;
+      decl->names.push_back(std::move(n));
+    } while (Match(TokenKind::Comma));
+  }
+  Expect(TokenKind::RBrace, "to close an import's name list");
+  Expect(TokenKind::KwFrom, "after an import's name list");
+  decl->path = Expect(TokenKind::StringLiteral, "as the import path").text;
+  Expect(TokenKind::Semicolon, "after an import statement");
+  return decl;
 }
 
 // ---------------------------------------------------------------------

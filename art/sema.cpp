@@ -44,10 +44,14 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
 
     if (!node->genericArgs.empty()) {
       auto it = genericInterfaces.find(node->name);
-      if (it == genericInterfaces.end()) {
-        Error(node->loc, interfaces.count(node->name)
-                              ? "interface '" + node->name + "' is not generic - remove the type arguments"
-                              : "unknown generic type '" + node->name + "'");
+      bool foundAndVisible = it != genericInterfaces.end() && IsVisible(node->name);
+      if (!foundAndVisible) {
+        bool isPlainInterfaceVisible = interfaces.count(node->name) && IsVisible(node->name);
+        if (isPlainInterfaceVisible) {
+          Error(node->loc, "interface '" + node->name + "' is not generic - remove the type arguments");
+        } else {
+          Error(node->loc, "unknown generic type '" + node->name + "'" + VisibilityHint(node->name));
+        }
         return ResolvedType{};
       }
       std::vector<ResolvedType> typeArgs;
@@ -56,12 +60,12 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
       return InstantiateInterface(it->second, typeArgs, node->loc);
     }
 
-    if (genericInterfaces.count(node->name)) {
+    if (genericInterfaces.count(node->name) && IsVisible(node->name)) {
       Error(node->loc, "generic type '" + node->name + "' requires type arguments, e.g. '" + node->name + "<Type>'");
       return ResolvedType{};
     }
-    if (interfaces.count(node->name)) return ResolvedType::Struct(node->name);
-    Error(node->loc, "unknown type '" + node->name + "'");
+    if (interfaces.count(node->name) && IsVisible(node->name)) return ResolvedType::Struct(node->name);
+    Error(node->loc, "unknown type '" + node->name + "'" + VisibilityHint(node->name));
     return ResolvedType{};
   }
   }
@@ -86,6 +90,7 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
   clone->name = mangled;
   clone->loc = tmpl->loc;
   clone->isOpaque = tmpl->isOpaque;
+  clone->sourceFile = tmpl->sourceFile;
 
   // Registered before its fields are resolved (not after) so a self-
   // referential generic interface resolves the recursive reference to
@@ -97,6 +102,11 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
 
   const std::unordered_map<std::string, ResolvedType> *savedSubst = currentSubstitution;
   currentSubstitution = &subst;
+  // A field's type resolves lexically, against wherever the template
+  // itself was declared - not wherever this particular instantiation was
+  // asked for - same reasoning CheckGenericCall's own save/restore has.
+  std::string savedFile = currentFile;
+  currentFile = tmpl->sourceFile;
   for (auto &f : tmpl->fields) {
     InterfaceField cf;
     cf.name = f.name;
@@ -104,6 +114,7 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
     cf.resolvedType = ResolveType(f.type.get());
     inst->fields.push_back(std::move(cf));
   }
+  currentFile = savedFile;
   currentSubstitution = savedSubst;
 
   return ResolvedType::Struct(mangled);
@@ -142,7 +153,7 @@ Sema::VarInfo *Sema::Lookup(const std::string &name) {
     if (found != it->end()) return &found->second;
   }
   auto globalIt = globals.find(name);
-  if (globalIt != globals.end()) return &globalIt->second;
+  if (globalIt != globals.end() && IsVisible(name)) return &globalIt->second;
   return nullptr;
 }
 
@@ -153,6 +164,20 @@ void Sema::Declare(SourceLoc loc, const std::string &name, ResolvedType type, bo
     return;
   }
   scope[name] = VarInfo{std::move(type), isConst};
+}
+
+bool Sema::IsVisible(const std::string &name) const {
+  if (!visibility) return true; // no module graph resolved - fully flat/global, the original behavior
+  if (builtinNames.count(name)) return true;
+  auto it = visibility->find(currentFile);
+  return it != visibility->end() && it->second.count(name) != 0;
+}
+
+std::string Sema::VisibilityHint(const std::string &name) const {
+  if (!visibility) return "";
+  bool existsAnywhere = globals.count(name) || functions.count(name) || interfaces.count(name) ||
+                        genericFunctions.count(name) || genericInterfaces.count(name);
+  return existsAnywhere ? " (it exists, but isn't imported into this file)" : "";
 }
 
 // ---------------------------------------------------------------------
@@ -172,10 +197,13 @@ void Sema::SeedBuiltins() {
   // signature it finds here, just without a Program::functions entry to
   // walk a Stmt body from.
   functions["numberToString"] = numberToString.get();
+  builtinNames.insert("numberToString");
   builtins.push_back(std::move(numberToString));
 }
 
-bool Sema::Check(Program &program) {
+bool Sema::Check(Program &program,
+                  const std::unordered_map<std::string, std::unordered_set<std::string>> *visibilityMap) {
+  visibility = visibilityMap;
   SeedBuiltins();
 
   for (auto &iface : program.interfaces) {
@@ -211,8 +239,10 @@ bool Sema::Check(Program &program) {
     }
 
     if (!alreadyDeclared) interfaces[iface->name] = iface.get();
+    currentFile = iface->sourceFile;
     for (auto &field : iface->fields) field.resolvedType = ResolveType(field.type.get());
   }
+  currentFile.clear();
 
   // Function signatures are registered before globals (even though a
   // global initializer must ultimately be a literal - see
@@ -235,6 +265,7 @@ bool Sema::Check(Program &program) {
 }
 
 void Sema::CheckGlobalDecl(Stmt *stmt) {
+  currentFile = stmt->sourceFile;
   bool hasDeclared = stmt->declaredType != nullptr;
   ResolvedType declared;
   if (hasDeclared) declared = ResolveType(stmt->declaredType.get());
@@ -300,12 +331,14 @@ void Sema::RegisterFunctionSignature(FunctionDecl *fn) {
   }
 
   if (!alreadyDeclared) functions[fn->name] = fn;
+  currentFile = fn->sourceFile;
   for (auto &p : fn->params) p.resolvedType = ResolveType(p.type.get());
   fn->resolvedReturnType = ResolveType(fn->returnType.get());
 }
 
 void Sema::CheckFunctionBody(FunctionDecl *decl) {
   currentFunction = decl;
+  currentFile = decl->sourceFile;
   PushScope();
   for (auto &p : decl->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false);
   CheckStmt(decl->body.get());
@@ -320,9 +353,12 @@ void Sema::CheckFunctionBody(FunctionDecl *decl) {
 ResolvedType Sema::CheckGenericCall(Expr *expr) {
   const std::string &callee = expr->lhs->name;
   auto it = genericFunctions.find(callee);
-  if (it == genericFunctions.end()) {
-    Error(expr->loc, functions.count(callee) ? "function '" + callee + "' is not generic - remove the type arguments"
-                                              : "call to undefined generic function '" + callee + "'");
+  if (it == genericFunctions.end() || !IsVisible(callee)) {
+    if (it == genericFunctions.end() && functions.count(callee) && IsVisible(callee)) {
+      Error(expr->loc, "function '" + callee + "' is not generic - remove the type arguments");
+    } else {
+      Error(expr->loc, "call to undefined generic function '" + callee + "'" + VisibilityHint(callee));
+    }
     for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
     expr->resolvedCalleeName = callee;
     return ResolvedType{};
@@ -355,9 +391,15 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
     auto clone = std::make_unique<FunctionDecl>();
     clone->name = mangled;
     clone->loc = tmpl->loc;
+    clone->sourceFile = tmpl->sourceFile;
 
     const std::unordered_map<std::string, ResolvedType> *savedSubst = currentSubstitution;
     currentSubstitution = &subst;
+    // Everything about this instantiation - its param/return types and
+    // its body - resolves lexically, against wherever the template
+    // itself was written, not wherever this particular call site is.
+    std::string savedFile = currentFile;
+    currentFile = tmpl->sourceFile;
 
     clone->params.reserve(tmpl->params.size());
     for (auto &p : tmpl->params) {
@@ -396,6 +438,7 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
     // else: a generic `declare function` - no body to check; Codegen
     // treats a null body as extern, same as any non-generic one.
 
+    currentFile = savedFile;
     currentSubstitution = savedSubst;
   }
 
@@ -519,7 +562,7 @@ ResolvedType Sema::CheckLValueTarget(Expr *target, SourceLoc opLoc) {
     VarInfo *v = Lookup(target->name);
     ResolvedType t;
     if (!v) {
-      Error(target->loc, "undefined identifier '" + target->name + "'");
+      Error(target->loc, "undefined identifier '" + target->name + "'" + VisibilityHint(target->name));
       t = ResolvedType{};
     } else {
       if (v->isConst) Error(opLoc, "cannot assign to '" + target->name + "' - it is declared 'const'");
@@ -566,16 +609,17 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
 
   case ExprKind::Identifier: {
     VarInfo *v = Lookup(expr->name);
+    auto funcIt = functions.find(expr->name);
     if (v) {
       actual = v->type;
-    } else if (auto it = functions.find(expr->name); it != functions.end()) {
+    } else if (funcIt != functions.end() && IsVisible(expr->name)) {
       // A bare function name (not a call) - the only first-class value ART
       // functions have. Only a void-returning function can be one (ART has
       // no closures, so this is always just a plain code address, never a
       // captured environment) - its own parameter types become the
       // Handler's, checked structurally like any other type against
       // whatever "(params...) => void" the use site actually expects.
-      FunctionDecl *fn = it->second;
+      FunctionDecl *fn = funcIt->second;
       if (fn->resolvedReturnType.tag != TypeTag::Void) {
         Error(expr->loc, "function '" + expr->name +
                               "' can't be used as a value - only a void-returning function can "
@@ -587,13 +631,13 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         for (auto &p : fn->params) paramTypes.push_back(p.resolvedType);
         actual = ResolvedType::Handler(std::move(paramTypes));
       }
-    } else if (genericFunctions.count(expr->name)) {
+    } else if (genericFunctions.count(expr->name) && IsVisible(expr->name)) {
       Error(expr->loc, "generic function '" + expr->name +
                             "' can't be used as a value - only a fully-instantiated call is supported "
                             "('" + expr->name + "::<Type>(...)')");
       actual = ResolvedType{};
     } else {
-      Error(expr->loc, "undefined identifier '" + expr->name + "'");
+      Error(expr->loc, "undefined identifier '" + expr->name + "'" + VisibilityHint(expr->name));
       actual = ResolvedType{};
     }
     break;
@@ -676,11 +720,13 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     const std::string &callee = expr->lhs->name;
     expr->resolvedCalleeName = callee;
     auto it = functions.find(callee);
-    if (it == functions.end()) {
-      Error(expr->loc, genericFunctions.count(callee)
-                            ? "generic function '" + callee + "' requires explicit type arguments, e.g. '" +
-                                  callee + "::<Type>(...)'"
-                            : "call to undefined function '" + callee + "'");
+    if (it == functions.end() || !IsVisible(callee)) {
+      if (it == functions.end() && genericFunctions.count(callee) && IsVisible(callee)) {
+        Error(expr->loc, "generic function '" + callee + "' requires explicit type arguments, e.g. '" + callee +
+                              "::<Type>(...)'");
+      } else {
+        Error(expr->loc, "call to undefined function '" + callee + "'" + VisibilityHint(callee));
+      }
       for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
       actual = ResolvedType{};
       break;

@@ -28,6 +28,7 @@ add_executable(art
     ast.cpp
     parser.cpp
     sema.cpp
+    module_resolver.cpp
     codegen.cpp
     main.cpp
 )

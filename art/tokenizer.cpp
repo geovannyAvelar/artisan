@@ -29,6 +29,9 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::KwVoid: return "'void'";
   case TokenKind::KwDeclare: return "'declare'";
   case TokenKind::KwType: return "'type'";
+  case TokenKind::KwImport: return "'import'";
+  case TokenKind::KwFrom: return "'from'";
+  case TokenKind::KwExport: return "'export'";
   case TokenKind::LParen: return "'('";
   case TokenKind::RParen: return "')'";
   case TokenKind::LBrace: return "'{'";
@@ -81,6 +84,9 @@ const std::unordered_map<std::string, TokenKind> kKeywords = {
     {"void", TokenKind::KwVoid},
     {"declare", TokenKind::KwDeclare},
     {"type", TokenKind::KwType},
+    {"import", TokenKind::KwImport},
+    {"from", TokenKind::KwFrom},
+    {"export", TokenKind::KwExport},
 };
 }
 
