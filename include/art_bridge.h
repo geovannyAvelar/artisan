@@ -100,26 +100,50 @@ void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler ha
 // included, same as any internally-fired click/change/input. Returns
 // false if the event was cancelable and some listener called
 // ArtEventPreventDefault, true otherwise - the real method's own
-// convention. `detail` is carried onto the dispatched Event completely
-// unexamined (see Event::detail in dom_node.h - true even for a plain
-// C++ `const void*`, let alone this) - pass "" for none. It's only safe
-// to read back with ArtEventDetail below in a listener on an event *ART
-// itself* dispatched: the underlying field is a bare `const void*` with
-// no type tag, so a listener has no way to know a JS/Go dispatch's own
-// detail (there, typically a boxed script value) isn't ART's string
-// shape - this is the exact same "each binding owns its own
-// interpretation" contract detail always had, just spelled out for ART.
-bool ArtDispatchEvent(void *node, ArtString *eventType, bool bubbles, bool cancelable, ArtString *detail);
+// convention.
+//
+// `detail`'s type is ART's own generic type parameter T - ART source
+// declares this (and ArtEventDetail below) as:
+//
+//   declare function ArtDispatchEvent<T>(node: Node, eventType: string,
+//       bubbles: boolean, cancelable: boolean, detail: T): boolean;
+//   declare function ArtEventDetail<T>(event: Event): T;
+//
+// and each call site instantiates T explicitly, e.g.
+// `ArtDispatchEvent::<number>(...)` - ART's compiler mangles that
+// instantiation's actual C symbol to `ArtDispatchEvent$number`, so this
+// header/its .cpp only ever need to provide the *concrete* overloads
+// below, one pair per T actually usable this way (`number`/`boolean`/
+// `string` - the primitive types with an obvious, safe heap
+// representation to box `detail` as; there's no generic mangled overload
+// for an arbitrary user interface T, since a finite bridge can't provide
+// one for every interface a project might declare). Calling either with
+// a T this header doesn't provide an overload for is a link error
+// (undefined symbol) - the honest outcome, the same as an unprovided
+// explicit template instantiation would be across a real C++ ABI
+// boundary.
+//
+// `Event::detail` is still a bare `const void*` underneath (see
+// dom_node.h) - even with T known at the ART call site, `detail` is only
+// safe to read back with ArtEventDetail<T> in a listener on an event
+// *ART itself* dispatched, and only with the *same* T: nothing tags the
+// heap box with which T it actually holds, so a listener has no way to
+// know a JS/Go dispatch's own detail (there, typically a boxed script
+// value) isn't one of these ART-shaped boxes, or that an
+// ArtEventDetail::<string> call against a box `ArtDispatchEvent::<number>`
+// made isn't reading four bytes into a `double` as if it were an
+// `ArtString*`. This is the exact same "each binding (and, now, each T)
+// owns its own interpretation" contract `detail` always had.
+bool ArtDispatchEvent$number(void *node, ArtString *eventType, bool bubbles, bool cancelable, double detail);
+bool ArtDispatchEvent$boolean(void *node, ArtString *eventType, bool bubbles, bool cancelable, bool detail);
+bool ArtDispatchEvent$string(void *node, ArtString *eventType, bool bubbles, bool cancelable, ArtString *detail);
+double ArtEventDetail$number(void *event);
+bool ArtEventDetail$boolean(void *event);
+ArtString *ArtEventDetail$string(void *event);
 
 // See Event (dom_node.h) for the real fields these read/call.
 ArtString *ArtEventType(void *event);
 void *ArtEventTarget(void *event); // a Node - see Event::target
-// The `detail` ArtDispatchEvent passed above, verbatim - "" if this
-// event has none (a plain internally-fired click/change/input, or an
-// ArtDispatchEvent call with detail ""). See ArtDispatchEvent's own doc
-// comment for why this is only safe to call on an event ART itself
-// dispatched.
-ArtString *ArtEventDetail(void *event);
 bool ArtEventBubbles(void *event);
 bool ArtEventCancelable(void *event);
 void ArtEventPreventDefault(void *event);   // no-op if !ArtEventCancelable(event), matching real DOM

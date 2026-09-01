@@ -316,7 +316,7 @@ same way any other type is (a `() => void` where a `(event: Event) =>
 void` is expected, or vice versa, is a compile error, not a silent
 mismatch). `Event` is another opaque foreign type (`declare type Event;`),
 read through its own curated `declare function`s: `ArtEventType`,
-`ArtEventTarget` (a `Node`), `ArtEventDetail` (see `ArtDispatchEvent`
+`ArtEventTarget` (a `Node`), `ArtEventDetail<T>` (see `ArtDispatchEvent<T>`
 below), `ArtEventBubbles`/`ArtEventCancelable`,
 `ArtEventPreventDefault`/`ArtEventDefaultPrevented`,
 `ArtEventStopPropagation`/`ArtEventStopImmediatePropagation` (the latter
@@ -346,32 +346,83 @@ handle or a JS closure - `ArtAddEventListener` above stores one of these
 (not a bare lambda, which has no nameable type to recover later)
 specifically so removal can find it again.
 
-`ArtDispatchEvent(node, eventType, bubbles, cancelable, detail)` is the
-other side of general events - unlike everything above (which all react
-to events something else fires), this actually fires one, any type at
-all, not just the built-in click/change/input this Node model already
-knows to fire (`Node::DispatchEvent`, same signature/semantics: the
-usual capturing/target/bubbling walk, returning `false` if the event was
-cancelable and some listener called `ArtEventPreventDefault`). `detail`
-is where a real `CustomEvent`'s payload lives - genuinely untyped even in
-the underlying C++ (`Event::detail` is a bare `const void*`, "carried
-through the dispatch walk unexamined" no matter which binding constructs
-it), so representing it for a statically-typed language without generics
-means picking one concrete type rather than a real generic payload: ART
-uses `string` for its own dispatches (pass `""` for none), which costs
-nothing extra to wire up - an ART string value is already a heap-
-allocated, never-freed pointer with a stable ABI shape, so `detail` is
-just that same pointer handed to `Node::DispatchEvent` as-is, and
-`ArtEventDetail` casts it straight back with no copy. This only round-
-trips correctly on an event *ART itself* dispatched, though: `detail`
-carries no type tag, so a listener has no way to tell a JS/Go dispatch's
-own detail (typically a boxed script value there) apart from ART's
-string shape - the same "each binding owns its own interpretation"
-contract `detail` always had, just spelled out for ART specifically.
-`ArtEventDetail` on an event with no detail at all (`nullptr` - every
-event this Node model fires internally, or an `ArtDispatchEvent` call
-with `detail ""`) reads back as `""`, the same "can't represent null"
-convention `ArtGetAttribute` already uses for an unset attribute.
+`ArtDispatchEvent<T>(node, eventType, bubbles, cancelable, detail)` is
+the other side of general events - unlike everything above (which all
+react to events something else fires), this actually fires one, any type
+at all, not just the built-in click/change/input this Node model already
+knows to fire (`Node::DispatchEvent`, same signature/semantics: the usual
+capturing/target/bubbling walk, returning `false` if the event was
+cancelable and some listener called `ArtEventPreventDefault`). `T` is
+where a real `CustomEvent`'s `detail` payload's type comes in - see
+"Generic functions" below for the language feature itself; the short
+version is `ArtDispatchEvent::<number>(node, "scored", true, true, 10)`
+and, in a listener on an event ART itself dispatched, `let n: number =
+ArtEventDetail::<number>(event);` reads it back, both real, separately
+compiled functions (`art_bridge.h`'s `ArtDispatchEvent$number`/
+`ArtEventDetail$number`) - `T` can be `number`, `boolean`, or `string`,
+each with its own pair the bridge actually provides; nothing else (a call
+with a `T` the bridge doesn't have a pair for, e.g. your own interface)
+is a link error, not something ART's own type checker catches. Even with
+`T` known, `Event::detail` is still a bare `const void*` underneath (see
+`Event::detail`'s own note - "carried through the dispatch walk
+unexamined" no matter which binding constructs it, JS/Go/ART alike), so
+`ArtEventDetail<T>` is only safe to call in a listener on an event *ART
+itself* dispatched, with the *same* `T` the dispatch used - nothing tags
+the value with which `T` it actually holds, so a mismatched `T` (or an
+event some other binding dispatched, whose own `detail` is typically a
+boxed script value) reads back nonsense rather than failing loudly - the
+same "each binding (now, each `T`) owns its own interpretation" contract
+`detail` always had. `ArtEventDetail<T>` on an event with no detail at
+all (a plain internally-fired click/change/input) reads back as `""`/
+`false`/`0` depending on `T`, the same "can't represent null" convention
+`ArtGetAttribute` already uses for an unset attribute.
+
+### Generic functions
+
+`function`/`declare function` can take type parameters:
+
+```ts
+function identity<T>(x: T): T {
+  return x;
+}
+```
+
+and a call site instantiates them explicitly, turbofish-style -
+`identity::<number>(5)`, `identity::<Point>(p)`. There's no inference
+(`identity(5)` alone is a compile error asking for the `::<...>`) and no
+generic interfaces/types, only functions - a deliberately bounded first
+pass, not the full breadth a real TypeScript's generics have. Plain `<T>`
+at a call site (rather than `::<T>`) would be genuinely ambiguous with
+the `<`/`>` comparison operators - `foo<bar>(baz)` could just as well
+parse as `(foo < bar) > (baz)` - and unlike TypeScript's own parser,
+which resolves this by already knowing every name's declared kind by the
+time it parses an expression, ART's parser runs as a single pass *before*
+Sema, so it can't yet know whether `foo` even names a generic function.
+`::<...>` sidesteps the ambiguity outright, the same reason Rust's own
+turbofish exists.
+
+Generic functions are monomorphized, not type-erased - matching
+real-world ahead-of-time-compiled languages with no runtime type
+information (C++ templates, Rust generics) rather than Java's or C#'s
+generics, which lean on a runtime to erase/reify as needed. Each distinct
+`name::<ConcreteTypes...>` combination actually called becomes its own
+ordinary, fully concrete function once compiled - `identity::<number>`
+and `identity::<string>` are two unrelated LLVM functions with mangled
+names (`identity$number`, `identity$string` - `$`, a real if
+nonstandard identifier character both GCC and Clang accept, chosen so a
+mangled name stays a single valid symbol without escaping). A generic
+function's body is never type-checked in its own unsubstituted "template"
+form - only each instantiation actually used, individually, with its own
+type parameters already replaced by the concrete types that call site
+gave (a lazy, on-first-use scheme, the same "never fully checked until
+instantiated" property C++ templates have - a generic function nobody
+ever calls can have i.e. a body that would fail to type-check for *every*
+concrete `T`, and ART will never notice). This also means a generic
+`declare function` needs a separately provided, separately named extern
+symbol per distinct instantiation actually used - see `ArtDispatchEvent`/
+`ArtEventDetail` above for exactly this in practice: the bridge doesn't
+(and structurally can't) provide one for every type a project might ever
+write, only `number`/`boolean`/`string`.
 
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and
@@ -421,13 +472,15 @@ top-level), `if`/`else`, `while`, C-style `for`, `for...of` over an array,
 above, `boolean`, `string` (with `+` concatenation, `==`/`!=`, `.length`,
 and `s[i]` indexing - immutable, no `s[i] = ...`), `T[]` arrays,
 structural interfaces (an object literal must match a declared
-`interface` exactly - no excess or missing fields), and the parameterized
+`interface` exactly - no excess or missing fields), the parameterized
 handler type described above (`(p0: T0, p1: T1, ...) => void`, structural
 like everything else - parameter names are decorative, only the types and
-their order are checked); prefix `++`/`--` only (no postfix). No
-classes, real closures, generics, `any`, union types, or garbage
-collector - every array/object/string is a heap allocation (`malloc`)
-that's never freed, matching this whole framework's "native,
+their order are checked), and generic functions (`function`/`declare
+function` only, monomorphized, explicit `::<T>` instantiation only - see
+"Generic functions" above); prefix `++`/`--` only (no postfix). No
+classes, real closures, generic interfaces/types, `any`, union types, or
+garbage collector - every array/object/string is a heap allocation
+(`malloc`) that's never freed, matching this whole framework's "native,
 ahead-of-time, no runtime" philosophy rather than the rest of a real
 TypeScript. See the doc comments in `art/*.h`/`art/*.cpp` for the exact
 grammar and type-checking rules.

@@ -114,6 +114,16 @@ struct Expr {
   std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields; // ObjectLiteral
 
   bool isLengthAccess = false; // Member: true when field is the built-in `.length` on an array/string
+
+  // Call to a generic function, e.g. `identity::<number>(5)` - the
+  // explicit turbofish type argument list (never inferred - see
+  // Sema::CheckExpr's Call case). Empty for an ordinary, non-generic
+  // call. `resolvedCalleeName` is always set by Sema for a Call: either
+  // the plain callee name (non-generic) or the mangled per-instantiation
+  // name Codegen should actually invoke (generic) - see
+  // Sema::MangleInstantiation.
+  std::vector<std::unique_ptr<TypeNode>> typeArgs;
+  std::string resolvedCalleeName;
 };
 
 inline std::unique_ptr<Expr> MakeExpr(ExprKind kind, SourceLoc loc) {
@@ -175,12 +185,21 @@ struct Param {
 
 struct FunctionDecl {
   std::string name;
+  std::vector<std::string> typeParams; // e.g. ["T", "U"] for `function foo<T, U>(...)`; empty if not generic
   std::vector<Param> params;
   std::unique_ptr<TypeNode> returnType; // never null - defaults to Void
   ResolvedType resolvedReturnType;
-  std::unique_ptr<Stmt> body; // Block
+  std::unique_ptr<Stmt> body; // Block; always null for a `declare function` OR an uninstantiated generic template
   SourceLoc loc;
 };
+
+// A deep copy of a Stmt/Expr subtree - used to give each concrete
+// instantiation of a generic function's body its own AST, since
+// Sema::CheckStmt/CheckExpr mutate resolvedType in place and two
+// instantiations (e.g. identity::<number> and identity::<string>) must
+// not share nodes or one would clobber the other's annotations.
+std::unique_ptr<Stmt> CloneStmt(const Stmt &stmt);
+std::unique_ptr<Expr> CloneExpr(const Expr &expr);
 
 struct InterfaceField {
   std::string name;

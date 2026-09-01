@@ -29,14 +29,46 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
     return ResolvedType::Void();
   case TypeSyntaxKind::Array:
     return ResolvedType::ArrayOf(ResolveType(node->element.get()));
-  case TypeSyntaxKind::Named:
-    if (!interfaces.count(node->name)) {
-      Error(node->loc, "unknown type '" + node->name + "'");
-      return ResolvedType{};
+  case TypeSyntaxKind::Named: {
+    // A generic instantiation's active substitution wins over everything
+    // else: `T` inside a generic function's own signature/body always
+    // means whatever concrete type this particular call site substituted
+    // for it, never an interface named "T" (that would shadow the type
+    // parameter, same as a real generic language's scoping rules).
+    if (currentSubstitution) {
+      auto found = currentSubstitution->find(node->name);
+      if (found != currentSubstitution->end()) return found->second;
     }
-    return ResolvedType::Struct(node->name);
+    if (interfaces.count(node->name)) return ResolvedType::Struct(node->name);
+    Error(node->loc, "unknown type '" + node->name + "'");
+    return ResolvedType{};
+  }
   }
   return ResolvedType{};
+}
+
+std::string Sema::MangleType(const ResolvedType &t) {
+  switch (t.tag) {
+  case TypeTag::Number: return "number";
+  case TypeTag::Boolean: return "boolean";
+  case TypeTag::String: return "string";
+  case TypeTag::Void: return "void";
+  case TypeTag::Array: return "arr_" + MangleType(*t.elementType);
+  case TypeTag::Struct: return t.structName;
+  case TypeTag::Handler: {
+    std::string out = "fn";
+    for (auto &p : *t.handlerParamTypes) out += "_" + MangleType(p);
+    return out;
+  }
+  case TypeTag::Unknown: return "unknown";
+  }
+  return "?";
+}
+
+std::string Sema::MangleInstantiation(const std::string &name, const std::vector<ResolvedType> &typeArgs) {
+  std::string out = name;
+  for (auto &arg : typeArgs) out += "$" + MangleType(arg);
+  return out;
 }
 
 void Sema::PushScope() { scopes.emplace_back(); }
@@ -112,7 +144,12 @@ bool Sema::Check(Program &program) {
 
   for (auto &g : program.globals) CheckGlobalDecl(g.get());
 
-  for (auto &fn : program.functions) CheckFunctionBody(fn.get());
+  // A generic function's body is never checked in template form - only
+  // each concrete instantiation a call site actually asks for (see
+  // CheckGenericCall), lazily, the same "never fully checked until used"
+  // deal C++ templates have.
+  for (auto &fn : program.functions)
+    if (fn->typeParams.empty()) CheckFunctionBody(fn.get());
 
   return diagnostics.empty();
 }
@@ -149,18 +186,41 @@ void Sema::CheckGlobalDecl(Stmt *stmt) {
 }
 
 void Sema::RegisterFunctionSignature(FunctionDecl *fn) {
-  if (functions.count(fn->name)) {
+  bool alreadyDeclared = functions.count(fn->name) || genericFunctions.count(fn->name);
+  if (alreadyDeclared) {
     Error(fn->loc, "function '" + fn->name + "' is already declared");
-  } else {
-    functions[fn->name] = fn;
   }
-  std::unordered_set<std::string> seen;
+
+  std::unordered_set<std::string> seenParams;
   for (auto &p : fn->params) {
-    p.resolvedType = ResolveType(p.type.get());
-    if (!seen.insert(p.name).second) {
+    if (!seenParams.insert(p.name).second) {
       Error(p.loc, "duplicate parameter '" + p.name + "' in function '" + fn->name + "'");
     }
   }
+
+  if (!fn->typeParams.empty()) {
+    // A generic template's own param/return TypeNodes reference its type
+    // parameters (`T`, ...) by name, same syntax as any other named type -
+    // resolving them here (with no substitution active yet) would either
+    // wrongly treat a type parameter as an unknown type, or wrongly
+    // shadow a same-named interface. Neither is needed anyway: nothing
+    // about a template's own shape (arity is enough for a call site's
+    // argument-count check) requires resolving these before an actual
+    // instantiation substitutes concrete types - see CheckGenericCall,
+    // which resolves the (shared, read-only) TypeNodes fresh per
+    // instantiation instead.
+    std::unordered_set<std::string> seenTypeParams;
+    for (auto &t : fn->typeParams) {
+      if (!seenTypeParams.insert(t).second) {
+        Error(fn->loc, "duplicate type parameter '" + t + "' in function '" + fn->name + "'");
+      }
+    }
+    if (!alreadyDeclared) genericFunctions[fn->name] = fn;
+    return;
+  }
+
+  if (!alreadyDeclared) functions[fn->name] = fn;
+  for (auto &p : fn->params) p.resolvedType = ResolveType(p.type.get());
   fn->resolvedReturnType = ResolveType(fn->returnType.get());
 }
 
@@ -175,6 +235,99 @@ void Sema::CheckFunctionBody(FunctionDecl *decl) {
                           decl->resolvedReturnType.ToString() + " on all code paths");
   }
   currentFunction = nullptr;
+}
+
+ResolvedType Sema::CheckGenericCall(Expr *expr) {
+  const std::string &callee = expr->lhs->name;
+  auto it = genericFunctions.find(callee);
+  if (it == genericFunctions.end()) {
+    Error(expr->loc, functions.count(callee) ? "function '" + callee + "' is not generic - remove the type arguments"
+                                              : "call to undefined generic function '" + callee + "'");
+    for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+    expr->resolvedCalleeName = callee;
+    return ResolvedType{};
+  }
+  FunctionDecl *tmpl = it->second;
+
+  if (expr->typeArgs.size() != tmpl->typeParams.size()) {
+    Error(expr->loc, "function '" + callee + "' expects " + std::to_string(tmpl->typeParams.size()) +
+                          " type argument(s), got " + std::to_string(expr->typeArgs.size()));
+    for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+    expr->resolvedCalleeName = callee;
+    return ResolvedType{};
+  }
+
+  std::vector<ResolvedType> concreteArgs;
+  concreteArgs.reserve(expr->typeArgs.size());
+  for (auto &t : expr->typeArgs) concreteArgs.push_back(ResolveType(t.get()));
+
+  std::string mangled = MangleInstantiation(callee, concreteArgs);
+  expr->resolvedCalleeName = mangled;
+
+  FunctionDecl *inst;
+  auto instIt = instantiations.find(mangled);
+  if (instIt != instantiations.end()) {
+    inst = instIt->second;
+  } else {
+    std::unordered_map<std::string, ResolvedType> subst;
+    for (size_t i = 0; i < tmpl->typeParams.size(); i++) subst[tmpl->typeParams[i]] = concreteArgs[i];
+
+    auto clone = std::make_unique<FunctionDecl>();
+    clone->name = mangled;
+    clone->loc = tmpl->loc;
+
+    const std::unordered_map<std::string, ResolvedType> *savedSubst = currentSubstitution;
+    currentSubstitution = &subst;
+
+    clone->params.reserve(tmpl->params.size());
+    for (auto &p : tmpl->params) {
+      Param cp;
+      cp.name = p.name;
+      cp.loc = p.loc;
+      cp.resolvedType = ResolveType(p.type.get());
+      clone->params.push_back(std::move(cp));
+    }
+    clone->resolvedReturnType = ResolveType(tmpl->returnType.get());
+
+    // Registered before the body is checked (not after) so a direct
+    // self-recursive call to this exact instantiation inside its own
+    // body - found via CheckGenericCall re-entering with the same
+    // mangled name - resolves against this (signature-complete, body
+    // still in progress) entry instead of infinitely re-instantiating.
+    inst = clone.get();
+    instantiations[mangled] = inst;
+    instantiationStorage.push_back(std::move(clone));
+
+    if (tmpl->body) {
+      inst->body = CloneStmt(*tmpl->body);
+      FunctionDecl *savedCurrentFunction = currentFunction;
+      currentFunction = inst;
+      PushScope();
+      for (auto &p : inst->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false);
+      CheckStmt(inst->body.get());
+      PopScope();
+      if (inst->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(inst->body.get())) {
+        Error(tmpl->loc, "function '" + callee + "' does not return a value of type " +
+                              inst->resolvedReturnType.ToString() + " on all code paths (instantiated as '" +
+                              mangled + "')");
+      }
+      currentFunction = savedCurrentFunction;
+    }
+    // else: a generic `declare function` - no body to check; Codegen
+    // treats a null body as extern, same as any non-generic one.
+
+    currentSubstitution = savedSubst;
+  }
+
+  if (inst->params.size() != expr->elements.size()) {
+    Error(expr->loc, "function '" + callee + "' expects " + std::to_string(inst->params.size()) +
+                          " argument(s), got " + std::to_string(expr->elements.size()));
+  }
+  size_t n = std::min(inst->params.size(), expr->elements.size());
+  for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &inst->params[i].resolvedType);
+  for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
+
+  return inst->resolvedReturnType;
 }
 
 bool Sema::AlwaysReturns(Stmt *stmt) {
@@ -354,6 +507,11 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         for (auto &p : fn->params) paramTypes.push_back(p.resolvedType);
         actual = ResolvedType::Handler(std::move(paramTypes));
       }
+    } else if (genericFunctions.count(expr->name)) {
+      Error(expr->loc, "generic function '" + expr->name +
+                            "' can't be used as a value - only a fully-instantiated call is supported "
+                            "('" + expr->name + "::<Type>(...)')");
+      actual = ResolvedType{};
     } else {
       Error(expr->loc, "undefined identifier '" + expr->name + "'");
       actual = ResolvedType{};
@@ -431,10 +589,18 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       actual = ResolvedType{};
       break;
     }
+    if (!expr->typeArgs.empty()) {
+      actual = CheckGenericCall(expr);
+      break;
+    }
     const std::string &callee = expr->lhs->name;
+    expr->resolvedCalleeName = callee;
     auto it = functions.find(callee);
     if (it == functions.end()) {
-      Error(expr->loc, "call to undefined function '" + callee + "'");
+      Error(expr->loc, genericFunctions.count(callee)
+                            ? "generic function '" + callee + "' requires explicit type arguments, e.g. '" +
+                                  callee + "::<Type>(...)'"
+                            : "call to undefined function '" + callee + "'");
       for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
       actual = ResolvedType{};
       break;

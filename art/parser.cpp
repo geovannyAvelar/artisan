@@ -97,6 +97,20 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
   return decl;
 }
 
+// Consumes "<T, U, ...>" if present - a generic function/declare
+// function's own type parameter list. `<`/`>` are unambiguous here
+// (unlike at a call site - see ParsePostfix's turbofish handling), since
+// a type/parameter list can never start with a comparison expression.
+void Parser::ParseOptionalTypeParams(FunctionDecl *decl) {
+  if (!Match(TokenKind::Lt)) return;
+  if (!Check(TokenKind::Gt)) {
+    do {
+      decl->typeParams.push_back(Expect(TokenKind::Identifier, "as a type parameter name").text);
+    } while (Match(TokenKind::Comma));
+  }
+  Expect(TokenKind::Gt, "to close a type parameter list");
+}
+
 // Consumes "( params... ) (: returnType)?" - shared by a full `function`
 // declaration and a body-less `declare function` one.
 void Parser::ParseParamsAndReturnType(FunctionDecl *decl) {
@@ -128,6 +142,7 @@ std::unique_ptr<FunctionDecl> Parser::ParseFunction() {
   decl->loc = Cur().loc;
   Expect(TokenKind::KwFunction, "to start a function declaration");
   decl->name = Expect(TokenKind::Identifier, "as the function name").text;
+  ParseOptionalTypeParams(decl.get());
   ParseParamsAndReturnType(decl.get());
   decl->body = ParseBlock();
   return decl;
@@ -148,6 +163,7 @@ std::unique_ptr<FunctionDecl> Parser::ParseDeclareFunction() {
   decl->loc = Cur().loc;
   Expect(TokenKind::KwFunction, "after 'declare'");
   decl->name = Expect(TokenKind::Identifier, "as the function name").text;
+  ParseOptionalTypeParams(decl.get());
   ParseParamsAndReturnType(decl.get());
   Expect(TokenKind::Semicolon, "after a 'declare function' signature (it has no body)");
   return decl; // decl->body stays null - bound to an external symbol at link time
@@ -472,6 +488,31 @@ std::unique_ptr<Expr> Parser::ParsePostfix() {
       pos++;
       auto call = MakeExpr(ExprKind::Call, loc);
       call->lhs = std::move(expr);
+      if (!Check(TokenKind::RParen)) {
+        do {
+          call->elements.push_back(ParseExpr());
+        } while (Match(TokenKind::Comma));
+      }
+      Expect(TokenKind::RParen, "to close call arguments");
+      expr = std::move(call);
+    } else if (Check(TokenKind::ColonColon)) {
+      // A generic call, e.g. `identity::<number>(5)` - '::<' rather than
+      // plain '<' specifically to stay unambiguous with the '<'/'>'
+      // comparison operators: the parser can't yet know whether an
+      // identifier names a generic function (that's Sema's job, a later
+      // pass), so a bare '<' after a call target would be a genuine
+      // parse-time ambiguity with a comparison expression. No type
+      // inference - the argument list is always required here.
+      SourceLoc loc = Cur().loc;
+      pos++;
+      Expect(TokenKind::Lt, "after '::' to start a generic call's type argument list");
+      auto call = MakeExpr(ExprKind::Call, loc);
+      call->lhs = std::move(expr);
+      do {
+        call->typeArgs.push_back(ParseType());
+      } while (Match(TokenKind::Comma));
+      Expect(TokenKind::Gt, "to close a generic call's type argument list");
+      Expect(TokenKind::LParen, "to start call arguments after a generic call's type argument list");
       if (!Check(TokenKind::RParen)) {
         do {
           call->elements.push_back(ParseExpr());

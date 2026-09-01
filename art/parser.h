@@ -42,6 +42,7 @@ private:
   std::unique_ptr<FunctionDecl> ParseFunction();
   std::unique_ptr<InterfaceDecl> ParseDeclareType();
   std::unique_ptr<FunctionDecl> ParseDeclareFunction();
+  void ParseOptionalTypeParams(FunctionDecl *decl);
   void ParseParamsAndReturnType(FunctionDecl *decl);
   std::unique_ptr<TypeNode> ParseType();
 

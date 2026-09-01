@@ -77,7 +77,7 @@ private:
   llvm::StructType *GetOrCreateStructType(const std::string &ifaceName);
   int FieldIndex(InterfaceDecl *iface, const std::string &fieldName);
 
-  void DeclareFunctionSignatures(std::vector<std::unique_ptr<FunctionDecl>> &decls, bool allowMainRename);
+  void DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls, bool allowMainRename);
   void GenGlobalDecl(Stmt *stmt); // a top-level `let`/`const` - see Program::globals
   void GenBuiltinNumberToString(); // defines the LLVM function backing Sema::SeedBuiltins' "numberToString"
   void GenFunction(FunctionDecl *decl);

@@ -28,6 +28,22 @@ ArtString *MakeArtString(const char *cstr) {
   return header;
 }
 
+// Heap-boxes a primitive so it can be handed to Node::DispatchEvent's
+// `const void*` detail (see the ArtDispatchEvent$.../ArtEventDetail$...
+// overloads below) - never freed, same "leaks forever" deal every other
+// ART heap value has.
+double *BoxDouble(double value) {
+  auto *box = static_cast<double *>(std::malloc(sizeof(double)));
+  *box = value;
+  return box;
+}
+
+bool *BoxBool(bool value) {
+  auto *box = static_cast<bool *>(std::malloc(sizeof(bool)));
+  *box = value;
+  return box;
+}
+
 // Wraps an ArtEventHandler (a raw ART function pointer) so it can be
 // stored in a Node::EventHandler (std::function<void(Event&)>) and later
 // *recovered* - a plain lambda can't be, since std::function::target<T>()
@@ -126,24 +142,44 @@ void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler ha
       });
 }
 
-bool ArtDispatchEvent(void *node, ArtString *eventType, bool bubbles, bool cancelable, ArtString *detail) {
+bool ArtDispatchEvent$number(void *node, ArtString *eventType, bool bubbles, bool cancelable, double detail) {
+  std::string type(eventType->data, static_cast<size_t>(eventType->length));
+  return static_cast<artisan::Node *>(node)->DispatchEvent(type, bubbles, cancelable, BoxDouble(detail));
+}
+
+bool ArtDispatchEvent$boolean(void *node, ArtString *eventType, bool bubbles, bool cancelable, bool detail) {
+  std::string type(eventType->data, static_cast<size_t>(eventType->length));
+  return static_cast<artisan::Node *>(node)->DispatchEvent(type, bubbles, cancelable, BoxBool(detail));
+}
+
+bool ArtDispatchEvent$string(void *node, ArtString *eventType, bool bubbles, bool cancelable, ArtString *detail) {
   std::string type(eventType->data, static_cast<size_t>(eventType->length));
   // `detail` is already a heap-allocated, never-freed ArtString* - the
   // exact same shape/lifetime every other ART string value has - so it's
   // handed to Node::DispatchEvent's `const void*` as-is, no copy needed;
-  // ArtEventDetail below just casts it straight back.
+  // ArtEventDetail$string below just casts it straight back.
   return static_cast<artisan::Node *>(node)->DispatchEvent(type, bubbles, cancelable, detail);
+}
+
+double ArtEventDetail$number(void *event) {
+  const void *detail = static_cast<artisan::Event *>(event)->detail;
+  return detail == nullptr ? 0.0 : *static_cast<const double *>(detail);
+}
+
+bool ArtEventDetail$boolean(void *event) {
+  const void *detail = static_cast<artisan::Event *>(event)->detail;
+  return detail != nullptr && *static_cast<const bool *>(detail);
+}
+
+ArtString *ArtEventDetail$string(void *event) {
+  const void *detail = static_cast<artisan::Event *>(event)->detail;
+  if (detail == nullptr) return MakeArtString("");
+  return const_cast<ArtString *>(static_cast<const ArtString *>(detail));
 }
 
 ArtString *ArtEventType(void *event) { return MakeArtString(static_cast<artisan::Event *>(event)->type.c_str()); }
 
 void *ArtEventTarget(void *event) { return static_cast<artisan::Event *>(event)->target; }
-
-ArtString *ArtEventDetail(void *event) {
-  const void *detail = static_cast<artisan::Event *>(event)->detail;
-  if (detail == nullptr) return MakeArtString("");
-  return const_cast<ArtString *>(static_cast<const ArtString *>(detail));
-}
 
 bool ArtEventBubbles(void *event) { return static_cast<artisan::Event *>(event)->Bubbles(); }
 

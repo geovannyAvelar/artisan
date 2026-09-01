@@ -38,6 +38,7 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::Comma: return "','";
   case TokenKind::Semicolon: return "';'";
   case TokenKind::Colon: return "':'";
+  case TokenKind::ColonColon: return "'::'";
   case TokenKind::Dot: return "'.'";
   case TokenKind::Plus: return "'+'";
   case TokenKind::Minus: return "'-'";
@@ -213,7 +214,9 @@ Token Tokenizer::Next() {
   case ']': return MakeToken(TokenKind::RBracket, "]", loc);
   case ',': return MakeToken(TokenKind::Comma, ",", loc);
   case ';': return MakeToken(TokenKind::Semicolon, ";", loc);
-  case ':': return MakeToken(TokenKind::Colon, ":", loc);
+  case ':':
+    if (Current() == ':') { Advance(); return MakeToken(TokenKind::ColonColon, "::", loc); }
+    return MakeToken(TokenKind::Colon, ":", loc);
   case '.': return MakeToken(TokenKind::Dot, ".", loc);
   case '+':
     if (Current() == '+') { Advance(); return MakeToken(TokenKind::PlusPlus, "++", loc); }

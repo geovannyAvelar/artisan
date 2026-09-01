@@ -250,12 +250,32 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
 
   for (auto &g : program.globals) GenGlobalDecl(g.get());
 
-  DeclareFunctionSignatures(program.functions, /*allowMainRename=*/true);
-  DeclareFunctionSignatures(program.externFunctions, /*allowMainRename=*/false);
-  for (auto &fn : program.functions) GenFunction(fn.get());
-  // program.externFunctions have no body (`declare function ...;`) - they
-  // stay as bare external declarations, resolved at link time against
-  // whatever object/library actually defines them.
+  // A generic function/declare-function's own template FunctionDecl is
+  // skipped entirely here - it was never given resolved param/return
+  // types (see Sema::RegisterFunctionSignature) since there's no concrete
+  // type to resolve them against. Only its instantiations (each an
+  // ordinary, fully-concrete FunctionDecl Sema cloned and checked per
+  // distinct `name::<Type,...>` call site actually used - see
+  // Sema::CheckGenericCall) are real, generated below.
+  std::vector<FunctionDecl *> concreteFunctions;
+  for (auto &fn : program.functions)
+    if (fn->typeParams.empty()) concreteFunctions.push_back(fn.get());
+  std::vector<FunctionDecl *> externFunctions;
+  for (auto &fn : program.externFunctions)
+    if (fn->typeParams.empty()) externFunctions.push_back(fn.get());
+  std::vector<FunctionDecl *> instantiations;
+  for (auto &[mangledName, inst] : sema.Instantiations()) instantiations.push_back(inst);
+
+  DeclareFunctionSignatures(concreteFunctions, /*allowMainRename=*/true);
+  DeclareFunctionSignatures(externFunctions, /*allowMainRename=*/false);
+  DeclareFunctionSignatures(instantiations, /*allowMainRename=*/false);
+  for (auto *fn : concreteFunctions) GenFunction(fn);
+  for (auto *fn : instantiations)
+    if (fn->body) GenFunction(fn);
+  // program.externFunctions and a generic `declare function`'s own
+  // instantiations (body == nullptr) stay as bare external declarations,
+  // resolved at link time against whatever object/library actually
+  // defines them.
 
   // A zero-arg ART `main` returning number/void becomes the process entry
   // point, but its LLVM function returns `double` (or `void`), not the `i32`
@@ -280,8 +300,8 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   return std::move(module);
 }
 
-void Codegen::DeclareFunctionSignatures(std::vector<std::unique_ptr<FunctionDecl>> &decls, bool allowMainRename) {
-  for (auto &decl : decls) {
+void Codegen::DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls, bool allowMainRename) {
+  for (auto *decl : decls) {
     std::vector<llvm::Type *> paramTypes;
     paramTypes.reserve(decl->params.size());
     for (auto &p : decl->params) paramTypes.push_back(MapType(p.resolvedType));
@@ -704,7 +724,11 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
   }
 
   case ExprKind::Call: {
-    llvm::Function *callee = llvmFunctions.at(expr->lhs->name);
+    // resolvedCalleeName is the plain name for an ordinary call, or the
+    // mangled per-instantiation name for a generic one (see
+    // Sema::CheckGenericCall) - either way, exactly what
+    // DeclareFunctionSignatures registered into llvmFunctions under.
+    llvm::Function *callee = llvmFunctions.at(expr->resolvedCalleeName);
     std::vector<llvm::Value *> args;
     args.reserve(expr->elements.size());
     for (auto &argExpr : expr->elements) args.push_back(GenExpr(argExpr.get()));

@@ -43,6 +43,7 @@ enum class TokenKind {
   Comma,
   Semicolon,
   Colon,
+  ColonColon,
   Dot,
 
   // Operators
