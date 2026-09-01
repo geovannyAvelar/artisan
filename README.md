@@ -672,13 +672,18 @@ grid's own `start`/`end`, in both contexts; `justify-items` (grid only -
 flexbox has no equivalent, since `justify-content` distributes free
 space among items along the main axis rather than positioning one item
 within its own single line) only accepts grid's `start`/`end`. Real
-CSS's per-item `justify-self`/`align-self` overrides aren't supported -
-only these two container-level properties, the same scope flexbox's own
-`align-items` already has. A non-stretched item's own width still feeds
-back into row auto-sizing correctly (a narrower item can wrap its text
-across more lines than a stretched one would, becoming taller) - it's
-only ever the *positioning* within the cell that's skipped when
-stretch doesn't apply, not the sizing math surrounding it.
+CSS's per-item `justify-self`/`align-self` override either of these for
+one item alone, the same four keywords (grid's `start`/`end` spelling
+only - unlike `align-items`, this engine never wires `align-self` into
+flexbox, so there's no `flex-start`/`flex-end` form to also accept
+here) - `auto` (the only other value `justify-self`/`align-self` accept
+here) means "unset", falling back to the container's own
+`justify-items`/`align-items` for that item, exactly as it always did
+before these two properties existed. A non-stretched item's own width
+still feeds back into row auto-sizing correctly (a narrower item can
+wrap its text across more lines than a stretched one would, becoming
+taller) - it's only ever the *positioning* within the cell that's
+skipped when stretch doesn't apply, not the sizing math surrounding it.
 
 `grid-auto-flow` controls which axis auto-placement fills first:
 `row` (the default, and the only behavior before this property existed)

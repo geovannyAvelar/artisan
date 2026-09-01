@@ -958,6 +958,45 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.hasJustifyItems = true;
         decl.justifyItems = AlignItems::kStretch;
       }
+    } else if (property == "justify-self") {
+      // Grid-only item property, same four keywords justify-items
+      // above accepts (this parser never wires justify-self into
+      // flexbox, so there's no flex-start/flex-end spelling to accept
+      // here the way align-items/align-self do).
+      std::string lower = ToLower(value);
+      if (lower == "start") {
+        decl.hasJustifySelf = true;
+        decl.justifySelf = AlignItems::kFlexStart;
+      } else if (lower == "center") {
+        decl.hasJustifySelf = true;
+        decl.justifySelf = AlignItems::kCenter;
+      } else if (lower == "end") {
+        decl.hasJustifySelf = true;
+        decl.justifySelf = AlignItems::kFlexEnd;
+      } else if (lower == "stretch") {
+        decl.hasJustifySelf = true;
+        decl.justifySelf = AlignItems::kStretch;
+      }
+    } else if (property == "align-self") {
+      // Grid-only item property here (real CSS's align-self also
+      // applies to flex items, but RenderFlexContainer doesn't read
+      // this field - see Widget::alignSelf, widget.h) - same four
+      // keywords align-items above accepts, grid's own start/end
+      // spelling only.
+      std::string lower = ToLower(value);
+      if (lower == "start") {
+        decl.hasAlignSelf = true;
+        decl.alignSelf = AlignItems::kFlexStart;
+      } else if (lower == "center") {
+        decl.hasAlignSelf = true;
+        decl.alignSelf = AlignItems::kCenter;
+      } else if (lower == "end") {
+        decl.hasAlignSelf = true;
+        decl.alignSelf = AlignItems::kFlexEnd;
+      } else if (lower == "stretch") {
+        decl.hasAlignSelf = true;
+        decl.alignSelf = AlignItems::kStretch;
+      }
     } else if (property == "align-content") {
       std::string lower = ToLower(value);
       if (lower == "flex-start") {
@@ -1639,6 +1678,14 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasGridRow = true;
     declarations.gridRow = inlineStyle.gridRow;
   }
+  if (inlineStyle.hasJustifySelf) {
+    declarations.hasJustifySelf = true;
+    declarations.justifySelf = inlineStyle.justifySelf;
+  }
+  if (inlineStyle.hasAlignSelf) {
+    declarations.hasAlignSelf = true;
+    declarations.alignSelf = inlineStyle.alignSelf;
+  }
   if (inlineStyle.hasGridAutoFlow) {
     declarations.hasGridAutoFlow = true;
     declarations.gridAutoFlow = inlineStyle.gridAutoFlow;
@@ -1779,6 +1826,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner gridTemplateColumnsWin, gridTemplateRowsWin, gridTemplateAreasWin;
   PropertyWinner gridAreaWin;
   PropertyWinner gridColumnWin, gridRowWin;
+  PropertyWinner justifySelfWin, alignSelfWin;
   PropertyWinner gridAutoFlowWin;
 
   for (size_t i = 0; i < rules_.size(); ++i) {
@@ -1965,6 +2013,16 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         gridRowWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGridRow = true;
       own.gridRow = rule.declarations.gridRow;
+    }
+    if (rule.declarations.hasJustifySelf &&
+        justifySelfWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasJustifySelf = true;
+      own.justifySelf = rule.declarations.justifySelf;
+    }
+    if (rule.declarations.hasAlignSelf &&
+        alignSelfWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasAlignSelf = true;
+      own.alignSelf = rule.declarations.alignSelf;
     }
     if (rule.declarations.hasGridAutoFlow &&
         gridAutoFlowWin.ShouldTake(matchedSpecificity, ruleIndex)) {

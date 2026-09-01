@@ -86,6 +86,10 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.gridArea = style.gridArea;
   widget.gridColumn = style.gridColumn;
   widget.gridRow = style.gridRow;
+  widget.hasJustifySelf = style.hasJustifySelf;
+  widget.justifySelf = style.justifySelf;
+  widget.hasAlignSelf = style.hasAlignSelf;
+  widget.alignSelf = style.alignSelf;
   widget.gridAutoFlow = style.gridAutoFlow;
 }
 

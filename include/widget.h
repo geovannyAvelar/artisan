@@ -49,8 +49,9 @@ struct Color {
 // alignment already uses - see Widget::alignItems below) control
 // whether an item stretches to fill its cell on each axis (the default,
 // same as flexbox's own) or keeps its natural size and is start/center/
-// end-positioned within it instead - no per-item justify-self/
-// align-self, only these two container-level properties.
+// end-positioned within it instead; a child's own justify-self/
+// align-self (Widget::justifySelf/alignSelf below) overrides either of
+// these for that one item alone.
 enum class DisplayMode { kBlock, kFlex, kGrid };
 enum class FlexDirection { kRow, kColumn };
 enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
@@ -409,6 +410,27 @@ struct Widget {
   // widget_renderer.cpp, for exactly where each case is decided.
   GridLinePlacement gridColumn;
   GridLinePlacement gridRow;
+
+  // justify-self/align-self - item properties (like gridColumn/gridRow
+  // above), each overriding this item's own justify-items/align-items
+  // positioning within its cell for this item alone when set - real
+  // CSS's per-item escape hatch from the container-wide default (see
+  // RenderGridContainer, widget_renderer.cpp). hasJustifySelf/
+  // hasAlignSelf false (the default) means unset - real CSS's own
+  // `auto` keyword, the only value besides an explicit keyword
+  // ParseDeclarations accepts for these two properties (see css.cpp) -
+  // so this item falls back to the parent's own justifyItems/alignItems
+  // instead, exactly as it always did before these properties existed.
+  // Reuses AlignItems (same four keywords justify-items/align-items
+  // already accept) rather than a new enum - same "one enum type, more
+  // than one property" shape justifyItems itself already is. Grid only,
+  // like justify-items - real CSS's align-self also applies to flex
+  // items, but that's out of scope here (RenderFlexContainer doesn't
+  // read either field).
+  bool hasJustifySelf = false;
+  AlignItems justifySelf = AlignItems::kStretch;
+  bool hasAlignSelf = false;
+  AlignItems alignSelf = AlignItems::kStretch;
 
   // grid-auto-flow - see GridAutoFlow above. Container property (unlike
   // gridArea/gridColumn/gridRow just above): it governs how *this*

@@ -806,7 +806,14 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
 // as real CSS) control whether an item fills its own cell(s) on each
 // axis outright, or keeps its own fit-content size and is
 // start/center/end-positioned within the cell instead - see the
-// itemWidth/xOffset/yOffset computation below. No justify-self/
+// itemWidth/xOffset/yOffset computation below. A child's own
+// justify-self/align-self (Widget::hasJustifySelf/justifySelf,
+// hasAlignSelf/alignSelf) overrides the container's justifyItems/
+// alignItems for that one item alone when set - real CSS's per-item
+// escape hatch from the container-wide default (its own `auto`, this
+// bounded subset's only unset value, falls back to the container's own
+// property exactly as it always did before these existed) - see the
+// effectiveJustifyItems/effectiveAlignItems computation below.
 //
 // Track alignment: widget.justifyContent/alignContent (flex-start by
 // default, matching this Widget field's own pre-grid default - see
@@ -824,10 +831,10 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
 // the rows naturally needed, the same gating flex's own align-content
 // already uses - this bounded subset's rows have no other source of
 // extra height to distribute, being always content-auto-sized
-// otherwise (see GridTrack's own doc comment, widget.h). No justify-self/
-// align-self - only the container-level properties, the same
-// container-only-alignment scope RenderFlexContainer's own alignItems
-// already has.
+// otherwise (see GridTrack's own doc comment, widget.h). Unlike
+// justify-items/align-items above, justify-content/align-content have no
+// per-item override - group-level track distribution has no equivalent
+// "just this one item" concept in real CSS either.
 //
 // Subgrid: an item that's itself display:grid with grid-template-
 // columns: subgrid doesn't resolve its own column tracks at all - it
@@ -1111,12 +1118,18 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   std::vector<float> itemWidth(n);
   for (int i = 0; i < n; ++i) {
     const GridItemPlacement &p = placements[i];
+    const Widget &child = widget.children[i];
+    // justify-self overrides the container's own justify-items for this
+    // one item, when set - see JustifySelf/AlignSelf's own doc comment
+    // (widget.h) for the "auto falls back to the container" contract.
+    AlignItems effectiveJustifyItems =
+        child.hasJustifySelf ? child.justifySelf : widget.justifyItems;
     float cellWidth = 0.0f;
     for (int c = p.col; c < p.col + p.colSpan; ++c) {
       cellWidth += columnWidths[c];
     }
     cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
-    if (widget.justifyItems == AlignItems::kStretch) {
+    if (effectiveJustifyItems == AlignItems::kStretch) {
       itemWidth[i] = cellWidth;
     } else {
       itemWidth[i] = std::min(
@@ -1240,6 +1253,11 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
 
   for (int i = 0; i < n; ++i) {
     const GridItemPlacement &p = placements[i];
+    const Widget &child = widget.children[i];
+    AlignItems effectiveJustifyItems =
+        child.hasJustifySelf ? child.justifySelf : widget.justifyItems;
+    AlignItems effectiveAlignItems =
+        child.hasAlignSelf ? child.alignSelf : widget.alignItems;
 
     float cellWidth = 0.0f;
     for (int c = p.col; c < p.col + p.colSpan; ++c) {
@@ -1281,14 +1299,14 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     }
 
     float renderWidth = itemWidth[i];
-    if (widget.justifyItems == AlignItems::kStretch) {
+    if (effectiveJustifyItems == AlignItems::kStretch) {
       effectiveChild.hasWidth = true;
       effectiveChild.widthIsPercent = false;
       effectiveChild.width = cellWidth;
       renderWidth = cellWidth;
     }
     float itemHeight = cellHeight;
-    if (widget.alignItems == AlignItems::kStretch) {
+    if (effectiveAlignItems == AlignItems::kStretch) {
       effectiveChild.hasHeight = true;
       effectiveChild.height = cellHeight;
     } else {
@@ -1296,15 +1314,15 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     }
 
     float xOffset = 0.0f;
-    if (widget.justifyItems == AlignItems::kCenter) {
+    if (effectiveJustifyItems == AlignItems::kCenter) {
       xOffset = (cellWidth - renderWidth) / 2.0f;
-    } else if (widget.justifyItems == AlignItems::kFlexEnd) {
+    } else if (effectiveJustifyItems == AlignItems::kFlexEnd) {
       xOffset = cellWidth - renderWidth;
     }
     float yOffset = 0.0f;
-    if (widget.alignItems == AlignItems::kCenter) {
+    if (effectiveAlignItems == AlignItems::kCenter) {
       yOffset = (cellHeight - itemHeight) / 2.0f;
-    } else if (widget.alignItems == AlignItems::kFlexEnd) {
+    } else if (effectiveAlignItems == AlignItems::kFlexEnd) {
       yOffset = cellHeight - itemHeight;
     }
 

@@ -306,6 +306,13 @@ struct Declarations {
   GridLinePlacement gridColumn;
   bool hasGridRow = false;
   GridLinePlacement gridRow;
+  // justify-self/align-self - see Widget's identical fields (widget.h)
+  // for the full contract. Each needs its own hasXxx flag for the same
+  // reason justify-items/align-items above do.
+  bool hasJustifySelf = false;
+  AlignItems justifySelf = AlignItems::kStretch;
+  bool hasAlignSelf = false;
+  AlignItems alignSelf = AlignItems::kStretch;
   bool hasGridAutoFlow = false;
   GridAutoFlow gridAutoFlow = GridAutoFlow::kRow;
 
