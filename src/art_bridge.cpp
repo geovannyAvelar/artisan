@@ -4,6 +4,10 @@
 #include <cstring>
 #include <string>
 
+#ifdef ARTISAN_HAS_ART_GC
+#include <gc.h>
+#endif
+
 #include "art_bridge_context.h"
 #include "dom_node.h"
 #include "node_c_api.h"
@@ -12,17 +16,35 @@ namespace {
 
 artisan::Node *g_currentDocument = nullptr;
 
+// A heap allocation ART code will end up holding a pointer to needs to
+// come from the exact same managed heap ART's own codegen allocates
+// from (see art/codegen.cpp's GenHeapAlloc) - otherwise Boehm GC, which
+// only ever scans/reclaims memory it allocated itself, would silently
+// treat this allocation as permanently outside its accounting and it
+// would leak forever regardless of reachability, defeating the whole
+// point. ARTISAN_HAS_ART_GC is only defined when an ART app is actually
+// configured (see the root CMakeLists.txt) - this file is always
+// compiled, even for a project with no ART involved at all, so it can't
+// unconditionally depend on libgc-dev the way the ART compiler itself
+// can.
+void *ArtHeapAlloc(size_t bytes) {
+#ifdef ARTISAN_HAS_ART_GC
+  return GC_malloc(bytes);
+#else
+  return std::malloc(bytes);
+#endif
+}
+
 // Heap-allocates a fresh ART-shaped string (a 16-byte { i64 length, ptr
 // data } header pointing at a length+1-byte, null-terminated data buffer)
 // from a plain C string - exactly the shape art/codegen.cpp itself builds
 // for a string literal, so ART code on the receiving end can't tell the
-// difference. Like every ART heap value, this is never freed - consistent
-// with ART having no garbage collector yet.
+// difference.
 ArtString *MakeArtString(const char *cstr) {
   size_t len = std::strlen(cstr);
-  char *data = static_cast<char *>(std::malloc(len + 1));
+  char *data = static_cast<char *>(ArtHeapAlloc(len + 1));
   std::memcpy(data, cstr, len + 1); // include the null terminator
-  auto *header = static_cast<ArtString *>(std::malloc(sizeof(ArtString)));
+  auto *header = static_cast<ArtString *>(ArtHeapAlloc(sizeof(ArtString)));
   header->length = static_cast<int64_t>(len);
   header->data = data;
   return header;
@@ -30,16 +52,15 @@ ArtString *MakeArtString(const char *cstr) {
 
 // Heap-boxes a primitive so it can be handed to Node::DispatchEvent's
 // `const void*` detail (see the ArtDispatchEvent$.../ArtEventDetail$...
-// overloads below) - never freed, same "leaks forever" deal every other
-// ART heap value has.
+// overloads below).
 double *BoxDouble(double value) {
-  auto *box = static_cast<double *>(std::malloc(sizeof(double)));
+  auto *box = static_cast<double *>(ArtHeapAlloc(sizeof(double)));
   *box = value;
   return box;
 }
 
 bool *BoxBool(bool value) {
-  auto *box = static_cast<bool *>(std::malloc(sizeof(bool)));
+  auto *box = static_cast<bool *>(ArtHeapAlloc(sizeof(bool)));
   *box = value;
   return box;
 }

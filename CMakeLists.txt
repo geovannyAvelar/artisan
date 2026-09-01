@@ -215,6 +215,19 @@ if(ARTISAN_APP_ART_SOURCE)
         VERBATIM
     )
     add_custom_target(artisan_art_object DEPENDS "${GENERATED_ART_OBJECT}")
+
+    # Every ART-compiled allocation goes through Boehm GC's GC_malloc (see
+    # art/codegen.cpp's GenHeapAlloc) instead of a plain, never-freed
+    # malloc - GENERATED_ART_OBJECT above calls it, so the final linked
+    # artisan binary needs the actual GC runtime library too (see
+    # target_link_libraries(artisan ...) below), not just the ART compiler
+    # that emits the calls. src/art_bridge.cpp's own heap allocations
+    # (see its ArtHeapAlloc) need the header too, since they hand ART
+    # code pointers that must live in the same GC-managed heap. Requires
+    # libgc-dev (Debian/Ubuntu package name) installed - see README.md's
+    # "Using ART" section.
+    find_library(ARTISAN_GC_LIB NAMES gc REQUIRED)
+    find_path(ARTISAN_GC_INCLUDE_DIR NAMES gc.h REQUIRED)
 endif()
 
 # ArtisanSetupApp itself: a real Go archive (above) provides it if
@@ -309,6 +322,18 @@ if(ARTISAN_APP_GO_SOURCE)
     # cgo's runtime needs pthread regardless of platform specifics the Go
     # app itself touches - same reason skia already links it above.
     target_link_libraries(artisan PRIVATE "${GENERATED_GO_ARCHIVE}" pthread)
+endif()
+
+if(ARTISAN_APP_ART_SOURCE)
+    target_link_libraries(artisan PRIVATE "${ARTISAN_GC_LIB}")
+    # Gates src/art_bridge.cpp's own use of GC_malloc (see its own doc
+    # comments) - that file is always compiled, even for a C++/Go/JS-only
+    # project with no ART involved at all, so it can't unconditionally
+    # #include <gc.h>/require libgc-dev the way GENERATED_ART_OBJECT
+    # above can (that object file only exists in the first place when
+    # ART is configured).
+    target_compile_definitions(artisan PRIVATE ARTISAN_HAS_ART_GC)
+    target_include_directories(artisan PRIVATE "${ARTISAN_GC_INCLUDE_DIR}")
 endif()
 
 # artisan-cli is the single CLI entry point for the whole workflow: it
@@ -414,8 +439,13 @@ set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
 # The toolchain artisan-cli shells out to for every `build` - not
 # artisan-cli's own runtime deps (it barely has any), but what makes the
 # projects it builds actually compile once this package is installed.
+# llvm-18-dev/libgc-dev are only ever needed for an ART project
+# (--lang art / app.art) - see art/CMakeLists.txt's own LLVM discovery
+# and this file's ARTISAN_GC_LIB - but Depends can't be conditional on
+# what a given project ends up using, so they're unconditional here the
+# same way libsdl2-dev etc. already are.
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "cmake (>= 3.20), ninja-build, g++, pkg-config, libfreetype-dev, libfontconfig-dev, libsdl2-dev")
+    "cmake (>= 3.20), ninja-build, g++, pkg-config, libfreetype-dev, libfontconfig-dev, libsdl2-dev, llvm-18-dev, libgc-dev")
 set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
 set(CPACK_GENERATOR "DEB")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")

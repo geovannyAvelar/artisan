@@ -656,19 +656,31 @@ yet); both prefix (`++x`/`--x`, evaluates to the new value) and postfix
 on the same targets assignment already allows (a plain variable, an
 array element, or a struct field) - real TS's chaining rules apply here
 too (`x++.foo`/`x++()` aren't expressions; postfix always ends the
-expression it's attached to). No inheritance, real closures, `any`,
-union types, or garbage collector - every array/object/string is a
-heap allocation (`malloc`) that's never freed, matching this whole
-framework's "native, ahead-of-time, no runtime" philosophy rather than
-the rest of a real TypeScript. See the doc comments in
-`art/*.h`/`art/*.cpp` for the exact grammar and type-checking rules.
+expression it's attached to). No inheritance, real closures, `any`, or
+union types. See the doc comments in `art/*.h`/`art/*.cpp` for the exact
+grammar and type-checking rules.
 
-Building an ART app needs LLVM 18 installed (`llvm-18-dev` or
-equivalent) - unlike Skia/lexbor/QuickJS this isn't a git submodule, and
-unlike the rest of this framework's dependencies it's only ever required
-when `ARTISAN_APP_ART_SOURCE`/`app.art` is actually configured: a
-C++/Go/JS-only project never pulls LLVM in at all (see the root
-`CMakeLists.txt`'s conditional `add_subdirectory(art)`).
+Every array/object/string is a heap allocation, garbage-collected by the
+[Boehm-Demers-Weiser collector](https://www.hboehm.info/gc/) (`libgc`) -
+ART code never explicitly frees anything (there's no `delete`/`free` in
+the language), but unreachable allocations do get reclaimed
+automatically. The collector is conservative: it scans the native
+stack/registers/globals for anything that looks like a pointer into its
+own heap rather than tracking types precisely, so it can - rarely -
+retain a little garbage a precise collector wouldn't, but it never frees
+something still reachable. This is also why a heap-allocated ART value
+handed across the FFI boundary (e.g. an `ArtString*` passed into a
+`declare function`) is safe without any extra bookkeeping: `art_bridge.h`
+copies it into artisan's own (unrelated) memory before doing anything
+that could outlive the call.
+
+Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
+Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is
+a git submodule, and unlike the rest of this framework's dependencies
+they're only ever required when `ARTISAN_APP_ART_SOURCE`/`app.art` is
+actually configured: a C++/Go/JS-only project never pulls either in at
+all (see the root `CMakeLists.txt`'s conditional `add_subdirectory(art)`
+and `find_library(ARTISAN_GC_LIB ...)`).
 
 ## Using JavaScript
 

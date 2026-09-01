@@ -4,6 +4,7 @@
 
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 namespace ART {
 
@@ -91,10 +92,10 @@ int Codegen::FieldIndex(InterfaceDecl *iface, const std::string &fieldName) {
 // ---------------------------------------------------------------------
 
 llvm::Value *Codegen::GenHeapAlloc(uint64_t bytes) {
-  return builder.CreateCall(mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), bytes)});
+  return builder.CreateCall(gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), bytes)});
 }
 
-llvm::Value *Codegen::GenHeapAlloc(llvm::Value *bytes) { return builder.CreateCall(mallocFn, {bytes}); }
+llvm::Value *Codegen::GenHeapAlloc(llvm::Value *bytes) { return builder.CreateCall(gcMallocFn, {bytes}); }
 
 // A string value is a pointer to the same { i64 length, ptr data } header
 // arrays use. `data` is always null-terminated one byte past `length` (the
@@ -240,12 +241,27 @@ llvm::AllocaInst *Codegen::CreateEntryAlloca(llvm::Function *fn, llvm::Type *typ
 // Top level
 // ---------------------------------------------------------------------
 
+// See this method's own doc comment in codegen.h.
+void Codegen::GenGCInit() {
+  llvm::FunctionType *gcInitTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {}, false);
+  llvm::FunctionCallee gcInitFn = module->getOrInsertFunction("GC_init", gcInitTy);
+
+  auto *ctorFn = llvm::Function::Create(gcInitTy, llvm::Function::InternalLinkage, "art.gc_ctor", module.get());
+  auto *entry = llvm::BasicBlock::Create(context, "entry", ctorFn);
+  llvm::IRBuilder<> ctorBuilder(entry);
+  ctorBuilder.CreateCall(gcInitFn, {});
+  ctorBuilder.CreateRetVoid();
+
+  llvm::appendToGlobalCtors(*module, ctorFn, /*Priority=*/0);
+}
+
 std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   module = std::make_unique<llvm::Module>(moduleName, context);
   SetupTarget();
 
-  mallocFn = module->getOrInsertFunction(
-      "malloc", llvm::FunctionType::get(llvm::PointerType::get(context, 0), {llvm::Type::getInt64Ty(context)}, false));
+  gcMallocFn = module->getOrInsertFunction(
+      "GC_malloc", llvm::FunctionType::get(llvm::PointerType::get(context, 0), {llvm::Type::getInt64Ty(context)}, false));
+  GenGCInit();
   memcmpFn = module->getOrInsertFunction(
       "memcmp", llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
                                          {llvm::PointerType::get(context, 0), llvm::PointerType::get(context, 0),
@@ -766,7 +782,7 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     uint64_t count = expr->elements.size();
 
     llvm::Value *dataPtr = builder.CreateCall(
-        mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), count * elemSize)});
+        gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), count * elemSize)});
 
     for (uint64_t i = 0; i < count; i++) {
       llvm::Value *val = GenExpr(expr->elements[i].get());
@@ -776,7 +792,7 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
       builder.CreateStore(val, elemPtr);
     }
 
-    llvm::Value *headerPtr = builder.CreateCall(mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 16)});
+    llvm::Value *headerPtr = builder.CreateCall(gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 16)});
     llvm::Value *lengthFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 0);
     builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), count), lengthFieldPtr);
     llvm::Value *dataFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 1);
@@ -791,7 +807,7 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
 
     uint64_t sizeBytes = module->getDataLayout().getTypeAllocSize(structTy).getFixedValue();
     llvm::Value *instancePtr =
-        builder.CreateCall(mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), sizeBytes)});
+        builder.CreateCall(gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), sizeBytes)});
 
     for (size_t idx = 0; idx < iface->fields.size(); idx++) {
       const std::string &fieldName = iface->fields[idx].name;

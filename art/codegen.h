@@ -24,9 +24,16 @@ namespace ART {
 //   boolean                -> LLVM i1
 //   T[]                    -> ptr to a shared { i64 length, ptr data } header,
 //                             both header and data buffer malloc'd on the heap
-//   an interface type       -> ptr to a malloc'd, per-interface named struct
-// There is no garbage collector yet - heap allocations are never freed.
-// Array/struct pointers are opaque (LLVM 18 default); the pointee type is
+//   an interface type       -> ptr to a per-interface named struct, GC-allocated
+// Every heap allocation (see GenHeapAlloc) goes through the Boehm-Demers-
+// Weiser conservative garbage collector's GC_malloc instead of libc's own
+// malloc - a compiled ART program never explicitly frees anything, but
+// unreachable allocations do get reclaimed (conservatively: the collector
+// scans the native stack/registers/globals for anything that looks like a
+// pointer into its own heap, so it can rarely retain a little garbage,
+// but never frees something still reachable). See GenGCInit's own doc
+// comment for how/when the collector itself gets initialized. Array/
+// struct pointers are opaque (LLVM 18 default); the pointee type is
 // always recovered from the corresponding Expr's Sema-resolved ResolvedType
 // rather than carried on the LLVM Value itself.
 class Codegen {
@@ -60,7 +67,7 @@ private:
   llvm::IRBuilder<> builder;
   std::unique_ptr<llvm::TargetMachine> targetMachine;
 
-  llvm::FunctionCallee mallocFn;
+  llvm::FunctionCallee gcMallocFn; // Boehm GC's GC_malloc - see GenHeapAlloc
   llvm::FunctionCallee memcmpFn;
   llvm::StructType *arrayHeaderType = nullptr; // also used for strings: same { i64 length, ptr data } shape
   std::unordered_map<std::string, llvm::StructType *> structTypes;
@@ -77,6 +84,17 @@ private:
   llvm::StructType *GetOrCreateStructType(const std::string &ifaceName);
   int FieldIndex(InterfaceDecl *iface, const std::string &fieldName);
 
+  // Emits a global constructor (via llvm::appendToGlobalCtors) that calls
+  // Boehm GC's GC_init() at module-load time, before any other code in
+  // this module (including a `main` wrapper, or, when this module is
+  // linked into the larger artisan runtime instead of standing alone, the
+  // host binary's own `main`) can possibly run - so GC_malloc is always
+  // safe to call the moment ART code starts executing, in either build
+  // shape, with no per-entry-point call site of its own to remember.
+  // GC_init is safe to call more than once (a no-op after the first), so
+  // this needs no coordination with anything else that might also
+  // initialize the collector.
+  void GenGCInit();
   void DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls, bool allowMainRename);
   void GenGlobalDecl(Stmt *stmt); // a top-level `let`/`const` - see Program::globals
   void GenBuiltinNumberToString(); // defines the LLVM function backing Sema::SeedBuiltins' "numberToString"

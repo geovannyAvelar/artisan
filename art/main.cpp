@@ -217,7 +217,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::string outputPath = opts.outputPath.empty() ? "a.out" : opts.outputPath;
-  std::string linkCmd = "clang --target=" + opts.targetTriple + " -o " + outputPath + " " + objPath;
+  std::string linkCmd = "clang --target=" + opts.targetTriple + " -o " + outputPath + " " + objPath + " -lgc";
   int linkStatus = RunCommand(linkCmd);
   std::filesystem::remove(objPath);
   if (linkStatus != 0) {
