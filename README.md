@@ -389,10 +389,10 @@ function identity<T>(x: T): T {
 
 and a call site instantiates them explicitly, turbofish-style -
 `identity::<number>(5)`, `identity::<Point>(p)`. There's no inference
-(`identity(5)` alone is a compile error asking for the `::<...>`) and no
-generic interfaces/types, only functions - a deliberately bounded first
-pass, not the full breadth a real TypeScript's generics have. Plain `<T>`
-at a call site (rather than `::<T>`) would be genuinely ambiguous with
+(`identity(5)` alone is a compile error asking for the `::<...>`) - a
+deliberately bounded first pass, not the full breadth a real
+TypeScript's generics have. Plain `<T>` at a call site (rather than
+`::<T>`) would be genuinely ambiguous with
 the `<`/`>` comparison operators - `foo<bar>(baz)` could just as well
 parse as `(foo < bar) > (baz)` - and unlike TypeScript's own parser,
 which resolves this by already knowing every name's declared kind by the
@@ -423,6 +423,52 @@ symbol per distinct instantiation actually used - see `ArtDispatchEvent`/
 `ArtEventDetail` above for exactly this in practice: the bridge doesn't
 (and structurally can't) provide one for every type a project might ever
 write, only `number`/`boolean`/`string`.
+
+### Generic interfaces
+
+`interface`/`declare type` can take type parameters too:
+
+```ts
+interface Box<T> {
+  value: T;
+}
+```
+
+Unlike a generic function call, a generic *type* reference - `Box<number>`
+as a variable's declared type, a parameter/return type, another
+interface's own field type, anywhere a type is written - uses plain
+`<...>`, no turbofish: a type position can never also parse as a `<`/`>`
+comparison the way an expression can, so there's no ambiguity to route
+around in the first place (see "Generic functions" above for why the
+call-site form needs one). `Box<number>` monomorphizes exactly like a
+generic function call does, reusing the very same machinery: the first
+time a given `name<ConcreteTypes...>` combination is actually used, its
+fields get cloned and resolved (with type parameters substituted for the
+concrete types this reference gave) into an ordinary, fully concrete
+interface registered under a mangled name (`Box$number`) - indistinguishable
+from a plain, hand-written `interface Box$number { value: number; }` to
+everything downstream (object literal checking, field access, Codegen's
+own struct-layout code), which is why none of those needed any changes
+at all to support this. A self-referential generic interface (`interface
+Node<T> { value: T; next: Node<T>; }`) resolves correctly, the same
+"register the instantiation before resolving its own fields" trick a
+self-recursive generic *function* needs - but building an actual
+value at that type still isn't practical without a null/optional
+concept ART doesn't have yet: every field, including a self-referential
+`next: Node<T>`, is required, so an object literal can never terminate
+one; making one requires mutating an already-constructed value's field
+after the fact instead (`a.next = a;`), a real, separate limitation
+predating generics.
+
+`declare type Box<T>;` (a generic opaque type) works the same way,
+paired with generic `declare function`s that produce/consume it - e.g.
+`declare function makeBox<T>(x: T): Box<T>; declare function
+unbox<T>(b: Box<T>): T;` - a real, useful pattern for a type-safe opaque
+handle at the FFI boundary even though nothing about its own
+representation actually varies by `T`. Like any generic `declare
+function`, each instantiation used needs its own separately provided,
+separately named extern symbol (`makeBox$number`, ...) - see "Generic
+functions" above.
 
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and
@@ -475,18 +521,20 @@ structural interfaces (an object literal must match a declared
 `interface` exactly - no excess or missing fields), the parameterized
 handler type described above (`(p0: T0, p1: T1, ...) => void`, structural
 like everything else - parameter names are decorative, only the types and
-their order are checked), and generic functions (`function`/`declare
-function` only, monomorphized, explicit `::<T>` instantiation only - see
-"Generic functions" above); both prefix (`++x`/`--x`, evaluates to the
-new value) and postfix (`x++`/`x--`, evaluates to the old value) forms of
-increment/decrement, on the same targets assignment already allows (a
-plain variable, an array element, or a struct field) - real TS's
-chaining rules apply here too (`x++.foo`/`x++()` aren't expressions;
-postfix always ends the expression it's attached to). No classes, real
-closures, generic interfaces/types, `any`, union types, or
-garbage collector - every array/object/string is a heap allocation
-(`malloc`) that's never freed, matching this whole framework's "native,
-ahead-of-time, no runtime" philosophy rather than the rest of a real
+their order are checked), and generics - both functions and interfaces/
+`declare type` (`function`/`declare function`/`interface`/`declare type`,
+monomorphized, explicit instantiation only: `::<T>` at a function call
+site, plain `<T>` at a type reference - see "Generic functions"/"Generic
+interfaces" above for why those differ); both prefix (`++x`/`--x`,
+evaluates to the new value) and postfix (`x++`/`x--`, evaluates to the
+old value) forms of increment/decrement, on the same targets assignment
+already allows (a plain variable, an array element, or a struct field) -
+real TS's chaining rules apply here too (`x++.foo`/`x++()` aren't
+expressions; postfix always ends the expression it's attached to). No
+classes, real closures, `any`, union types, or garbage collector - every
+array/object/string is a heap allocation (`malloc`) that's never freed,
+matching this whole framework's "native, ahead-of-time, no runtime"
+philosophy rather than the rest of a real
 TypeScript. See the doc comments in `art/*.h`/`art/*.cpp` for the exact
 grammar and type-checking rules.
 

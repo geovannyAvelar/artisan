@@ -21,6 +21,7 @@ struct TypeNode {
   std::string name;                 // Named: interface/opaque type name
   std::unique_ptr<TypeNode> element; // Array: element type
   std::vector<std::unique_ptr<TypeNode>> handlerParamTypes; // Handler: e.g. "(event: Event) => void"
+  std::vector<std::unique_ptr<TypeNode>> genericArgs;       // Named: e.g. "Box<number>" - empty if not generic
 };
 
 // ---------------------------------------------------------------------
@@ -211,6 +212,7 @@ struct InterfaceField {
 
 struct InterfaceDecl {
   std::string name;
+  std::vector<std::string> typeParams; // e.g. ["T"] for `interface Box<T>`; empty if not generic
   std::vector<InterfaceField> fields;
   SourceLoc loc;
   bool isOpaque = false; // `declare type Name;` - a foreign handle with no

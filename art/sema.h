@@ -71,6 +71,18 @@ private:
   std::unordered_map<std::string, FunctionDecl *> instantiations;
   std::vector<std::unique_ptr<FunctionDecl>> instantiationStorage;
 
+  // Generic interface/declare-type templates (`typeParams` non-empty),
+  // kept separate from `interfaces` the same way genericFunctions is kept
+  // separate from `functions` - a template names a family of types, not
+  // a type on its own, so it's never itself a valid ResolvedType. An
+  // instantiation (e.g. `Box<number>`) resolves into a fully concrete
+  // clone registered directly into `interfaces` under its mangled name
+  // (see InstantiateInterface) - unlike function instantiations, these
+  // need no separate storage/lookup map: `interfaces` already serves
+  // both roles once Codegen only ever sees concrete names either way.
+  std::unordered_map<std::string, InterfaceDecl *> genericInterfaces;
+  std::vector<std::unique_ptr<InterfaceDecl>> interfaceInstantiationStorage;
+
   // Non-null only while checking a generic instantiation's own signature/
   // body (see CheckGenericCall) - ResolveType consults this before
   // treating a Named type as an interface/opaque-type reference, so `T`
@@ -93,6 +105,19 @@ private:
   // instantiation's return type (Unknown on error) and sets
   // expr->resolvedCalleeName to the mangled name Codegen should call.
   ResolvedType CheckGenericCall(Expr *expr);
+
+  // Resolves a generic interface/declare-type reference (e.g. the
+  // `Box<number>` a TypeNode's Named case with non-empty genericArgs
+  // represents) to a Struct ResolvedType, cloning and resolving the
+  // template's fields (with the substitution active) into `interfaces`
+  // under the mangled name on first use of a given (name, concrete type
+  // args) pair. Registered before its own fields are resolved, so a
+  // self-referential generic interface (`interface Node<T> { next:
+  // Node<T>; ... }`) resolves the recursive reference to the same
+  // (already-registered, still being filled in) clone instead of
+  // recursing forever - safe because every field is just a `ptr` in
+  // Codegen either way, never needing the pointee to be complete.
+  ResolvedType InstantiateInterface(InterfaceDecl *tmpl, const std::vector<ResolvedType> &typeArgs, SourceLoc loc);
 
   void PushScope();
   void PopScope();

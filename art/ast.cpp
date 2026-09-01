@@ -49,6 +49,7 @@ std::unique_ptr<TypeNode> CloneTypeNode(const TypeNode &node) {
   out->name = node.name;
   if (node.element) out->element = CloneTypeNode(*node.element);
   for (auto &p : node.handlerParamTypes) out->handlerParamTypes.push_back(CloneTypeNode(*p));
+  for (auto &a : node.genericArgs) out->genericArgs.push_back(CloneTypeNode(*a));
   return out;
 }
 } // namespace

@@ -34,10 +34,31 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
     // else: `T` inside a generic function's own signature/body always
     // means whatever concrete type this particular call site substituted
     // for it, never an interface named "T" (that would shadow the type
-    // parameter, same as a real generic language's scoping rules).
-    if (currentSubstitution) {
+    // parameter, same as a real generic language's scoping rules). `T`
+    // is always used bare (never as `T<...>` - ART has no higher-kinded
+    // type parameters), so genericArgs is irrelevant here.
+    if (currentSubstitution && node->genericArgs.empty()) {
       auto found = currentSubstitution->find(node->name);
       if (found != currentSubstitution->end()) return found->second;
+    }
+
+    if (!node->genericArgs.empty()) {
+      auto it = genericInterfaces.find(node->name);
+      if (it == genericInterfaces.end()) {
+        Error(node->loc, interfaces.count(node->name)
+                              ? "interface '" + node->name + "' is not generic - remove the type arguments"
+                              : "unknown generic type '" + node->name + "'");
+        return ResolvedType{};
+      }
+      std::vector<ResolvedType> typeArgs;
+      typeArgs.reserve(node->genericArgs.size());
+      for (auto &a : node->genericArgs) typeArgs.push_back(ResolveType(a.get()));
+      return InstantiateInterface(it->second, typeArgs, node->loc);
+    }
+
+    if (genericInterfaces.count(node->name)) {
+      Error(node->loc, "generic type '" + node->name + "' requires type arguments, e.g. '" + node->name + "<Type>'");
+      return ResolvedType{};
     }
     if (interfaces.count(node->name)) return ResolvedType::Struct(node->name);
     Error(node->loc, "unknown type '" + node->name + "'");
@@ -45,6 +66,47 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
   }
   }
   return ResolvedType{};
+}
+
+ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<ResolvedType> &typeArgs,
+                                         SourceLoc loc) {
+  if (typeArgs.size() != tmpl->typeParams.size()) {
+    Error(loc, "type '" + tmpl->name + "' expects " + std::to_string(tmpl->typeParams.size()) +
+                   " type argument(s), got " + std::to_string(typeArgs.size()));
+    return ResolvedType{};
+  }
+
+  std::string mangled = MangleInstantiation(tmpl->name, typeArgs);
+  if (interfaces.count(mangled)) return ResolvedType::Struct(mangled);
+
+  std::unordered_map<std::string, ResolvedType> subst;
+  for (size_t i = 0; i < tmpl->typeParams.size(); i++) subst[tmpl->typeParams[i]] = typeArgs[i];
+
+  auto clone = std::make_unique<InterfaceDecl>();
+  clone->name = mangled;
+  clone->loc = tmpl->loc;
+  clone->isOpaque = tmpl->isOpaque;
+
+  // Registered before its fields are resolved (not after) so a self-
+  // referential generic interface resolves the recursive reference to
+  // this same entry instead of instantiating forever - see the doc
+  // comment on the declaration in sema.h.
+  InterfaceDecl *inst = clone.get();
+  interfaces[mangled] = inst;
+  interfaceInstantiationStorage.push_back(std::move(clone));
+
+  const std::unordered_map<std::string, ResolvedType> *savedSubst = currentSubstitution;
+  currentSubstitution = &subst;
+  for (auto &f : tmpl->fields) {
+    InterfaceField cf;
+    cf.name = f.name;
+    cf.loc = f.loc;
+    cf.resolvedType = ResolveType(f.type.get());
+    inst->fields.push_back(std::move(cf));
+  }
+  currentSubstitution = savedSubst;
+
+  return ResolvedType::Struct(mangled);
 }
 
 std::string Sema::MangleType(const ResolvedType &t) {
@@ -117,21 +179,39 @@ bool Sema::Check(Program &program) {
   SeedBuiltins();
 
   for (auto &iface : program.interfaces) {
-    if (interfaces.count(iface->name)) {
+    bool alreadyDeclared = interfaces.count(iface->name) || genericInterfaces.count(iface->name);
+    if (alreadyDeclared) {
       Error(iface->loc, "interface '" + iface->name + "' is already declared");
-    } else {
-      interfaces[iface->name] = iface.get();
     }
-  }
 
-  for (auto &iface : program.interfaces) {
-    std::unordered_set<std::string> seen;
+    std::unordered_set<std::string> seenFields;
     for (auto &field : iface->fields) {
-      field.resolvedType = ResolveType(field.type.get());
-      if (!seen.insert(field.name).second) {
+      if (!seenFields.insert(field.name).second) {
         Error(field.loc, "duplicate field '" + field.name + "' in interface '" + iface->name + "'");
       }
     }
+
+    if (!iface->typeParams.empty()) {
+      // A generic template's own field TypeNodes reference its type
+      // parameters by name, same as a generic function's params do (see
+      // RegisterFunctionSignature) - resolving them here, with no
+      // substitution active yet, isn't needed for anything about the
+      // template's own shape and would either misresolve a type
+      // parameter as unknown or wrongly shadow a same-named interface.
+      // InstantiateInterface resolves the (shared, read-only) TypeNodes
+      // fresh, with substitution active, per actual instantiation instead.
+      std::unordered_set<std::string> seenTypeParams;
+      for (auto &t : iface->typeParams) {
+        if (!seenTypeParams.insert(t).second) {
+          Error(iface->loc, "duplicate type parameter '" + t + "' in interface '" + iface->name + "'");
+        }
+      }
+      if (!alreadyDeclared) genericInterfaces[iface->name] = iface.get();
+      continue;
+    }
+
+    if (!alreadyDeclared) interfaces[iface->name] = iface.get();
+    for (auto &field : iface->fields) field.resolvedType = ResolveType(field.type.get());
   }
 
   // Function signatures are registered before globals (even though a

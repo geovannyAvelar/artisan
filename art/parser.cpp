@@ -83,6 +83,7 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
   decl->loc = Cur().loc;
   Expect(TokenKind::KwInterface, "to start an interface declaration");
   decl->name = Expect(TokenKind::Identifier, "as the interface name").text;
+  ParseOptionalTypeParams(decl->typeParams);
   Expect(TokenKind::LBrace, "to open the interface body");
   while (!Check(TokenKind::RBrace)) {
     InterfaceField field;
@@ -98,14 +99,15 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
 }
 
 // Consumes "<T, U, ...>" if present - a generic function/declare
-// function's own type parameter list. `<`/`>` are unambiguous here
-// (unlike at a call site - see ParsePostfix's turbofish handling), since
-// a type/parameter list can never start with a comparison expression.
-void Parser::ParseOptionalTypeParams(FunctionDecl *decl) {
+// function/interface/declare type's own type parameter list. `<`/`>` are
+// unambiguous here (unlike at a call site - see ParsePostfix's turbofish
+// handling), since a declaration's type parameter list can never start
+// where a comparison expression could.
+void Parser::ParseOptionalTypeParams(std::vector<std::string> &outTypeParams) {
   if (!Match(TokenKind::Lt)) return;
   if (!Check(TokenKind::Gt)) {
     do {
-      decl->typeParams.push_back(Expect(TokenKind::Identifier, "as a type parameter name").text);
+      outTypeParams.push_back(Expect(TokenKind::Identifier, "as a type parameter name").text);
     } while (Match(TokenKind::Comma));
   }
   Expect(TokenKind::Gt, "to close a type parameter list");
@@ -142,7 +144,7 @@ std::unique_ptr<FunctionDecl> Parser::ParseFunction() {
   decl->loc = Cur().loc;
   Expect(TokenKind::KwFunction, "to start a function declaration");
   decl->name = Expect(TokenKind::Identifier, "as the function name").text;
-  ParseOptionalTypeParams(decl.get());
+  ParseOptionalTypeParams(decl->typeParams);
   ParseParamsAndReturnType(decl.get());
   decl->body = ParseBlock();
   return decl;
@@ -154,6 +156,7 @@ std::unique_ptr<InterfaceDecl> Parser::ParseDeclareType() {
   decl->isOpaque = true;
   Expect(TokenKind::KwType, "after 'declare'");
   decl->name = Expect(TokenKind::Identifier, "as the type name").text;
+  ParseOptionalTypeParams(decl->typeParams);
   Expect(TokenKind::Semicolon, "after 'declare type ...'");
   return decl;
 }
@@ -163,7 +166,7 @@ std::unique_ptr<FunctionDecl> Parser::ParseDeclareFunction() {
   decl->loc = Cur().loc;
   Expect(TokenKind::KwFunction, "after 'declare'");
   decl->name = Expect(TokenKind::Identifier, "as the function name").text;
-  ParseOptionalTypeParams(decl.get());
+  ParseOptionalTypeParams(decl->typeParams);
   ParseParamsAndReturnType(decl.get());
   Expect(TokenKind::Semicolon, "after a 'declare function' signature (it has no body)");
   return decl; // decl->body stays null - bound to an external symbol at link time
@@ -204,6 +207,16 @@ std::unique_ptr<TypeNode> Parser::ParseType() {
     node->kind = TypeSyntaxKind::Named;
     node->name = Cur().text;
     pos++;
+    // A generic interface/opaque-type instantiation, e.g. `Box<number>`.
+    // Plain '<' (not the '::<' turbofish a generic function CALL needs)
+    // is unambiguous here: unlike an expression, a type can never start
+    // with something a '<'/'>' comparison could also parse as.
+    if (Match(TokenKind::Lt)) {
+      do {
+        node->genericArgs.push_back(ParseType());
+      } while (Match(TokenKind::Comma));
+      Expect(TokenKind::Gt, "to close a generic type's argument list");
+    }
   } else {
     Fail("expected a type ('number', 'boolean', 'string', 'void', '() => void', or an interface name)", Cur().loc);
   }
