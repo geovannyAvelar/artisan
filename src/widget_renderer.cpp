@@ -789,6 +789,24 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
   return true;
 }
 
+// Resolves a grid-column/grid-row/grid-area start line (GridLinePlacement::
+// start, widget.h - 1-indexed, possibly negative) to a 0-indexed track
+// index. A positive start is the familiar `start - 1`; a negative one
+// counts backward from the explicit grid's own last line the same way
+// real CSS's negative line numbers do - line -1 is that last line
+// (`explicitCount + 1`, 1-indexed, for `explicitCount` explicit tracks),
+// -2 the one before it, and so on. `explicitCount` is
+// autoPlaceColumnCount/autoPlaceRowCount (the resolved grid-template-
+// columns/rows track count, or its own unset-falls-back-to-1 default) -
+// the *explicit* grid, not the final, placement-extended columnCount/
+// rowCount below, matching real CSS's own basis for negative indices.
+// Clamped to 0 either way, same as a positive start's own pre-existing
+// overflow handling.
+int ResolveGridLineStart(int start, int explicitCount) {
+  int index0 = start > 0 ? start - 1 : explicitCount + start + 1;
+  return std::max(0, index0);
+}
+
 // A minmax() track (GridTrackKind::kMinMax, widget.h) resolves its max
 // half exactly as an ordinary track of that (kind, value) would - these
 // two return that pair, unwrapping kMinMax's own minMaxMaxKind/
@@ -977,8 +995,12 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       int colSpan = std::max(1, child.gridColumn.span);
       int rowSpan = std::max(1, child.gridRow.span);
       if (child.gridColumn.hasStart || child.gridRow.hasStart) {
-        int col = child.gridColumn.hasStart ? std::max(0, child.gridColumn.start - 1) : 0;
-        int row = child.gridRow.hasStart ? std::max(0, child.gridRow.start - 1) : 0;
+        int col = child.gridColumn.hasStart
+                      ? ResolveGridLineStart(child.gridColumn.start, autoPlaceColumnCount)
+                      : 0;
+        int row = child.gridRow.hasStart
+                      ? ResolveGridLineStart(child.gridRow.start, autoPlaceRowCount)
+                      : 0;
         placed = {row, col, rowSpan, colSpan};
       } else {
         int idx = nextAutoIndex++;

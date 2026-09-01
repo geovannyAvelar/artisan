@@ -125,12 +125,19 @@ struct GridTrack {
 // explicit start line and/or a span count, e.g. `grid-column: 2` (start
 // line 2, span 1), `grid-column: 2 / 4` (start line 2, span 2 - the
 // lines it spans between), `grid-column: span 2` (no explicit start,
-// span 2), `grid-column: 2 / span 2` (start line 2, span 2). Real CSS's
-// named lines and negative (counted-from-the-end) line numbers aren't
-// supported - see ParseGridLinePlacement, css.cpp.
+// span 2), `grid-column: 2 / span 2` (start line 2, span 2). `start` may
+// also be negative - real CSS's own "count backward from the explicit
+// grid's last line" form (`-1` is that last line, `-2` the one before
+// it, and so on) - stored here exactly as written and only resolved to
+// an actual 0-indexed track by ResolveGridLineStart
+// (widget_renderer.cpp), once the explicit track count it's relative to
+// is known; see ParseGridLinePlacement's own doc comment (css.cpp) for
+// the one combination this doesn't support (two explicit line numbers
+// of mixed sign, e.g. `2 / -1`). Real CSS's named lines aren't
+// supported.
 struct GridLinePlacement {
   bool hasStart = false;
-  int start = 0; // 1-indexed grid line; only meaningful when hasStart.
+  int start = 0; // 1-indexed grid line (possibly negative); only meaningful when hasStart.
   int span = 1;  // Always >= 1.
 };
 

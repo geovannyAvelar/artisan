@@ -407,10 +407,22 @@ bool ParseGridLineSide(const std::string &side, bool &isSpan, int &value) {
 // GridLinePlacement itself only ever stores a start + span, not two
 // independent line numbers). "span N / span N" (two spans, no line at
 // all) isn't meaningful in real CSS either - falls back to treating the
-// first side as a plain span with no explicit start. Real CSS's named
-// lines and negative (counted-from-the-end) line numbers aren't
-// supported. Returns false (leaving `out` untouched) if the left side
-// (or the only side, when there's no '/') doesn't parse at all.
+// first side as a plain span with no explicit start. A line number may
+// be negative - real CSS's own "count backward from the explicit grid's
+// last line" form (`-1` is that last line, `-2` the one before it, and
+// so on) - stored in GridLinePlacement::start exactly as parsed (still
+// negative) and left unresolved until ResolveGridLineStart
+// (widget_renderer.cpp) runs, once the explicit track count it's
+// relative to is actually known; this function only ever computes a
+// *span* from two explicit line numbers (the "<line> / <line>" case
+// below), which stays correct un-resolved as long as both sides share
+// the same sign (the difference between two negative "virtual" line
+// numbers is the same span a real CSS resolver would get) - a mixed
+// positive/negative pair is rejected instead of computing a wrong span
+// (see below). Real CSS's named lines aren't supported. Returns false
+// (leaving `out` untouched) if the left side (or the only side, when
+// there's no '/') doesn't parse at all, or if two explicit line numbers
+// have mixed signs.
 bool ParseGridLinePlacement(const std::string &raw, GridLinePlacement &out) {
   std::string text = Trim(raw);
   size_t slash = text.find('/');
@@ -434,12 +446,25 @@ bool ParseGridLinePlacement(const std::string &raw, GridLinePlacement &out) {
     return true;
   }
   if (!leftIsSpan && !rightIsSpan) {
+    if ((leftValue < 0) != (rightValue < 0)) {
+      // Mixed sign - see this function's own doc comment above for why
+      // the span-as-difference math below only stays correct when both
+      // explicit line numbers share the same sign.
+      return false;
+    }
     out = {true, leftValue, std::max(1, rightValue - leftValue)};
   } else if (!leftIsSpan && rightIsSpan) {
     out = {true, leftValue, std::max(1, rightValue)};
   } else if (leftIsSpan && !rightIsSpan) {
     int span = std::max(1, leftValue);
-    out = {true, std::max(1, rightValue - span), span};
+    int computedStart = rightValue - span;
+    // The >= 1 floor below only makes sense for a positive end line -
+    // for a negative one (`span N / -1`), computedStart needs to stay
+    // negative so ResolveGridLineStart (widget_renderer.cpp) can still
+    // resolve it relative to the explicit grid's own end, the same
+    // deferred-resolution reasoning this function's own doc comment
+    // above explains for the plain-negative-start case.
+    out = {true, rightValue > 0 ? std::max(1, computedStart) : computedStart, span};
   } else {
     out = {false, 0, std::max(1, leftValue)};
   }

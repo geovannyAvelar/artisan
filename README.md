@@ -675,8 +675,24 @@ that span instead of always 1x1; `grid-column: 2 / span 2` combines an
 explicit start with an explicit span. `grid-row` works identically for
 rows - and so does `grid-area`'s own numeric line-based shorthand (see
 above), which expands into exactly this same grid-column/grid-row pair.
-Real CSS's named lines and negative (counted-from-the-end) line numbers
-aren't supported on any of these. A `grid-template-columns`/
+A line number may be negative - real CSS's own "count backward from the
+explicit grid's last line" form: `-1` is that last line, `-2` the one
+before it, and so on, e.g. `grid-column: -2 / -1` (the actual last
+column, the common "pin to the end" idiom) or `grid-column: span 2 / -1`
+(the last two columns). "Explicit grid" here means however many tracks
+`grid-template-columns`/`grid-template-rows` names (or the unset-falls-
+back-to-1 default) - not the final, placement-extended column/row count
+a later explicit placement might still grow. A bare negative value used
+alone still means exactly what real CSS says it does, which is easy to
+misread: `grid-column: -1` places the item's *start* at the last line
+with the default span-1 *end*, landing it one track past the explicit
+grid entirely (growing the grid by one more column), not in the last
+column - use the two-value `-2 / -1` form for that instead. Mixing a
+positive and a negative explicit line number in the same `<line> /
+<line>` pair (e.g. `2 / -1`) isn't supported - that combination is
+skipped like any other unrecognized value; a `span N` combined with
+either sign is fine (`span 2 / -1` above). Real CSS's named lines aren't
+supported on any of these. A `grid-template-columns`/
 `grid-template-rows` track list too short for an explicit placement (or
 a `grid-template-areas`-derived one) grows to fit - e.g. `grid-column:
 5` with only 3 columns declared adds two more, equal-width, the same
