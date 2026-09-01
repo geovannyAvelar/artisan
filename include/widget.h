@@ -70,8 +70,9 @@ enum class AlignContent {
 enum class FlexWrap { kNowrap, kWrap };
 
 // A single grid-template-columns/rows track's sizing function - real
-// CSS's four most useful ones (see ParseGridTrackList, css.cpp; not
-// repeat()/minmax()/auto/percentage tracks or named lines):
+// CSS's five most useful ones (see ParseGridTrackList, css.cpp; not
+// repeat()'s auto-fill/auto-fit counts, auto/percentage tracks, or named
+// lines):
 //   kFixed - a plain pixel size (`value`).
 //   kFraction - an `Nfr` unit (`value` is the fr count) that shares
 //     whatever space is left over after every fixed/min-content/
@@ -89,11 +90,33 @@ enum class FlexWrap { kNowrap, kWrap };
 //   kMaxContent - sized to the widest any single cell placed in this
 //     track would be with no wrapping at all - same columns-only scope
 //     as kMinContent above.
-// `value` is unused for kMinContent/kMaxContent.
-enum class GridTrackKind { kFixed, kFraction, kMinContent, kMaxContent };
+//   kMinMax - `minmax(min, max)`. `value` is the min half - always a
+//     fixed px floor in this bounded subset (real CSS also allows
+//     min-content/max-content/auto for the min half; not supported
+//     here); `minMaxMaxKind`/`minMaxMaxValue` are the max half's own
+//     (kind, value) pair, meaning exactly what they'd mean for an
+//     ordinary track of that kind (kFixed/kFraction/kMinContent/
+//     kMaxContent - never kMinMax itself, no nesting). Resolves as the
+//     max half normally would, then clamped up to the min floor if that
+//     leaves it smaller - unlike real CSS's iterative algorithm, this
+//     bounded subset doesn't shrink *other* fr tracks' shares to make
+//     room when a floor claims more than its own fr share would have
+//     given it, so column widths can sum past the container in that
+//     case, the same "a floor reserves space, it doesn't negotiate for
+//     it" precedent grid-template-rows' own fixed-track floor already
+//     set. Columns only - see RenderGridContainer, widget_renderer.cpp,
+//     for why a row track only ever honors the min half (identically to
+//     a plain kFixed row track), ignoring the max half entirely, the
+//     same columns-only asymmetry kFraction/kMinContent/kMaxContent
+//     already have.
+// `value` is unused for kMinContent/kMaxContent; minMaxMaxKind/
+// minMaxMaxValue are unused for every kind except kMinMax.
+enum class GridTrackKind { kFixed, kFraction, kMinContent, kMaxContent, kMinMax };
 struct GridTrack {
   GridTrackKind kind = GridTrackKind::kFixed;
-  float value = 0.0f; // Pixels (kFixed) or the fr count (kFraction).
+  float value = 0.0f; // Pixels (kFixed/kMinMax's min) or the fr count (kFraction).
+  GridTrackKind minMaxMaxKind = GridTrackKind::kFixed; // kMinMax's max half only.
+  float minMaxMaxValue = 0.0f;                         // kMinMax's max half only.
 };
 
 // A grid-column/grid-row value - real CSS's numeric, line-based

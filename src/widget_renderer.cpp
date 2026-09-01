@@ -789,6 +789,31 @@ bool FindGridAreaPlacement(const std::vector<std::vector<std::string>> &areas,
   return true;
 }
 
+// A minmax() track (GridTrackKind::kMinMax, widget.h) resolves its max
+// half exactly as an ordinary track of that (kind, value) would - these
+// two return that pair, unwrapping kMinMax's own minMaxMaxKind/
+// minMaxMaxValue fields; every other track kind just returns itself
+// unchanged. Used everywhere column-width resolution below reads a
+// track's kind/value, so a minmax() track's max half participates in
+// the exact same fixed/fraction/min-content/max-content logic any other
+// track of that kind already does - ClampToMinMaxFloor (below) then
+// applies its own min half as a floor afterward.
+GridTrackKind EffectiveTrackKind(const GridTrack &track) {
+  return track.kind == GridTrackKind::kMinMax ? track.minMaxMaxKind : track.kind;
+}
+float EffectiveTrackValue(const GridTrack &track) {
+  return track.kind == GridTrackKind::kMinMax ? track.minMaxMaxValue : track.value;
+}
+
+// A minmax() track's own min half, applied as a floor on its already-
+// resolved (via EffectiveTrackKind/Value above) width - a no-op for
+// every other track kind. See GridTrack's own doc comment (widget.h)
+// for why this doesn't reclaim the shortfall from other fr tracks the
+// way real CSS's iterative algorithm would.
+float ClampToMinMaxFloor(const GridTrack &track, float resolved) {
+  return track.kind == GridTrackKind::kMinMax ? std::max(resolved, track.value) : resolved;
+}
+
 // Lays out `widget`'s children as a CSS Grid - kContainer, display:grid
 // only, the bounded subset DisplayMode (widget.h) documents.
 //
@@ -992,12 +1017,19 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // whatever's left after every fixed/min-content/max-content track and
   // gap is subtracted, proportionally to its own fr count - the same
   // leftover-space-by-weight idea flex-grow already uses for item
-  // sizing (LayoutFlexLine above), just applied to track sizing. Falls
-  // back to equal-width columns whenever grid-template-columns doesn't
-  // name exactly `columnCount` tracks - either because it's unset
-  // entirely (the pre-named-areas single-full-width-column behavior is
-  // just this formula's columnCount == 1 case), or an area template
-  // implies a column count it doesn't match.
+  // sizing (LayoutFlexLine above), just applied to track sizing. A
+  // minmax(min, max) track (see GridTrack, widget.h) resolves its max
+  // half via EffectiveTrackKind/Value below exactly as an ordinary
+  // track of that kind would (participating in the totalFixed/totalFr
+  // accounting the same way), then ClampToMinMaxFloor raises the result
+  // to its own min half if that leaves it short - without reclaiming
+  // that shortfall from other fr tracks' own shares, unlike real CSS's
+  // iterative algorithm. Falls back to equal-width columns whenever
+  // grid-template-columns doesn't name exactly `columnCount` tracks -
+  // either because it's unset entirely (the pre-named-areas
+  // single-full-width-column behavior is just this formula's
+  // columnCount == 1 case), or an area template implies a column count
+  // it doesn't match.
   float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
   std::vector<float> columnWidths(columnCount);
   if (isColumnSubgrid) {
@@ -1018,7 +1050,8 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     // or crossed only by spanning items) resolves to 0, matching row
     // heights' own "nothing landed here" default.
     for (int c = 0; c < columnCount; ++c) {
-      GridTrackKind kind = widget.gridTemplateColumns[c].kind;
+      const GridTrack &track = widget.gridTemplateColumns[c];
+      GridTrackKind kind = EffectiveTrackKind(track);
       if (kind != GridTrackKind::kMinContent && kind != GridTrackKind::kMaxContent) {
         continue;
       }
@@ -1032,22 +1065,24 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
         measured = std::max(
             measured, MeasureItemFitContentWidth(widget.children[i], state.renderer, cap));
       }
-      columnWidths[c] = measured;
+      columnWidths[c] = ClampToMinMaxFloor(track, measured);
     }
 
     float totalFixed = 0.0f;
     float totalFr = 0.0f;
     for (int c = 0; c < columnCount; ++c) {
       const GridTrack &track = widget.gridTemplateColumns[c];
-      if (track.kind == GridTrackKind::kFraction) {
-        totalFr += track.value;
-      } else if (track.kind == GridTrackKind::kFixed) {
-        totalFixed += track.value;
+      GridTrackKind kind = EffectiveTrackKind(track);
+      if (kind == GridTrackKind::kFraction) {
+        totalFr += EffectiveTrackValue(track);
+      } else if (kind == GridTrackKind::kFixed) {
+        totalFixed += ClampToMinMaxFloor(track, EffectiveTrackValue(track));
       } else {
-        // kMinContent/kMaxContent - already resolved into columnWidths
-        // above; counts toward totalFixed the same way a literal px
-        // track would, since fr's own leftover-space math needs to
-        // subtract every already-sized column, content-driven or not.
+        // kMinContent/kMaxContent - already resolved (floor included)
+        // into columnWidths above; counts toward totalFixed the same
+        // way a literal px track would, since fr's own leftover-space
+        // math needs to subtract every already-sized column,
+        // content-driven or not.
         totalFixed += columnWidths[c];
       }
     }
@@ -1055,10 +1090,11 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     float perFr = totalFr > 0.0f ? leftover / totalFr : 0.0f;
     for (int c = 0; c < columnCount; ++c) {
       const GridTrack &track = widget.gridTemplateColumns[c];
-      if (track.kind == GridTrackKind::kFraction) {
-        columnWidths[c] = track.value * perFr;
-      } else if (track.kind == GridTrackKind::kFixed) {
-        columnWidths[c] = track.value;
+      GridTrackKind kind = EffectiveTrackKind(track);
+      if (kind == GridTrackKind::kFraction) {
+        columnWidths[c] = ClampToMinMaxFloor(track, EffectiveTrackValue(track) * perFr);
+      } else if (kind == GridTrackKind::kFixed) {
+        columnWidths[c] = ClampToMinMaxFloor(track, EffectiveTrackValue(track));
       }
       // kMinContent/kMaxContent: columnWidths[c] already resolved above.
     }
@@ -1164,7 +1200,13 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   for (int r = 0; r < rowCount && r < static_cast<int>(widget.gridTemplateRows.size());
        ++r) {
     const GridTrack &track = widget.gridTemplateRows[r];
-    if (track.kind == GridTrackKind::kFixed) {
+    if (track.kind == GridTrackKind::kFixed || track.kind == GridTrackKind::kMinMax) {
+      // A minmax() row track only ever honors its own min half, as a
+      // floor - identically to a plain kFixed row track (track.value
+      // means exactly that for both kinds); its max half is ignored
+      // entirely, the same columns-only asymmetry kFraction/
+      // kMinContent/kMaxContent already have on the row axis (see
+      // GridTrack's own doc comment, widget.h).
       rowHeights[r] = std::max(rowHeights[r], track.value);
     }
     // kFraction/kMinContent/kMaxContent all resolve like an ordinary

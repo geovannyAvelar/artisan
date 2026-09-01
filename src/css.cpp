@@ -185,19 +185,73 @@ void ParseGridTrackToken(const std::string &token, std::vector<GridTrack> &track
   }
 }
 
+// Scans a balanced parenthesized group whose opening '(' is at
+// raw[openIndex], returning the index just past its matching close
+// paren, or std::string::npos if it's never balanced - shared by
+// repeat()/minmax()'s own paren-aware scanning in ParseGridTrackList
+// below, so a comma or space inside either one's own argument list
+// isn't mistaken for a track-list-level token boundary the way every
+// other track already is.
+size_t ScanBalancedParens(const std::string &raw, size_t openIndex) {
+  size_t depth = 1;
+  size_t j = openIndex + 1;
+  while (j < raw.size() && depth > 0) {
+    if (raw[j] == '(') {
+      depth++;
+    } else if (raw[j] == ')') {
+      depth--;
+    }
+    j++;
+  }
+  return depth == 0 ? j : std::string::npos;
+}
+
+// Parses minmax()'s own two comma-separated arguments (already
+// extracted, paren-stripped, e.g. "100px, 1fr") into a single kMinMax
+// GridTrack - see GridTrack's own doc comment (widget.h) for the full
+// contract. The min half is always a fixed px floor here (an
+// unparseable one, e.g. real CSS's own min-content/max-content/auto for
+// this half, silently leaves it at 0 - no floor at all, same "parse
+// whatever we understand" posture as everywhere else in this file); the
+// max half reuses ParseGridTrackToken - the same set every other track
+// accepts, which also means neither minmax() nor repeat() nest inside
+// this one's max half, since ParseGridTrackToken doesn't recognize
+// either form. Returns false (out untouched) if there's no comma, or
+// the max half doesn't parse to anything.
+bool ParseMinMaxTrack(const std::string &inner, GridTrack &out) {
+  size_t comma = inner.find(',');
+  if (comma == std::string::npos) {
+    return false;
+  }
+  float minPx = 0.0f;
+  ParsePixelLength(Trim(inner.substr(0, comma)), minPx);
+  std::vector<GridTrack> maxTracks;
+  ParseGridTrackToken(Trim(inner.substr(comma + 1)), maxTracks);
+  if (maxTracks.empty()) {
+    return false;
+  }
+  out.kind = GridTrackKind::kMinMax;
+  out.value = minPx;
+  out.minMaxMaxKind = maxTracks[0].kind;
+  out.minMaxMaxValue = maxTracks[0].value;
+  return true;
+}
+
 // Parses a grid-template-columns/rows track list - space-separated
 // tokens as ParseGridTrackToken understands them, plus `repeat(N,
 // track-list)` (integer N only - `auto-fill`/`auto-fit` need to know
 // how much space is available to size the repeat count, which isn't
 // known yet at parse time, so they're left unsupported and the whole
 // repeat() is skipped, same as any other unrecognized token) expanding
-// inline to N copies of its inner track list at that position. Nesting
-// repeat() inside repeat() isn't supported (real CSS itself only allows
-// it in the auto-fill/auto-fit form this engine already excludes) - an
-// inner list containing "repeat(" is skipped whole. Real CSS's
-// minmax()/auto/percentage tracks and named lines still aren't
-// supported. Returns false (leaving `out` untouched) only when nothing
-// in `raw` parsed to a single valid track.
+// inline to N copies of its inner track list at that position, and
+// `minmax(min, max)` (see ParseMinMaxTrack above) as a single track at
+// that position. Nesting repeat()/minmax() inside repeat()'s own inner
+// list isn't supported (real CSS itself only allows repeat-inside-
+// repeat in the auto-fill/auto-fit form this engine already excludes) -
+// an inner list containing either is skipped whole, same as any other
+// unrecognized token. Real CSS's `auto`/percentage tracks and named
+// lines still aren't supported. Returns false (leaving `out` untouched)
+// only when nothing in `raw` parsed to a single valid track.
 bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
   std::vector<GridTrack> tracks;
   size_t i = 0;
@@ -207,17 +261,8 @@ bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
       continue;
     }
     if (raw.size() - i >= 7 && ToLower(raw.substr(i, 7)) == "repeat(") {
-      size_t depth = 1;
-      size_t j = i + 7;
-      while (j < raw.size() && depth > 0) {
-        if (raw[j] == '(') {
-          depth++;
-        } else if (raw[j] == ')') {
-          depth--;
-        }
-        j++;
-      }
-      if (depth == 0) {
+      size_t j = ScanBalancedParens(raw, i + 6);
+      if (j != std::string::npos) {
         std::string inner = raw.substr(i + 7, (j - 1) - (i + 7));
         size_t comma = inner.find(',');
         if (comma != std::string::npos) {
@@ -232,7 +277,9 @@ bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
           } catch (const std::exception &) {
             // Not a bare integer (e.g. "auto-fill"/"auto-fit") - unsupported.
           }
-          if (validCount && ToLower(listStr).find("repeat(") == std::string::npos) {
+          std::string lowerList = ToLower(listStr);
+          if (validCount && lowerList.find("repeat(") == std::string::npos &&
+              lowerList.find("minmax(") == std::string::npos) {
             std::vector<GridTrack> innerTracks;
             std::istringstream listTokens(listStr);
             std::string tok;
@@ -249,6 +296,19 @@ bool ParseGridTrackList(const std::string &raw, std::vector<GridTrack> &out) {
       }
       // Unbalanced parens - fall through and consume it as a regular
       // (invalid, so skipped) whitespace-delimited token below.
+    }
+    if (raw.size() - i >= 7 && ToLower(raw.substr(i, 7)) == "minmax(") {
+      size_t j = ScanBalancedParens(raw, i + 6);
+      if (j != std::string::npos) {
+        std::string inner = raw.substr(i + 7, (j - 1) - (i + 7));
+        GridTrack track;
+        if (ParseMinMaxTrack(inner, track)) {
+          tracks.push_back(track);
+        }
+        i = j;
+        continue;
+      }
+      // Unbalanced parens - same fall-through as repeat() above.
     }
     size_t start = i;
     while (i < raw.size() && !std::isspace(static_cast<unsigned char>(raw[i]))) {
