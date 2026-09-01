@@ -362,6 +362,14 @@ install(FILES CMakeLists.txt DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}")
 install(DIRECTORY include/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/include")
 install(DIRECTORY src/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/src")
 install(DIRECTORY go/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/go")
+# The ART compiler's own source (see art/CMakeLists.txt) - needed at
+# `artisan-cli build` time for any project with an app.art
+# (ARTISAN_APP_ART_SOURCE), the same reason src/ above is. `build`
+# excluded the same way third_party/skia's own `out` is below: whatever
+# the packaging machine happened to have configured/built there is
+# neither reusable (a different install prefix) nor small.
+install(DIRECTORY art/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/art"
+    PATTERN "build" EXCLUDE)
 
 install(DIRECTORY third_party/lexbor/
     DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/third_party/lexbor"
