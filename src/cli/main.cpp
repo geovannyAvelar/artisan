@@ -461,6 +461,7 @@ declare function ArtEventCancelable(event: Event): boolean;
 declare function ArtEventPreventDefault(event: Event): void;
 declare function ArtEventDefaultPrevented(event: Event): boolean;
 declare function ArtEventStopPropagation(event: Event): void;
+declare function ArtEventStopImmediatePropagation(event: Event): void;
 declare function ArtEventClientX(event: Event): number;
 declare function ArtEventClientY(event: Event): number;
 declare function ArtEventCtrlKey(event: Event): boolean;

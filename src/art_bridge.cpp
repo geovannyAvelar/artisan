@@ -140,6 +140,10 @@ bool ArtEventDefaultPrevented(void *event) { return static_cast<artisan::Event *
 
 void ArtEventStopPropagation(void *event) { static_cast<artisan::Event *>(event)->StopPropagation(); }
 
+void ArtEventStopImmediatePropagation(void *event) {
+  static_cast<artisan::Event *>(event)->StopImmediatePropagation();
+}
+
 double ArtEventClientX(void *event) { return static_cast<double>(static_cast<artisan::Event *>(event)->clientX); }
 
 double ArtEventClientY(void *event) { return static_cast<double>(static_cast<artisan::Event *>(event)->clientY); }

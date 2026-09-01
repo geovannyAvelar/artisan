@@ -318,10 +318,18 @@ mismatch). `Event` is another opaque foreign type (`declare type Event;`),
 read through its own curated `declare function`s: `ArtEventType`,
 `ArtEventTarget` (a `Node`), `ArtEventBubbles`/`ArtEventCancelable`,
 `ArtEventPreventDefault`/`ArtEventDefaultPrevented`,
-`ArtEventStopPropagation`, and the MouseEvent/KeyboardEvent data
-(`ArtEventClientX`/`ArtEventClientY`, `ArtEventCtrlKey`/`ArtEventShiftKey`/
-`ArtEventAltKey`/`ArtEventMetaKey`, `ArtEventKey`/`ArtEventCode`) - all
-copied into every scaffolded `app.art`.
+`ArtEventStopPropagation`/`ArtEventStopImmediatePropagation` (the latter
+also implies the former - stopping "immediately" means neither any
+remaining listener at the current node nor any further ancestor gets a
+turn, so e.g. a second `ArtAddEventListener` on the *same* node/type
+never runs, not just an ancestor's - same as real DOM), and the
+MouseEvent/KeyboardEvent data (`ArtEventClientX`/`ArtEventClientY`,
+`ArtEventCtrlKey`/`ArtEventShiftKey`/`ArtEventAltKey`/`ArtEventMetaKey`,
+`ArtEventKey`/`ArtEventCode`) - all copied into every scaffolded
+`app.art`. Neither stop function has a corresponding getter (no
+`ArtEventPropagationStopped`/`ArtEventImmediatePropagationStopped`) -
+matching real DOM's own API, which doesn't expose "was propagation
+already stopped" back to script either, only the action.
 
 `ArtRemoveEventListener(node, eventType, handler, capture)` removes every
 listener matching all four exactly - a mismatched call (wrong handler,
@@ -337,8 +345,8 @@ handle or a JS closure - `ArtAddEventListener` above stores one of these
 (not a bare lambda, which has no nameable type to recover later)
 specifically so removal can find it again.
 
-Not exposed: `stopImmediatePropagation`, and a `CustomEvent`'s `detail`
-payload (untyped by nature - not something a statically-typed language
+Not exposed: a `CustomEvent`'s `detail` payload (untyped by nature - not
+something a statically-typed language
 can represent without generics).
 
 A top-level `let`/`const` is a handler's actual memory across calls -

@@ -96,8 +96,7 @@ void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler ha
 
 // See Event (dom_node.h) for the real fields these read/call - a curated
 // subset (skips the untyped CustomEvent `detail` payload, which ART has
-// no way to represent, and StopImmediatePropagation, a rarely-needed
-// refinement of ArtEventStopPropagation below).
+// no way to represent).
 ArtString *ArtEventType(void *event);
 void *ArtEventTarget(void *event); // a Node - see Event::target
 bool ArtEventBubbles(void *event);
@@ -105,6 +104,13 @@ bool ArtEventCancelable(void *event);
 void ArtEventPreventDefault(void *event);   // no-op if !ArtEventCancelable(event), matching real DOM
 bool ArtEventDefaultPrevented(void *event);
 void ArtEventStopPropagation(void *event);
+// Also implies ArtEventStopPropagation - stopping "immediately" means
+// neither any remaining listener at the current node nor any further
+// ancestor gets a turn, same as real DOM. No corresponding getter (no
+// ArtEventPropagationStopped/ArtEventImmediatePropagationStopped) -
+// matching real DOM's own API, which doesn't expose "was propagation
+// already stopped" back to script either, only the action.
+void ArtEventStopImmediatePropagation(void *event);
 // MouseEvent/KeyboardEvent data - 0/false/"" unless the event that fired
 // is actually one of those (see Event's own doc comment in dom_node.h).
 double ArtEventClientX(void *event);
