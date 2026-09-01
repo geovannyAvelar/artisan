@@ -454,8 +454,15 @@ declare function ArtAddEventListener(node: Node, eventType: string, handler: (ev
 // handler/capture - a mismatched call (wrong handler, or one never added)
 // is a safe no-op.
 declare function ArtRemoveEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
+// Fires your own event (any type, not just built-in ones) at `node`,
+// carrying `detail` (pass "" for none) - readable back with
+// ArtEventDetail below, but only in a listener on an event ART itself
+// dispatched (see its own doc comment for why). Returns false if the
+// event was cancelable and some listener called ArtEventPreventDefault.
+declare function ArtDispatchEvent(node: Node, eventType: string, bubbles: boolean, cancelable: boolean, detail: string): boolean;
 declare function ArtEventType(event: Event): string;
 declare function ArtEventTarget(event: Event): Node;
+declare function ArtEventDetail(event: Event): string;
 declare function ArtEventBubbles(event: Event): boolean;
 declare function ArtEventCancelable(event: Event): boolean;
 declare function ArtEventPreventDefault(event: Event): void;
@@ -508,7 +515,15 @@ function onKeyDown(event: Event): void {
   //
   //   if (ArtEventKey(event) == "Enter") {
   //     ArtEventPreventDefault(event);
+  //     ArtDispatchEvent(ArtDocument(), "form-submitted", true, true, "ok");
   //   }
+}
+
+// Your own event's detail only round-trips through ArtEventDetail
+// correctly in a listener on an event ART itself dispatched (see
+// ArtDispatchEvent's doc comment above).
+function onFormSubmitted(event: Event): void {
+  let payload: string = ArtEventDetail(event); // "ok", from the dispatch above
 }
 
 function setupApp(document: Node): void {

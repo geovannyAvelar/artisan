@@ -316,7 +316,8 @@ same way any other type is (a `() => void` where a `(event: Event) =>
 void` is expected, or vice versa, is a compile error, not a silent
 mismatch). `Event` is another opaque foreign type (`declare type Event;`),
 read through its own curated `declare function`s: `ArtEventType`,
-`ArtEventTarget` (a `Node`), `ArtEventBubbles`/`ArtEventCancelable`,
+`ArtEventTarget` (a `Node`), `ArtEventDetail` (see `ArtDispatchEvent`
+below), `ArtEventBubbles`/`ArtEventCancelable`,
 `ArtEventPreventDefault`/`ArtEventDefaultPrevented`,
 `ArtEventStopPropagation`/`ArtEventStopImmediatePropagation` (the latter
 also implies the former - stopping "immediately" means neither any
@@ -345,9 +346,32 @@ handle or a JS closure - `ArtAddEventListener` above stores one of these
 (not a bare lambda, which has no nameable type to recover later)
 specifically so removal can find it again.
 
-Not exposed: a `CustomEvent`'s `detail` payload (untyped by nature - not
-something a statically-typed language
-can represent without generics).
+`ArtDispatchEvent(node, eventType, bubbles, cancelable, detail)` is the
+other side of general events - unlike everything above (which all react
+to events something else fires), this actually fires one, any type at
+all, not just the built-in click/change/input this Node model already
+knows to fire (`Node::DispatchEvent`, same signature/semantics: the
+usual capturing/target/bubbling walk, returning `false` if the event was
+cancelable and some listener called `ArtEventPreventDefault`). `detail`
+is where a real `CustomEvent`'s payload lives - genuinely untyped even in
+the underlying C++ (`Event::detail` is a bare `const void*`, "carried
+through the dispatch walk unexamined" no matter which binding constructs
+it), so representing it for a statically-typed language without generics
+means picking one concrete type rather than a real generic payload: ART
+uses `string` for its own dispatches (pass `""` for none), which costs
+nothing extra to wire up - an ART string value is already a heap-
+allocated, never-freed pointer with a stable ABI shape, so `detail` is
+just that same pointer handed to `Node::DispatchEvent` as-is, and
+`ArtEventDetail` casts it straight back with no copy. This only round-
+trips correctly on an event *ART itself* dispatched, though: `detail`
+carries no type tag, so a listener has no way to tell a JS/Go dispatch's
+own detail (typically a boxed script value there) apart from ART's
+string shape - the same "each binding owns its own interpretation"
+contract `detail` always had, just spelled out for ART specifically.
+`ArtEventDetail` on an event with no detail at all (`nullptr` - every
+event this Node model fires internally, or an `ArtDispatchEvent` call
+with `detail ""`) reads back as `""`, the same "can't represent null"
+convention `ArtGetAttribute` already uses for an unset attribute.
 
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and

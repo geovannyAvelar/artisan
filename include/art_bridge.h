@@ -94,11 +94,32 @@ void ArtAddEventListener(void *node, ArtString *eventType, ArtEventHandler handl
 // real method.
 void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler handler, bool capture);
 
-// See Event (dom_node.h) for the real fields these read/call - a curated
-// subset (skips the untyped CustomEvent `detail` payload, which ART has
-// no way to represent).
+// See Node::DispatchEvent - fires `eventType` at `node` through the usual
+// capturing/target/bubbling walk, running every listener registered for
+// it (ArtAddEventListener/ArtSetOnClick alike), Go- or JS-registered ones
+// included, same as any internally-fired click/change/input. Returns
+// false if the event was cancelable and some listener called
+// ArtEventPreventDefault, true otherwise - the real method's own
+// convention. `detail` is carried onto the dispatched Event completely
+// unexamined (see Event::detail in dom_node.h - true even for a plain
+// C++ `const void*`, let alone this) - pass "" for none. It's only safe
+// to read back with ArtEventDetail below in a listener on an event *ART
+// itself* dispatched: the underlying field is a bare `const void*` with
+// no type tag, so a listener has no way to know a JS/Go dispatch's own
+// detail (there, typically a boxed script value) isn't ART's string
+// shape - this is the exact same "each binding owns its own
+// interpretation" contract detail always had, just spelled out for ART.
+bool ArtDispatchEvent(void *node, ArtString *eventType, bool bubbles, bool cancelable, ArtString *detail);
+
+// See Event (dom_node.h) for the real fields these read/call.
 ArtString *ArtEventType(void *event);
 void *ArtEventTarget(void *event); // a Node - see Event::target
+// The `detail` ArtDispatchEvent passed above, verbatim - "" if this
+// event has none (a plain internally-fired click/change/input, or an
+// ArtDispatchEvent call with detail ""). See ArtDispatchEvent's own doc
+// comment for why this is only safe to call on an event ART itself
+// dispatched.
+ArtString *ArtEventDetail(void *event);
 bool ArtEventBubbles(void *event);
 bool ArtEventCancelable(void *event);
 void ArtEventPreventDefault(void *event);   // no-op if !ArtEventCancelable(event), matching real DOM

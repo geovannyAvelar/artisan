@@ -126,9 +126,24 @@ void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler ha
       });
 }
 
+bool ArtDispatchEvent(void *node, ArtString *eventType, bool bubbles, bool cancelable, ArtString *detail) {
+  std::string type(eventType->data, static_cast<size_t>(eventType->length));
+  // `detail` is already a heap-allocated, never-freed ArtString* - the
+  // exact same shape/lifetime every other ART string value has - so it's
+  // handed to Node::DispatchEvent's `const void*` as-is, no copy needed;
+  // ArtEventDetail below just casts it straight back.
+  return static_cast<artisan::Node *>(node)->DispatchEvent(type, bubbles, cancelable, detail);
+}
+
 ArtString *ArtEventType(void *event) { return MakeArtString(static_cast<artisan::Event *>(event)->type.c_str()); }
 
 void *ArtEventTarget(void *event) { return static_cast<artisan::Event *>(event)->target; }
+
+ArtString *ArtEventDetail(void *event) {
+  const void *detail = static_cast<artisan::Event *>(event)->detail;
+  if (detail == nullptr) return MakeArtString("");
+  return const_cast<ArtString *>(static_cast<const ArtString *>(detail));
+}
 
 bool ArtEventBubbles(void *event) { return static_cast<artisan::Event *>(event)->Bubbles(); }
 
