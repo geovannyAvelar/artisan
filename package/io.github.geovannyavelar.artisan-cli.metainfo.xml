@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for artisan-cli. Without this, GNOME Software /
+  Ubuntu's Software Updater has no proper application title to show for
+  the package and falls back to displaying the .deb control file's
+  Description line instead - this file is what fixes that, giving
+  "ARTISAN" as the actual displayed name. See CMakeLists.txt's packaging
+  section for how it's installed.
+-->
+<component type="console-application">
+  <id>io.github.geovannyavelar.artisan-cli</id>
+  <name>ARTISAN</name>
+  <summary>Build native desktop apps from HTML-like markup</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Artisan-cli scaffolds, builds, and runs native desktop apps compiled
+      ahead of time from HTML-like markup, rendered with Skia - no browser,
+      no webview. App behavior can be plain C++, a compiled Go app, an
+      embedded JavaScript file, or ART - a small statically typed language
+      of its own design, compiled ahead of time to native machine code via
+      LLVM rather than interpreted.
+    </p>
+  </description>
+  <provides>
+    <binary>artisan-cli</binary>
+  </provides>
+  <url type="homepage">https://github.com/geovannyAvelar/artisan</url>
+  <developer id="io.github.geovannyavelar">
+    <name>Giovanni Avelar</name>
+  </developer>
+  <content_rating type="oars-1.1" />
+</component>

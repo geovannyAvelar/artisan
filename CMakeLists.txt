@@ -356,6 +356,13 @@ target_compile_definitions(artisan_cli PRIVATE
 # nothing at runtime needs.
 install(TARGETS artisan_cli RUNTIME DESTINATION bin)
 
+# AppStream metadata - without it, GNOME Software/Ubuntu's Software
+# Updater has no proper application title for the package and falls back
+# to displaying the .deb control file's plain Description line instead
+# of a real name; this is what fixes that.
+install(FILES package/io.github.geovannyavelar.artisan-cli.metainfo.xml
+    DESTINATION share/metainfo)
+
 set(ARTISAN_INSTALL_SOURCE_DIR "lib/artisan")
 
 install(FILES CMakeLists.txt DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}")
