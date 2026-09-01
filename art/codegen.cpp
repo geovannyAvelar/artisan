@@ -1,0 +1,798 @@
+#include "codegen.h"
+
+#include <stdexcept>
+
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/TargetSelect.h"
+
+namespace ART {
+
+Codegen::Codegen(std::string moduleName, std::string targetTriple, const Sema &sema)
+    : moduleName(std::move(moduleName)), targetTriple(std::move(targetTriple)), sema(sema), builder(context) {}
+
+void Codegen::SetupTarget() {
+  std::string error;
+  const llvm::Target *target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+  if (!target) {
+    throw std::runtime_error("unknown target triple '" + targetTriple + "': " + error);
+  }
+  llvm::TargetOptions options;
+  targetMachine.reset(
+      target->createTargetMachine(targetTriple, "generic", "", options, llvm::Reloc::PIC_));
+  if (!targetMachine) {
+    throw std::runtime_error("failed to create a target machine for '" + targetTriple + "'");
+  }
+  module->setDataLayout(targetMachine->createDataLayout());
+  module->setTargetTriple(targetTriple);
+}
+
+// ---------------------------------------------------------------------
+// Type mapping
+// ---------------------------------------------------------------------
+
+llvm::Type *Codegen::MapType(const ResolvedType &t) {
+  switch (t.tag) {
+  case TypeTag::Number:
+    return llvm::Type::getDoubleTy(context);
+  case TypeTag::Boolean:
+    return llvm::Type::getInt1Ty(context);
+  case TypeTag::String:
+    return llvm::PointerType::get(context, 0);
+  case TypeTag::Handler:
+    return llvm::PointerType::get(context, 0);
+  case TypeTag::Void:
+    return llvm::Type::getVoidTy(context);
+  case TypeTag::Array:
+    return llvm::PointerType::get(context, 0);
+  case TypeTag::Struct:
+    return llvm::PointerType::get(context, 0);
+  case TypeTag::Unknown:
+    break;
+  }
+  throw std::runtime_error("codegen: unresolved type reached MapType - Sema should have rejected this program");
+}
+
+llvm::Type *Codegen::ArrayElemStorageType(const ResolvedType &elem) {
+  if (elem.tag == TypeTag::Boolean) return llvm::Type::getInt8Ty(context);
+  return MapType(elem);
+}
+
+llvm::StructType *Codegen::GetArrayHeaderType() {
+  if (!arrayHeaderType) {
+    arrayHeaderType = llvm::StructType::create(
+        context, {llvm::Type::getInt64Ty(context), llvm::PointerType::get(context, 0)}, "art.array");
+  }
+  return arrayHeaderType;
+}
+
+llvm::StructType *Codegen::GetOrCreateStructType(const std::string &ifaceName) {
+  auto it = structTypes.find(ifaceName);
+  if (it != structTypes.end()) return it->second;
+
+  InterfaceDecl *iface = sema.Interfaces().at(ifaceName);
+  std::vector<llvm::Type *> fieldTypes;
+  fieldTypes.reserve(iface->fields.size());
+  for (auto &field : iface->fields) fieldTypes.push_back(MapType(field.resolvedType));
+
+  auto *structTy = llvm::StructType::create(context, fieldTypes, "struct." + ifaceName);
+  structTypes[ifaceName] = structTy;
+  return structTy;
+}
+
+int Codegen::FieldIndex(InterfaceDecl *iface, const std::string &fieldName) {
+  for (size_t i = 0; i < iface->fields.size(); i++)
+    if (iface->fields[i].name == fieldName) return static_cast<int>(i);
+  throw std::runtime_error("codegen: unknown field '" + fieldName + "' on interface '" + iface->name +
+                            "' - Sema should have rejected this program");
+}
+
+// ---------------------------------------------------------------------
+// Heap allocation / strings
+// ---------------------------------------------------------------------
+
+llvm::Value *Codegen::GenHeapAlloc(uint64_t bytes) {
+  return builder.CreateCall(mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), bytes)});
+}
+
+llvm::Value *Codegen::GenHeapAlloc(llvm::Value *bytes) { return builder.CreateCall(mallocFn, {bytes}); }
+
+// A string value is a pointer to the same { i64 length, ptr data } header
+// arrays use. `data` is always null-terminated one byte past `length` (the
+// terminator itself is never counted in `length` or touched by ART's own
+// string operations) purely so it can be handed directly to a C function
+// expecting a plain `const char*` - see art_bridge.h in the artisan repo.
+//
+// Returns the header global's own address - always a compile-time
+// constant, so this doubles as both a string literal expression's value
+// and a top-level `let`/`const` string's initializer (see GenGlobalDecl).
+llvm::Constant *Codegen::BuildStringConstant(const std::string &value) {
+  llvm::Constant *bytes = llvm::ConstantDataArray::getString(context, value, /*AddNull=*/true);
+  auto *dataGlobal = new llvm::GlobalVariable(*module, bytes->getType(), /*isConstant=*/true,
+                                               llvm::GlobalValue::PrivateLinkage, bytes, "art.str.data");
+  dataGlobal->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+  llvm::Constant *header = llvm::ConstantStruct::get(
+      GetArrayHeaderType(),
+      {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), value.size()), dataGlobal});
+  auto *headerGlobal = new llvm::GlobalVariable(*module, GetArrayHeaderType(), /*isConstant=*/true,
+                                                 llvm::GlobalValue::PrivateLinkage, header, "art.str");
+  headerGlobal->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return headerGlobal;
+}
+
+llvm::Value *Codegen::GenStringLiteral(const std::string &value) { return BuildStringConstant(value); }
+
+// A plain null-terminated `ptr`, not an ART string header - for handing a
+// literal C string (e.g. a printf-style format) to an extern C function
+// from within Codegen itself, never exposed to ART source.
+llvm::Constant *Codegen::BuildCStringConstant(const std::string &value) {
+  llvm::Constant *bytes = llvm::ConstantDataArray::getString(context, value, /*AddNull=*/true);
+  auto *global = new llvm::GlobalVariable(*module, bytes->getType(), /*isConstant=*/true,
+                                           llvm::GlobalValue::PrivateLinkage, bytes, "art.cstr");
+  global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  return global;
+}
+
+llvm::Value *Codegen::GenStringConcat(llvm::Value *lhsPtr, llvm::Value *rhsPtr) {
+  llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  llvm::StructType *hdrTy = GetArrayHeaderType();
+
+  llvm::Value *lhsLen = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, lhsPtr, 0));
+  llvm::Value *rhsLen = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, rhsPtr, 0));
+  llvm::Value *lhsData = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, lhsPtr, 1));
+  llvm::Value *rhsData = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, rhsPtr, 1));
+
+  llvm::Value *totalLen = builder.CreateAdd(lhsLen, rhsLen);
+  llvm::Value *allocLen = builder.CreateAdd(totalLen, llvm::ConstantInt::get(i64Ty, 1)); // +1 for the null terminator
+  llvm::Value *newData = GenHeapAlloc(allocLen);
+  builder.CreateMemCpy(newData, llvm::MaybeAlign(1), lhsData, llvm::MaybeAlign(1), lhsLen);
+  llvm::Value *newDataTail = builder.CreateGEP(llvm::Type::getInt8Ty(context), newData, {lhsLen});
+  builder.CreateMemCpy(newDataTail, llvm::MaybeAlign(1), rhsData, llvm::MaybeAlign(1), rhsLen);
+  llvm::Value *termPtr = builder.CreateGEP(llvm::Type::getInt8Ty(context), newData, {totalLen});
+  builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0), termPtr);
+
+  llvm::Value *newHeader = GenHeapAlloc(16);
+  builder.CreateStore(totalLen, builder.CreateStructGEP(hdrTy, newHeader, 0));
+  builder.CreateStore(newData, builder.CreateStructGEP(hdrTy, newHeader, 1));
+  return newHeader;
+}
+
+llvm::Value *Codegen::GenStringEquals(llvm::Value *lhsPtr, llvm::Value *rhsPtr) {
+  llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  llvm::StructType *hdrTy = GetArrayHeaderType();
+
+  llvm::Value *lhsLen = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, lhsPtr, 0));
+  llvm::Value *rhsLen = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, rhsPtr, 0));
+  llvm::Value *lengthsEqual = builder.CreateICmpEQ(lhsLen, rhsLen);
+
+  auto *checkBytesBB = llvm::BasicBlock::Create(context, "streq.bytes", currentFunction);
+  auto *mergeBB = llvm::BasicBlock::Create(context, "streq.end", currentFunction);
+  llvm::BasicBlock *entryBB = builder.GetInsertBlock();
+  builder.CreateCondBr(lengthsEqual, checkBytesBB, mergeBB);
+
+  builder.SetInsertPoint(checkBytesBB);
+  llvm::Value *lhsData = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, lhsPtr, 1));
+  llvm::Value *rhsData = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, rhsPtr, 1));
+  llvm::Value *cmp = builder.CreateCall(memcmpFn, {lhsData, rhsData, lhsLen});
+  llvm::Value *bytesEqual = builder.CreateICmpEQ(cmp, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
+  builder.CreateBr(mergeBB);
+
+  builder.SetInsertPoint(mergeBB);
+  llvm::PHINode *phi = builder.CreatePHI(llvm::Type::getInt1Ty(context), 2);
+  phi->addIncoming(llvm::ConstantInt::getFalse(context), entryBB);
+  phi->addIncoming(bytesEqual, checkBytesBB);
+  return phi;
+}
+
+llvm::Value *Codegen::GenStringIndex(llvm::Value *strPtr, llvm::Value *idxVal) {
+  llvm::StructType *hdrTy = GetArrayHeaderType();
+  llvm::Value *idxInt = builder.CreateFPToSI(idxVal, llvm::Type::getInt64Ty(context));
+  llvm::Value *dataPtr = builder.CreateLoad(llvm::PointerType::get(context, 0), builder.CreateStructGEP(hdrTy, strPtr, 1));
+  llvm::Value *charPtr = builder.CreateGEP(llvm::Type::getInt8Ty(context), dataPtr, {idxInt});
+  llvm::Value *charByte = builder.CreateLoad(llvm::Type::getInt8Ty(context), charPtr);
+
+  llvm::Value *newData = GenHeapAlloc(2); // char + null terminator
+  builder.CreateStore(charByte, newData);
+  llvm::Value *termPtr = builder.CreateGEP(llvm::Type::getInt8Ty(context), newData,
+                                            {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 1)});
+  builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0), termPtr);
+  llvm::Value *newHeader = GenHeapAlloc(16);
+  builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 1), builder.CreateStructGEP(hdrTy, newHeader, 0));
+  builder.CreateStore(newData, builder.CreateStructGEP(hdrTy, newHeader, 1));
+  return newHeader;
+}
+
+// ---------------------------------------------------------------------
+// Scopes
+// ---------------------------------------------------------------------
+
+void Codegen::PushScope() { scopes.emplace_back(); }
+void Codegen::PopScope() { scopes.pop_back(); }
+
+Codegen::VarBinding *Codegen::Lookup(const std::string &name) {
+  for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+    auto found = it->find(name);
+    if (found != it->end()) return &found->second;
+  }
+  auto globalIt = globalVars.find(name);
+  if (globalIt != globalVars.end()) return &globalIt->second;
+  throw std::runtime_error("codegen: undefined variable '" + name + "' - Sema should have rejected this program");
+}
+
+void Codegen::Declare(const std::string &name, llvm::AllocaInst *alloca, llvm::Type *type) {
+  scopes.back()[name] = VarBinding{alloca, type};
+}
+
+llvm::AllocaInst *Codegen::CreateEntryAlloca(llvm::Function *fn, llvm::Type *type, const std::string &name) {
+  llvm::IRBuilder<> tmp(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+  return tmp.CreateAlloca(type, nullptr, name);
+}
+
+// ---------------------------------------------------------------------
+// Top level
+// ---------------------------------------------------------------------
+
+std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
+  module = std::make_unique<llvm::Module>(moduleName, context);
+  SetupTarget();
+
+  mallocFn = module->getOrInsertFunction(
+      "malloc", llvm::FunctionType::get(llvm::PointerType::get(context, 0), {llvm::Type::getInt64Ty(context)}, false));
+  memcmpFn = module->getOrInsertFunction(
+      "memcmp", llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                                         {llvm::PointerType::get(context, 0), llvm::PointerType::get(context, 0),
+                                          llvm::Type::getInt64Ty(context)},
+                                         false));
+
+  GenBuiltinNumberToString();
+
+  for (auto &g : program.globals) GenGlobalDecl(g.get());
+
+  DeclareFunctionSignatures(program.functions, /*allowMainRename=*/true);
+  DeclareFunctionSignatures(program.externFunctions, /*allowMainRename=*/false);
+  for (auto &fn : program.functions) GenFunction(fn.get());
+  // program.externFunctions have no body (`declare function ...;`) - they
+  // stay as bare external declarations, resolved at link time against
+  // whatever object/library actually defines them.
+
+  // A zero-arg ART `main` returning number/void becomes the process entry
+  // point, but its LLVM function returns `double` (or `void`), not the `i32`
+  // the C runtime's `main` ABI requires - emit a thin wrapper that adapts.
+  auto mainIt = sema.Functions().find("main");
+  if (mainIt != sema.Functions().end() && mainIt->second->params.empty() &&
+      (mainIt->second->resolvedReturnType.tag == TypeTag::Number ||
+       mainIt->second->resolvedReturnType.tag == TypeTag::Void)) {
+    llvm::Function *artMain = llvmFunctions.at("main");
+    auto *wrapperTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {}, false);
+    auto *wrapper = llvm::Function::Create(wrapperTy, llvm::Function::ExternalLinkage, "main", module.get());
+    auto *entryBB = llvm::BasicBlock::Create(context, "entry", wrapper);
+    builder.SetInsertPoint(entryBB);
+    llvm::Value *result = builder.CreateCall(artMain, {});
+    if (mainIt->second->resolvedReturnType.tag == TypeTag::Number) {
+      builder.CreateRet(builder.CreateFPToSI(result, llvm::Type::getInt32Ty(context)));
+    } else {
+      builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
+    }
+  }
+
+  return std::move(module);
+}
+
+void Codegen::DeclareFunctionSignatures(std::vector<std::unique_ptr<FunctionDecl>> &decls, bool allowMainRename) {
+  for (auto &decl : decls) {
+    std::vector<llvm::Type *> paramTypes;
+    paramTypes.reserve(decl->params.size());
+    for (auto &p : decl->params) paramTypes.push_back(MapType(p.resolvedType));
+    llvm::Type *retTy = MapType(decl->resolvedReturnType);
+    auto *fnTy = llvm::FunctionType::get(retTy, paramTypes, false);
+    // ART's own "main" (if any) is renamed at the LLVM level so the real C
+    // ABI entry point ("main", built after every function is generated -
+    // see Generate()) can own that symbol instead. Never applies to a
+    // `declare function` - it must bind to the external symbol verbatim.
+    std::string llvmName = (allowMainRename && decl->name == "main") ? "__art_main" : decl->name;
+    auto *fn = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage, llvmName, module.get());
+    size_t i = 0;
+    for (auto &arg : fn->args()) arg.setName(decl->params[i++].name);
+    llvmFunctions[decl->name] = fn;
+  }
+}
+
+void Codegen::GenGlobalDecl(Stmt *stmt) {
+  // Sema guarantees the initializer is a bare literal matching one of
+  // these three kinds - a real, compile-time llvm::Constant, so no
+  // IRBuilder/basic-block machinery is needed to build it (there's no
+  // static-initialization-order step at all: the global just already
+  // holds its initial value before any code runs, same as any other
+  // statically-initialized global would).
+  llvm::Type *ty = MapType(stmt->resolvedVarType);
+  llvm::Constant *init;
+  switch (stmt->expr->kind) {
+  case ExprKind::NumberLiteral:
+    init = llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), stmt->expr->numberValue);
+    break;
+  case ExprKind::BoolLiteral:
+    init = llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), stmt->expr->boolValue ? 1 : 0);
+    break;
+  case ExprKind::StringLiteral:
+    init = BuildStringConstant(stmt->expr->name);
+    break;
+  default:
+    throw std::runtime_error("codegen: non-literal global initializer - Sema should have rejected this program");
+  }
+
+  auto *global = new llvm::GlobalVariable(*module, ty, /*isConstant=*/stmt->isConst,
+                                           llvm::GlobalValue::InternalLinkage, init, "global." + stmt->varName);
+  globalVars[stmt->varName] = VarBinding{global, ty};
+}
+
+// Backs Sema::SeedBuiltins' "numberToString" - real double-to-string
+// formatting (correct rounding, shortest-round-trip digit counts, ...) is
+// its own small research problem, so this defers to libc's `snprintf`
+// rather than reimplementing it: `%.15g` matches double's ~15 significant
+// decimal digits of precision, using %f-style output for an ordinary-
+// magnitude number (e.g. 42 -> "42", not "42.000000" - %g trims
+// insignificant trailing zeros and the decimal point itself) and falling
+// back to %e-style scientific notation only once the magnitude actually
+// needs it. Not a guaranteed match for real JS's own Number-to-string
+// algorithm at the edges (NaN/Infinity print as "nan"/"inf", not
+// "NaN"/"Infinity"; -0 prints as "-0", not "0"; extreme magnitudes may
+// round or switch notation slightly differently) - close enough for the
+// ordinary counters/measurements an ART program actually computes.
+void Codegen::GenBuiltinNumberToString() {
+  llvm::Type *doubleTy = llvm::Type::getDoubleTy(context);
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+  llvm::Type *i32Ty = llvm::Type::getInt32Ty(context);
+
+  auto *fnTy = llvm::FunctionType::get(ptrTy, {doubleTy}, false);
+  auto *fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "art.numberToString", module.get());
+  llvmFunctions["numberToString"] = fn;
+  currentFunction = fn;
+
+  auto *entry = llvm::BasicBlock::Create(context, "entry", fn);
+  builder.SetInsertPoint(entry);
+  llvm::Argument *nArg = &*fn->arg_begin();
+  nArg->setName("n");
+
+  // Generous fixed-size scratch buffer: worst case is a sign, ~15 digits,
+  // a decimal point, and a 4-5 character exponent - nowhere near 32
+  // bytes. Reused directly as the resulting ART string's data buffer (no
+  // separate copy) since snprintf already null-terminates it in place,
+  // exactly the shape ART's own string codegen builds.
+  llvm::Value *buf = GenHeapAlloc(32);
+  llvm::Constant *fmt = BuildCStringConstant("%.15g");
+  llvm::FunctionCallee snprintfFn = module->getOrInsertFunction(
+      "snprintf", llvm::FunctionType::get(i32Ty, {ptrTy, i64Ty, ptrTy}, /*isVarArg=*/true));
+  builder.CreateCall(snprintfFn, {buf, llvm::ConstantInt::get(i64Ty, 32), fmt, nArg});
+
+  llvm::FunctionCallee strlenFn = module->getOrInsertFunction("strlen", llvm::FunctionType::get(i64Ty, {ptrTy}, false));
+  llvm::Value *len = builder.CreateCall(strlenFn, {buf});
+
+  llvm::Value *header = GenHeapAlloc(16);
+  builder.CreateStore(len, builder.CreateStructGEP(GetArrayHeaderType(), header, 0));
+  builder.CreateStore(buf, builder.CreateStructGEP(GetArrayHeaderType(), header, 1));
+  builder.CreateRet(header);
+  currentFunction = nullptr;
+}
+
+void Codegen::GenFunction(FunctionDecl *decl) {
+  llvm::Function *fn = llvmFunctions.at(decl->name);
+  currentFunction = fn;
+
+  auto *entry = llvm::BasicBlock::Create(context, "entry", fn);
+  builder.SetInsertPoint(entry);
+  PushScope();
+
+  size_t i = 0;
+  for (auto &arg : fn->args()) {
+    const Param &p = decl->params[i++];
+    llvm::Type *ty = MapType(p.resolvedType);
+    llvm::AllocaInst *alloca = CreateEntryAlloca(fn, ty, p.name);
+    builder.CreateStore(&arg, alloca);
+    Declare(p.name, alloca, ty);
+  }
+
+  GenStmt(decl->body.get());
+
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    if (decl->resolvedReturnType.tag == TypeTag::Void) {
+      builder.CreateRetVoid();
+    } else {
+      // Sema's definite-return check guarantees every non-void path already
+      // returned; this is unreachable but keeps the block well-formed.
+      builder.CreateUnreachable();
+    }
+  }
+
+  PopScope();
+  currentFunction = nullptr;
+}
+
+// ---------------------------------------------------------------------
+// Statements
+// ---------------------------------------------------------------------
+
+void Codegen::GenStmt(Stmt *stmt) {
+  switch (stmt->kind) {
+  case StmtKind::VarDecl: {
+    llvm::Type *ty = MapType(stmt->resolvedVarType);
+    llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, ty, stmt->varName);
+    llvm::Value *val = GenExpr(stmt->expr.get());
+    builder.CreateStore(val, alloca);
+    Declare(stmt->varName, alloca, ty);
+    break;
+  }
+
+  case StmtKind::If: {
+    llvm::Value *condVal = GenExpr(stmt->cond.get());
+    auto *thenBB = llvm::BasicBlock::Create(context, "if.then", currentFunction);
+    auto *elseBB = stmt->elseBranch ? llvm::BasicBlock::Create(context, "if.else", currentFunction) : nullptr;
+    auto *mergeBB = llvm::BasicBlock::Create(context, "if.end", currentFunction);
+
+    builder.CreateCondBr(condVal, thenBB, elseBB ? elseBB : mergeBB);
+
+    builder.SetInsertPoint(thenBB);
+    GenStmt(stmt->body.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(mergeBB);
+
+    if (elseBB) {
+      builder.SetInsertPoint(elseBB);
+      GenStmt(stmt->elseBranch.get());
+      if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(mergeBB);
+    }
+
+    builder.SetInsertPoint(mergeBB);
+    break;
+  }
+
+  case StmtKind::While: {
+    auto *condBB = llvm::BasicBlock::Create(context, "while.cond", currentFunction);
+    auto *bodyBB = llvm::BasicBlock::Create(context, "while.body", currentFunction);
+    auto *endBB = llvm::BasicBlock::Create(context, "while.end", currentFunction);
+
+    builder.CreateBr(condBB);
+    builder.SetInsertPoint(condBB);
+    llvm::Value *condVal = GenExpr(stmt->cond.get());
+    builder.CreateCondBr(condVal, bodyBB, endBB);
+
+    builder.SetInsertPoint(bodyBB);
+    GenStmt(stmt->body.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(endBB);
+    break;
+  }
+
+  case StmtKind::For: {
+    PushScope();
+    if (stmt->initStmt) GenStmt(stmt->initStmt.get());
+
+    auto *condBB = llvm::BasicBlock::Create(context, "for.cond", currentFunction);
+    auto *bodyBB = llvm::BasicBlock::Create(context, "for.body", currentFunction);
+    auto *updateBB = llvm::BasicBlock::Create(context, "for.update", currentFunction);
+    auto *endBB = llvm::BasicBlock::Create(context, "for.end", currentFunction);
+
+    builder.CreateBr(condBB);
+    builder.SetInsertPoint(condBB);
+    llvm::Value *condVal =
+        stmt->cond ? GenExpr(stmt->cond.get()) : llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), 1);
+    builder.CreateCondBr(condVal, bodyBB, endBB);
+
+    builder.SetInsertPoint(bodyBB);
+    GenStmt(stmt->body.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(updateBB);
+
+    builder.SetInsertPoint(updateBB);
+    if (stmt->update) GenExpr(stmt->update.get());
+    builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(endBB);
+    PopScope();
+    break;
+  }
+
+  case StmtKind::ForOf: {
+    PushScope();
+    llvm::Value *arrPtr = GenExpr(stmt->expr.get());
+    llvm::StructType *hdrTy = GetArrayHeaderType();
+    llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+    llvm::Value *length = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, arrPtr, 0));
+    llvm::Value *dataPtr = builder.CreateLoad(llvm::PointerType::get(context, 0), builder.CreateStructGEP(hdrTy, arrPtr, 1));
+
+    const ResolvedType &elemType = stmt->resolvedVarType;
+    llvm::Type *storageTy = ArrayElemStorageType(elemType);
+    llvm::Type *varTy = MapType(elemType);
+
+    llvm::AllocaInst *idxAlloca = CreateEntryAlloca(currentFunction, i64Ty, "forof.idx");
+    builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), idxAlloca);
+    llvm::AllocaInst *varAlloca = CreateEntryAlloca(currentFunction, varTy, stmt->varName);
+
+    auto *condBB = llvm::BasicBlock::Create(context, "forof.cond", currentFunction);
+    auto *bodyBB = llvm::BasicBlock::Create(context, "forof.body", currentFunction);
+    auto *updateBB = llvm::BasicBlock::Create(context, "forof.update", currentFunction);
+    auto *endBB = llvm::BasicBlock::Create(context, "forof.end", currentFunction);
+
+    builder.CreateBr(condBB);
+    builder.SetInsertPoint(condBB);
+    llvm::Value *idx = builder.CreateLoad(i64Ty, idxAlloca);
+    builder.CreateCondBr(builder.CreateICmpSLT(idx, length), bodyBB, endBB);
+
+    builder.SetInsertPoint(bodyBB);
+    llvm::Value *elemPtr = builder.CreateGEP(storageTy, dataPtr, {idx});
+    llvm::Value *rawVal = builder.CreateLoad(storageTy, elemPtr);
+    llvm::Value *elemVal = rawVal;
+    if (elemType.tag == TypeTag::Boolean) {
+      elemVal = builder.CreateICmpNE(rawVal, llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0));
+    }
+    builder.CreateStore(elemVal, varAlloca);
+    Declare(stmt->varName, varAlloca, varTy);
+    GenStmt(stmt->body.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(updateBB);
+
+    builder.SetInsertPoint(updateBB);
+    llvm::Value *nextIdx = builder.CreateAdd(builder.CreateLoad(i64Ty, idxAlloca), llvm::ConstantInt::get(i64Ty, 1));
+    builder.CreateStore(nextIdx, idxAlloca);
+    builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(endBB);
+    PopScope();
+    break;
+  }
+
+  case StmtKind::Return: {
+    if (stmt->expr) {
+      builder.CreateRet(GenExpr(stmt->expr.get()));
+    } else {
+      builder.CreateRetVoid();
+    }
+    break;
+  }
+
+  case StmtKind::ExprStmt:
+    GenExpr(stmt->expr.get());
+    break;
+
+  case StmtKind::Block:
+    PushScope();
+    for (auto &s : stmt->statements) {
+      GenStmt(s.get());
+      if (builder.GetInsertBlock()->getTerminator()) break; // rest is unreachable
+    }
+    PopScope();
+    break;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Lvalues (assignment targets, and read access to Index/Member re-uses this)
+// ---------------------------------------------------------------------
+
+Codegen::LValue Codegen::GenLValue(Expr *expr) {
+  if (expr->kind == ExprKind::Identifier) {
+    VarBinding *b = Lookup(expr->name);
+    return {b->alloca, b->type, false};
+  }
+
+  if (expr->kind == ExprKind::Index) {
+    llvm::Value *objPtr = GenExpr(expr->lhs.get());
+    llvm::Value *idxVal = GenExpr(expr->operand.get());
+    llvm::Value *idxInt = builder.CreateFPToSI(idxVal, llvm::Type::getInt64Ty(context));
+
+    llvm::Value *dataFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), objPtr, 1);
+    llvm::Value *dataPtr = builder.CreateLoad(llvm::PointerType::get(context, 0), dataFieldPtr);
+
+    const ResolvedType &elemType = *expr->lhs->resolvedType.elementType;
+    llvm::Type *storageTy = ArrayElemStorageType(elemType);
+    llvm::Value *elemPtr = builder.CreateGEP(storageTy, dataPtr, {idxInt});
+    return {elemPtr, storageTy, elemType.tag == TypeTag::Boolean};
+  }
+
+  // Member (struct field only - `.length` is read-only and never reaches GenLValue).
+  llvm::Value *objPtr = GenExpr(expr->lhs.get());
+  const std::string &ifaceName = expr->lhs->resolvedType.structName;
+  llvm::StructType *structTy = GetOrCreateStructType(ifaceName);
+  InterfaceDecl *iface = sema.Interfaces().at(ifaceName);
+  int idx = FieldIndex(iface, expr->name);
+  llvm::Value *fieldPtr = builder.CreateStructGEP(structTy, objPtr, idx);
+  return {fieldPtr, MapType(iface->fields[idx].resolvedType), false};
+}
+
+// ---------------------------------------------------------------------
+// Expressions
+// ---------------------------------------------------------------------
+
+llvm::Value *Codegen::GenExpr(Expr *expr) {
+  switch (expr->kind) {
+  case ExprKind::NumberLiteral:
+    return llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), expr->numberValue);
+
+  case ExprKind::BoolLiteral:
+    return llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), expr->boolValue ? 1 : 0);
+
+  case ExprKind::StringLiteral:
+    return GenStringLiteral(expr->name);
+
+  case ExprKind::Identifier: {
+    if (expr->resolvedType.tag == TypeTag::Handler) {
+      // Not a variable - a bare reference to a top-level function, used as
+      // a plain code-address value (see Sema::CheckExpr's Identifier case).
+      return llvmFunctions.at(expr->name);
+    }
+    VarBinding *b = Lookup(expr->name);
+    return builder.CreateLoad(b->type, b->alloca, expr->name);
+  }
+
+  case ExprKind::Binary: {
+    const std::string &op = expr->op;
+
+    if (op == "&&" || op == "||") {
+      bool isAnd = op == "&&";
+      auto *rhsBB = llvm::BasicBlock::Create(context, isAnd ? "and.rhs" : "or.rhs", currentFunction);
+      auto *mergeBB = llvm::BasicBlock::Create(context, isAnd ? "and.end" : "or.end", currentFunction);
+
+      llvm::Value *lhsVal = GenExpr(expr->lhs.get());
+      llvm::BasicBlock *lhsEndBB = builder.GetInsertBlock();
+      if (isAnd) {
+        builder.CreateCondBr(lhsVal, rhsBB, mergeBB);
+      } else {
+        builder.CreateCondBr(lhsVal, mergeBB, rhsBB);
+      }
+
+      builder.SetInsertPoint(rhsBB);
+      llvm::Value *rhsVal = GenExpr(expr->rhs.get());
+      llvm::BasicBlock *rhsEndBB = builder.GetInsertBlock();
+      builder.CreateBr(mergeBB);
+
+      builder.SetInsertPoint(mergeBB);
+      llvm::PHINode *phi = builder.CreatePHI(llvm::Type::getInt1Ty(context), 2);
+      phi->addIncoming(llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), isAnd ? 0 : 1), lhsEndBB);
+      phi->addIncoming(rhsVal, rhsEndBB);
+      return phi;
+    }
+
+    llvm::Value *lhsVal = GenExpr(expr->lhs.get());
+    llvm::Value *rhsVal = GenExpr(expr->rhs.get());
+    TypeTag operandTag = expr->lhs->resolvedType.tag;
+
+    if (operandTag == TypeTag::String) {
+      if (op == "+") return GenStringConcat(lhsVal, rhsVal);
+      if (op == "==") return GenStringEquals(lhsVal, rhsVal);
+      if (op == "!=") return builder.CreateNot(GenStringEquals(lhsVal, rhsVal));
+      throw std::runtime_error("codegen: unsupported string operator '" + op + "'");
+    }
+
+    if (op == "+") return builder.CreateFAdd(lhsVal, rhsVal);
+    if (op == "-") return builder.CreateFSub(lhsVal, rhsVal);
+    if (op == "*") return builder.CreateFMul(lhsVal, rhsVal);
+    if (op == "/") return builder.CreateFDiv(lhsVal, rhsVal);
+    if (op == "%") return builder.CreateFRem(lhsVal, rhsVal);
+    if (op == "<") return builder.CreateFCmpOLT(lhsVal, rhsVal);
+    if (op == "<=") return builder.CreateFCmpOLE(lhsVal, rhsVal);
+    if (op == ">") return builder.CreateFCmpOGT(lhsVal, rhsVal);
+    if (op == ">=") return builder.CreateFCmpOGE(lhsVal, rhsVal);
+    // Number compares as float; every other reachable tag here (Boolean,
+    // and - via Sema's generic "same tag" rule for "=="/"!=" - Struct/
+    // Array/Handler, all represented as `ptr`) compares as a plain
+    // integer/pointer identity check. String has its own branch above.
+    if (op == "==") {
+      return operandTag == TypeTag::Number ? builder.CreateFCmpOEQ(lhsVal, rhsVal)
+                                            : builder.CreateICmpEQ(lhsVal, rhsVal);
+    }
+    if (op == "!=") {
+      return operandTag == TypeTag::Number ? builder.CreateFCmpONE(lhsVal, rhsVal)
+                                            : builder.CreateICmpNE(lhsVal, rhsVal);
+    }
+    throw std::runtime_error("codegen: unknown binary operator '" + op + "'");
+  }
+
+  case ExprKind::Unary: {
+    llvm::Value *operandVal = GenExpr(expr->operand.get());
+    if (expr->op == "-") return builder.CreateFNeg(operandVal);
+    if (expr->op == "!") return builder.CreateNot(operandVal);
+    throw std::runtime_error("codegen: unknown unary operator '" + expr->op + "'");
+  }
+
+  case ExprKind::IncDec: {
+    LValue lv = GenLValue(expr->operand.get());
+    llvm::Value *cur = builder.CreateLoad(lv.storeType, lv.addr);
+    llvm::Value *one = llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), 1.0);
+    llvm::Value *updated = expr->op == "++" ? builder.CreateFAdd(cur, one) : builder.CreateFSub(cur, one);
+    builder.CreateStore(updated, lv.addr);
+    return updated;
+  }
+
+  case ExprKind::Call: {
+    llvm::Function *callee = llvmFunctions.at(expr->lhs->name);
+    std::vector<llvm::Value *> args;
+    args.reserve(expr->elements.size());
+    for (auto &argExpr : expr->elements) args.push_back(GenExpr(argExpr.get()));
+    return builder.CreateCall(callee, args);
+  }
+
+  case ExprKind::ArrayLiteral: {
+    const ResolvedType &elemType = *expr->resolvedType.elementType;
+    llvm::Type *storageTy = ArrayElemStorageType(elemType);
+    uint64_t elemSize = elemType.tag == TypeTag::Boolean ? 1 : 8; // i8 vs {double,ptr}
+    uint64_t count = expr->elements.size();
+
+    llvm::Value *dataPtr = builder.CreateCall(
+        mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), count * elemSize)});
+
+    for (uint64_t i = 0; i < count; i++) {
+      llvm::Value *val = GenExpr(expr->elements[i].get());
+      if (elemType.tag == TypeTag::Boolean) val = builder.CreateZExt(val, llvm::Type::getInt8Ty(context));
+      llvm::Value *elemPtr = builder.CreateGEP(storageTy, dataPtr,
+                                                {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), i)});
+      builder.CreateStore(val, elemPtr);
+    }
+
+    llvm::Value *headerPtr = builder.CreateCall(mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 16)});
+    llvm::Value *lengthFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 0);
+    builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), count), lengthFieldPtr);
+    llvm::Value *dataFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 1);
+    builder.CreateStore(dataPtr, dataFieldPtr);
+    return headerPtr;
+  }
+
+  case ExprKind::ObjectLiteral: {
+    const std::string &ifaceName = expr->resolvedType.structName;
+    llvm::StructType *structTy = GetOrCreateStructType(ifaceName);
+    InterfaceDecl *iface = sema.Interfaces().at(ifaceName);
+
+    uint64_t sizeBytes = module->getDataLayout().getTypeAllocSize(structTy).getFixedValue();
+    llvm::Value *instancePtr =
+        builder.CreateCall(mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), sizeBytes)});
+
+    for (size_t idx = 0; idx < iface->fields.size(); idx++) {
+      const std::string &fieldName = iface->fields[idx].name;
+      Expr *valueExpr = nullptr;
+      for (auto &f : expr->fields)
+        if (f.first == fieldName) { valueExpr = f.second.get(); break; }
+      llvm::Value *val = GenExpr(valueExpr);
+      llvm::Value *fieldPtr = builder.CreateStructGEP(structTy, instancePtr, static_cast<unsigned>(idx));
+      builder.CreateStore(val, fieldPtr);
+    }
+    return instancePtr;
+  }
+
+  case ExprKind::Index: {
+    if (expr->lhs->resolvedType.tag == TypeTag::String) {
+      llvm::Value *strPtr = GenExpr(expr->lhs.get());
+      llvm::Value *idxVal = GenExpr(expr->operand.get());
+      return GenStringIndex(strPtr, idxVal);
+    }
+    LValue lv = GenLValue(expr);
+    llvm::Value *raw = builder.CreateLoad(lv.storeType, lv.addr);
+    if (lv.isBoolArrayElem) {
+      return builder.CreateICmpNE(raw, llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0));
+    }
+    return raw;
+  }
+
+  case ExprKind::Member: {
+    if (expr->isLengthAccess) {
+      llvm::Value *objPtr = GenExpr(expr->lhs.get());
+      llvm::Value *lengthFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), objPtr, 0);
+      llvm::Value *lengthI64 = builder.CreateLoad(llvm::Type::getInt64Ty(context), lengthFieldPtr);
+      return builder.CreateUIToFP(lengthI64, llvm::Type::getDoubleTy(context));
+    }
+    LValue lv = GenLValue(expr);
+    return builder.CreateLoad(lv.storeType, lv.addr);
+  }
+
+  case ExprKind::Assign: {
+    llvm::Value *rhsVal = GenExpr(expr->rhs.get());
+    LValue lv = GenLValue(expr->lhs.get());
+    llvm::Value *toStore = rhsVal;
+    if (lv.isBoolArrayElem) toStore = builder.CreateZExt(rhsVal, llvm::Type::getInt8Ty(context));
+    builder.CreateStore(toStore, lv.addr);
+    return rhsVal;
+  }
+  }
+
+  throw std::runtime_error("codegen: unhandled expression kind");
+}
+
+} // namespace ART
