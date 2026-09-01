@@ -446,6 +446,45 @@ bool ParseGridLinePlacement(const std::string &raw, GridLinePlacement &out) {
   return true;
 }
 
+// Parses real CSS's numeric `grid-area: <row-start> / <column-start> /
+// <row-end> / <column-end>` shorthand into the row/column
+// GridLinePlacement pair it's equivalent to - each side the same bare
+// line number or "span N" grid-column/grid-row's own value already
+// accepts (see ParseGridLineSide/ParseGridLinePlacement just above),
+// reused per axis here (a "<start> / <end>" spec built from the
+// shorthand's own row or column pair, or just "<start>" alone for the
+// 2-value form below) rather than duplicating that parsing. Only the
+// full 4-value form and the 2-value `row-start / column-start` form
+// (each start's own end implicitly span 1, same as ParseGridLinePlacement's
+// "no right side" case) are supported; real CSS's 1-value and 3-value
+// forms - which infer a missing end from the *start* side, a rule only
+// meaningful for named lines (unsupported in this bounded subset
+// anyway) - aren't, so a 1- or 3-part value here just returns false,
+// falling through to the plain named-area string handling below like
+// any other value this doesn't recognize. Named lines aren't supported
+// on this path either, same restriction grid-column/grid-row's own
+// numeric form already has.
+bool ParseGridAreaShorthand(const std::string &raw, GridLinePlacement &row,
+                             GridLinePlacement &column) {
+  std::vector<std::string> parts;
+  size_t start = 0;
+  while (true) {
+    size_t slash = raw.find('/', start);
+    size_t len = slash == std::string::npos ? std::string::npos : slash - start;
+    parts.push_back(Trim(raw.substr(start, len)));
+    if (slash == std::string::npos) {
+      break;
+    }
+    start = slash + 1;
+  }
+  if (parts.size() != 2 && parts.size() != 4) {
+    return false;
+  }
+  std::string rowSpec = parts.size() == 4 ? parts[0] + " / " + parts[2] : parts[0];
+  std::string columnSpec = parts.size() == 4 ? parts[1] + " / " + parts[3] : parts[1];
+  return ParseGridLinePlacement(rowSpec, row) && ParseGridLinePlacement(columnSpec, column);
+}
+
 // Parses an nth-*() argument - a literal integer, or the "even"/"odd"
 // keywords - into (nthA, nthB), the same v1 grammar nth-child and
 // nth-of-type both share (not the full "an+b" algebra). Returns false
@@ -921,7 +960,25 @@ Declarations ParseDeclarations(const std::string &body) {
       decl.hasGridTemplateAreas =
           ParseGridTemplateAreas(value, decl.gridTemplateAreas);
     } else if (property == "grid-area") {
-      decl.gridArea = value;
+      // The numeric line-based shorthand (see ParseGridAreaShorthand
+      // above) expands directly into grid-row/grid-column - the exact
+      // same fields (and cascade PropertyWinner) a literal grid-row/
+      // grid-column declaration on this same selector would use, which
+      // is what makes this a real shorthand rather than a separate
+      // property. decl.gridArea itself is left empty in that case, so
+      // FindGridAreaPlacement's named-area lookup (widget_renderer.cpp)
+      // naturally never matches it - only a value that doesn't parse as
+      // the numeric form falls back to being treated as a plain area
+      // name instead.
+      GridLinePlacement row, column;
+      if (ParseGridAreaShorthand(value, row, column)) {
+        decl.hasGridRow = true;
+        decl.gridRow = row;
+        decl.hasGridColumn = true;
+        decl.gridColumn = column;
+      } else {
+        decl.gridArea = value;
+      }
     } else if (property == "grid-column") {
       decl.hasGridColumn = ParseGridLinePlacement(value, decl.gridColumn);
     } else if (property == "grid-row") {

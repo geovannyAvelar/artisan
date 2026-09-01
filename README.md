@@ -638,9 +638,22 @@ grid-template-areas:
 (a literal `.` names an explicitly empty cell). A child's own
 `grid-area: <name>` places it at whatever cells that name occupies -
 including more than one, when a name appears in more than one cell, the
-classic "header spans two columns" pattern above - real CSS's numeric
-`grid-area: row / col / row-end / col-end` line-based shorthand isn't
-supported, only the named form. `grid-template-columns`/
+classic "header spans two columns" pattern above. `grid-area` also
+accepts real CSS's numeric line-based shorthand instead of a name -
+`grid-area: <row-start> / <column-start> / <row-end> / <column-end>`
+(4 values) or `grid-area: <row-start> / <column-start>` (2 values, each
+side an implicit span of 1) - each of the up-to-4 slash-separated parts
+the same bare line number or `span N` `grid-column`/`grid-row` already
+accept below; it expands directly into that same `grid-row`/
+`grid-column` pair (literally the same fields, and cascade precedence,
+a separate `grid-row: ...; grid-column: ...;` declaration on the same
+selector would use), so everything the line-based longhands below say -
+including their own limitations - applies here too. Real CSS's 1-value
+and 3-value shorthand forms aren't supported (they infer a missing end
+from the *start* side, a rule only meaningful for named lines, which
+this bounded subset doesn't support either); a value with 1 or 3 slash-
+separated parts is treated as a plain area name instead, same as any
+other value the numeric form doesn't recognize. `grid-template-columns`/
 `grid-template-rows` still size the resulting columns/rows exactly as
 above when their own track count matches the area template's; otherwise
 (including when they're unset entirely) columns fall back to equal
@@ -660,10 +673,10 @@ columns); `grid-column: span 2` spans 2 columns with no explicit start,
 auto-placed the same way an item with no placement at all is, just at
 that span instead of always 1x1; `grid-column: 2 / span 2` combines an
 explicit start with an explicit span. `grid-row` works identically for
-rows. Real CSS's named lines and negative (counted-from-the-end) line
-numbers aren't supported, and neither is `grid-area`'s equivalent
-numeric `row / col / row-end / col-end` form - only these two named
-longhands parse line-based placement. A `grid-template-columns`/
+rows - and so does `grid-area`'s own numeric line-based shorthand (see
+above), which expands into exactly this same grid-column/grid-row pair.
+Real CSS's named lines and negative (counted-from-the-end) line numbers
+aren't supported on any of these. A `grid-template-columns`/
 `grid-template-rows` track list too short for an explicit placement (or
 a `grid-template-areas`-derived one) grows to fit - e.g. `grid-column:
 5` with only 3 columns declared adds two more, equal-width, the same
