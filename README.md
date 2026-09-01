@@ -238,102 +238,118 @@ ART is a small, statically typed language of this repo's own design -
 TypeScript-like syntax with the dynamic parts removed (no `any`, no
 prototypes, no dynamic property access), compiled ahead of time to native
 machine code via LLVM (see `art/`) rather than interpreted. A project's
-`app.art` - one file at the project root, like `app.js`, not a whole
-module directory the way `goapp/` is (ART has no multi-file/import system
-yet) - is compiled by the standalone `art` compiler and linked straight
-into the binary, the same "runs compiled, not interpreted" deal
-`ARTISAN_APP_CPP_SOURCES`/`ARTISAN_APP_GO_SOURCE` get.
+`app.art` - one file at the project root by default, like `app.js`, but
+optionally the entry point into a real multi-file project via
+`import`/`export` (see "Modules" below) - is compiled by the standalone
+`art` compiler and linked straight into the binary, the same "runs
+compiled, not interpreted" deal `ARTISAN_APP_CPP_SOURCES`/
+`ARTISAN_APP_GO_SOURCE` get.
 
 ```bash
 artisan-cli new my-app --lang art
 ```
 
-scaffolds `app.art` with every DOM function below already `declare`d and
-an empty `setupApp`. An ART app must define exactly this function:
+scaffolds `app.art` with the DOM bridge below already `declare`d and
+wrapped in `declare class Node`/`declare class Event` (see "Classes"
+below), plus an empty `setupApp`. An ART app must define exactly this
+function:
 
 ```ts
-function onButtonClick(): void {
+function onButtonClick(event: Event): void {
   // ...
 }
 
-function setupApp(document: Node): void {
-  let button: Node = ArtFindById(document, "my-button");
-  if (!ArtIsNull(button)) {
-    ArtSetOnClick(button, onButtonClick);
-    ArtSetTextContent(button, "Ready");
+function setupApp(): void {
+  let button: Node = document.getElementById("my-button");
+  if (!button.isNull()) {
+    button.addEventListener("click", onButtonClick, false);
+    button.setTextContent("Ready");
   }
 }
 ```
 
 `setupApp` runs once whenever a page loads, same as `SetupApp(Node&)`/
-Go's `ArtisanSetupApp`/a script's top-level code all are. `Node` is an
-opaque foreign type (`declare type Node;`) - a plain handle ART code
-passes around but never constructs or looks inside; the DOM API itself is
-a curated subset of `include/node_c_api.h` re-exposed as ART-callable
-`declare function`s (`include/art_bridge.h` has the exact signatures -
-copied into every scaffolded `app.art`): `ArtDocument`, `ArtFindById`,
-`ArtQuerySelector`, `ArtIsNull` (the only way to test a lookup for "no
-match" - ART has no null literal of its own to compare against),
-`ArtGetTextContent`/`ArtSetTextContent`, `ArtGetAttribute`/
-`ArtHasAttribute`/`ArtSetAttribute`, `ArtChildCount`/`ArtChildAt`, and
-`ArtSetOnClick`.
+Go's `ArtisanSetupApp`/a script's top-level code all are. `document` is
+ambient - always just there, the same way a real browser's own global
+`document` is, not something `setupApp` (or anything else) has to be
+handed or look up itself (see its own doc comment further down for
+exactly how). `Node` is an opaque foreign type (`declare class Node;`
+underneath - see "Classes" below) - a plain handle ART code passes around
+but never constructs or looks inside; the DOM API itself is a curated
+subset of `include/node_c_api.h`, exposed as ART-callable `declare
+function`s (`include/art_bridge.h` has the exact signatures) wrapped into
+`Node`/`Event` methods named/shaped to match a real browser's own DOM API
+as closely as ART's lack of getter/property syntax allows - all copied
+into every scaffolded `app.art`: `document.getElementById(id)`,
+`.querySelector(selector)`, `.isNull()` (the only way to test a lookup
+for "no match" - ART has no null literal of its own to compare against),
+`.getTextContent()`/`.setTextContent(text)`, `.getAttribute(name)`/
+`.hasAttribute(name)`/`.setAttribute(name, value)`, `.childCount()`/
+`.childAt(index)`.
 
-`ArtDocument()` returns the same root `Node` `setupApp`'s own parameter
-is - the current page's document, whatever it is at the moment of the
-call. It exists specifically for a handler (see `ArtSetOnClick` below):
-unlike `setupApp`, a handler takes no arguments, so without a way to ask
-for the document directly it would have no path to the DOM at all except
-whatever a top-level `let`/`const` could carry forward - and a `Node`
-can't be one of those (see below). `include/art_bridge_context.h`
-tracks which `Node` it currently points to, updated by `main.cpp` once
-per page load/navigation (the same place `node_c_api_bridge.h`'s
-`SetGoTimerContext` already is) - `ArtIsNull` on its result is `true`
+`document` (see `kAmbientGlobals` in `art/sema.cpp`) isn't a real
+variable or a declared function of its own - it's pure sugar, rewritten
+at compile time into a call to the `declare function ArtDocument():
+Node;` every scaffolded `app.art` still declares (needed as the sugar's
+actual target, even though nothing calls it directly by name anymore).
+`ArtDocument()`/`document` returns the current page's root `Node`,
+whatever it is at the moment of the call - it exists specifically for a
+handler: unlike `setupApp`, a handler takes no `Node` parameter of its
+own, so without some way to ask for the document directly it would have
+no path to the DOM at all except whatever a top-level `let`/`const`
+could carry forward, and a `Node` can't be one of those (see below).
+`include/art_bridge_context.h` tracks which `Node` it currently points
+to, updated by `main.cpp` once per page load/navigation (the same place
+`node_c_api_bridge.h`'s `SetGoTimerContext` already is, and before
+`setupApp`/any handler can possibly run) - `.isNull()` on it is `true`
 only in the narrow window between one page's tree being torn down and
 the next one finishing its build, which a handler invoked from a live
-page will never actually observe.
+page will never actually observe. A project that declares its own
+`document` (a variable, parameter, or function) shadows the sugar
+entirely, the same precedence a real local always has over anything
+ambient - and nothing else is ambient yet: `window` isn't, since there's
+no window-level bridge function (timers, `alert`, `location`, ...) to
+desugar it to.
 
-`ArtSetOnClick(node, handler)` registers a click handler - `handler` isn't
-a call, just a bare reference to a top-level `function ...(): void`
-(`void` return - the only function-pointer-shaped value ART has, written
-as a type like `() => void`). Passing a function by name this way needs
-no closures or heap boxing the way a real callback usually would: ART
-functions can't capture outer variables in the first place, so the
-reference is just that function's own compiled address, handed straight
-to `Node::SetOnClick` as a plain C function pointer - contrast Go's
-`ArtisanNodeSetOnClick`, which has to carry a `uintptr_t` handle through a
-Go-side registry (`cgo.Handle`) instead, since a Go closure can't produce
-a raw callable address like this.
+`node.addEventListener(eventType, handler, capture)` registers an event
+listener - any type (`"click"`, `"keydown"`, `"change"`, `"input"`, ...),
+and it *stacks*: registering a second listener for the same node/type
+doesn't replace the first, both run (`Node::AddEventListener`, same as
+real `addEventListener` - there's no separate single-handler "onclick"-
+style method, matching how a real browser's own `addEventListener` is
+the modern, preferred way to do this over the legacy `el.onclick = fn`
+property). `handler` isn't a call, just a bare reference to a top-level
+`function ...(event: Event): void` (`void` return - the only
+function-pointer-shaped value ART has, written as a type like `(event:
+Event) => void`), checked structurally like any other type (a mismatched
+parameter list is a compile error, not a silent bug). Passing a function
+by name this way needs no closures or heap boxing the way a real
+callback usually would: ART functions can't capture outer variables in
+the first place, so the reference is just that function's own compiled
+address, handed straight to `Node::AddEventListener` as a plain C
+function pointer - contrast Go's `ArtisanNodeAddEventListener`, which has
+to carry a `uintptr_t` handle through a Go-side registry (`cgo.Handle`)
+instead, since a Go closure can't produce a raw callable address like
+this. `Event` is another opaque foreign type, read through its own
+methods: `.eventType()` (named that, not `.type()` - `type` is a
+reserved word, used by `declare type`), `.target()` (a `Node`),
+`ArtEventDetail<T>` (a free function, not a method - see
+`ArtDispatchEvent<T>` below for why), `.bubbles()`/`.cancelable()`,
+`.preventDefault()`/`.defaultPrevented()`,
+`.stopPropagation()`/`.stopImmediatePropagation()` (the latter also
+implies the former - stopping "immediately" means neither any remaining
+listener at the current node nor any further ancestor gets a turn, so
+e.g. a second `addEventListener` on the *same* node/type never runs, not
+just an ancestor's - same as real DOM), and the MouseEvent/KeyboardEvent
+data (`.clientX()`/`.clientY()`,
+`.ctrlKey()`/`.shiftKey()`/`.altKey()`/`.metaKey()`, `.key()`/`.code()`).
+Neither stop method has a corresponding getter (no
+`.propagationStopped()`/`.immediatePropagationStopped()`) - matching real
+DOM's own API, which doesn't expose "was propagation already stopped"
+back to script either, only the action.
 
-`ArtAddEventListener(node, eventType, handler, capture)` is the general
-form - any event type (`"keydown"`, `"change"`, `"input"`, ...), and
-unlike `ArtSetOnClick` it *stacks*: registering a second listener for the
-same node/type doesn't replace the first, both run (`Node::AddEventListener`,
-same as real `addEventListener`). Its `handler` takes the `Event` itself
-as one parameter - `(event: Event) => void` rather than `() => void` -
-which is why the handler type isn't fixed to zero arguments: `handler`'s
-matching a function's actual parameter list, checked structurally the
-same way any other type is (a `() => void` where a `(event: Event) =>
-void` is expected, or vice versa, is a compile error, not a silent
-mismatch). `Event` is another opaque foreign type (`declare type Event;`),
-read through its own curated `declare function`s: `ArtEventType`,
-`ArtEventTarget` (a `Node`), `ArtEventDetail<T>` (see `ArtDispatchEvent<T>`
-below), `ArtEventBubbles`/`ArtEventCancelable`,
-`ArtEventPreventDefault`/`ArtEventDefaultPrevented`,
-`ArtEventStopPropagation`/`ArtEventStopImmediatePropagation` (the latter
-also implies the former - stopping "immediately" means neither any
-remaining listener at the current node nor any further ancestor gets a
-turn, so e.g. a second `ArtAddEventListener` on the *same* node/type
-never runs, not just an ancestor's - same as real DOM), and the
-MouseEvent/KeyboardEvent data (`ArtEventClientX`/`ArtEventClientY`,
-`ArtEventCtrlKey`/`ArtEventShiftKey`/`ArtEventAltKey`/`ArtEventMetaKey`,
-`ArtEventKey`/`ArtEventCode`) - all copied into every scaffolded
-`app.art`. Neither stop function has a corresponding getter (no
-`ArtEventPropagationStopped`/`ArtEventImmediatePropagationStopped`) -
-matching real DOM's own API, which doesn't expose "was propagation
-already stopped" back to script either, only the action.
-
-`ArtRemoveEventListener(node, eventType, handler, capture)` removes every
-listener matching all four exactly - a mismatched call (wrong handler,
+`node.removeEventListener(eventType, handler, capture)` removes every
+listener matching all three exactly - a mismatched call (wrong handler,
 wrong `capture`, or one never added at all) is a safe no-op, same as real
 `removeEventListener`. `Node::RemoveEventListener` has no built-in notion
 of "the same handler" (`EventHandler` is a type-erased `std::function`,
@@ -342,7 +358,7 @@ not comparable on its own) - it takes a predicate instead, and
 mechanism `node_c_api.cpp`'s Go path (`GoCallback`) and `js_engine.cpp`'s
 JS path (`JsCallback`) already use for the same reason, just recovering a
 named wrapper class around ART's raw function pointer instead of a Go
-handle or a JS closure - `ArtAddEventListener` above stores one of these
+handle or a JS closure - `addEventListener` above stores one of these
 (not a bare lambda, which has no nameable type to recover later)
 specifically so removal can find it again.
 
@@ -352,10 +368,10 @@ react to events something else fires), this actually fires one, any type
 at all, not just the built-in click/change/input this Node model already
 knows to fire (`Node::DispatchEvent`, same signature/semantics: the usual
 capturing/target/bubbling walk, returning `false` if the event was
-cancelable and some listener called `ArtEventPreventDefault`). `T` is
+cancelable and some listener called `event.preventDefault()`). `T` is
 where a real `CustomEvent`'s `detail` payload's type comes in - see
 "Generic functions" below for the language feature itself; the short
-version is `ArtDispatchEvent::<number>(node, "scored", true, true, 10)`
+version is `ArtDispatchEvent::<number>(document, "scored", true, true, 10)`
 and, in a listener on an event ART itself dispatched, `let n: number =
 ArtEventDetail::<number>(event);` reads it back, both real, separately
 compiled functions (`art_bridge.h`'s `ArtDispatchEvent$number`/
@@ -375,7 +391,7 @@ same "each binding (now, each `T`) owns its own interpretation" contract
 `detail` always had. `ArtEventDetail<T>` on an event with no detail at
 all (a plain internally-fired click/change/input) reads back as `""`/
 `false`/`0` depending on `T`, the same "can't represent null" convention
-`ArtGetAttribute` already uses for an unset attribute.
+`.getAttribute()` already uses for an unset attribute.
 
 ### Generic functions
 
@@ -570,12 +586,12 @@ declare function ArtFindById(root: Node, id: string): Node;
 declare function ArtIsNull(node: Node): boolean;
 
 declare class Node {
-  function findById(id: string): Node { return ArtFindById(this, id); }
+  function getElementById(id: string): Node { return ArtFindById(this, id); }
   function isNull(): boolean { return ArtIsNull(this); }
 }
 
-function setupApp(document: Node): void {
-  let button: Node = document.findById("my-button");
+function setupApp(): void {
+  let button: Node = document.getElementById("my-button");
   if (!button.isNull()) {
     // ...
   }
@@ -616,9 +632,9 @@ array/interface global, whose value is a `malloc`'d heap allocation, not
 a compile-time constant. This also means a global can only be `number`/
 `boolean`/`string` - no `Node`, array, or interface globals - so a
 handler still can't stash a `Node` it found earlier in one directly; it
-calls `ArtDocument()`/`ArtFindById` again instead (cheap - both are
-simple pointer lookups, not a real query), the same way it would reach
-the DOM at all in the first place.
+calls `document.getElementById(...)` (or the ambient `document` itself)
+again instead (cheap - both are simple pointer lookups, not a real
+query), the same way it would reach the DOM at all in the first place.
 
 `numberToString(n: number): string` - a real built-in, not a
 `declare function` (it needs no C++ counterpart in a project's own code,

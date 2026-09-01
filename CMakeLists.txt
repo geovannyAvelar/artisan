@@ -241,10 +241,18 @@ set(GENERATED_SETUP_APP_STUB_CPP "${CMAKE_BINARY_DIR}/generated_setup_app_stub.c
 
 if(NOT ARTISAN_APP_GO_SOURCE)
     if(ARTISAN_APP_ART_SOURCE)
+        # setupApp takes no parameter of its own - main.cpp already calls
+        # SetArtDocumentContext(document.get()) before ArtisanSetupApp
+        # runs (see its own navigate() lambda), so ART's ambient
+        # `document` identifier (sugar for ArtDocument() - see
+        # art/sema.cpp's kAmbientGlobals) already resolves correctly
+        # inside setupApp, the same way it does in any other handler -
+        # no separate parameter-threading mechanism needed just for this
+        # one function.
         file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
             "#include \"node_c_api.h\"\n"
-            "extern \"C\" void setupApp(void *document);\n"
-            "extern \"C\" void ArtisanSetupApp(ArtisanNode *document) { setupApp(document); }\n")
+            "extern \"C\" void setupApp(void);\n"
+            "extern \"C\" void ArtisanSetupApp(ArtisanNode *) { setupApp(); }\n")
     else()
         file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
             "#include \"node_c_api.h\"\n"

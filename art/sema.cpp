@@ -1,9 +1,28 @@
 #include "sema.h"
 
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ART {
+
+namespace {
+// Bare identifiers that are pure call-site sugar for a zero-arg function
+// call, e.g. `document` for `ArtDocument()` - see CheckExpr's Identifier
+// case for how this is actually applied (rewriting the Expr in place) and
+// its own doc comment for the precedence rule (a real local/global always
+// shadows this). Every entry's backing function still has to be declared
+// by the project itself (this table doesn't declare anything on its
+// own) - unlike a true builtin (e.g. numberToString), `ArtDocument` isn't
+// self-contained: it depends on the project's own `Node`/`declare
+// function ArtDocument` and the artisan runtime's C++ symbol behind it.
+// `window` isn't included here yet - nothing in the DOM bridge is
+// window-level (no timers/alerts/location/... exposed to ART yet), so
+// there's nothing to desugar it to.
+const std::unordered_map<std::string, std::string> kAmbientGlobals = {
+    {"document", "ArtDocument"},
+};
+}
 
 void Sema::Error(SourceLoc loc, const std::string &message) {
   std::ostringstream oss;
@@ -659,6 +678,30 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
                             "' can't be used as a value - only a fully-instantiated call is supported "
                             "('" + expr->name + "::<Type>(...)')");
       actual = ResolvedType{};
+    } else if (auto ambient = kAmbientGlobals.find(expr->name);
+               ambient != kAmbientGlobals.end() && functions.count(ambient->second) &&
+               IsVisible(ambient->second)) {
+      // `document` (see kAmbientGlobals) isn't a real variable or a
+      // declared function of its own - it's pure sugar for a call to its
+      // backing zero-arg function (ArtDocument), rewritten in place right
+      // here so Codegen never needs to know this identifier is anything
+      // special: an ExprKind::Call with no arguments is exactly what a
+      // literal `ArtDocument()` in source would already produce. Only
+      // fires once every other, more specific meaning of the bare name
+      // (a real local/global variable, an ordinary or generic function
+      // used as a value) has already been ruled out above - a project
+      // that genuinely declares its own `document` shadows this sugar,
+      // same precedence a real local always has over anything ambient.
+      FunctionDecl *backing = functions.at(ambient->second);
+      if (!backing->params.empty()) {
+        Error(expr->loc, "'" + ambient->second + "' backs the ambient '" + expr->name +
+                              "' and must take no parameters");
+        actual = ResolvedType{};
+      } else {
+        expr->kind = ExprKind::Call;
+        expr->resolvedCalleeName = ambient->second;
+        actual = backing->resolvedReturnType;
+      }
     } else {
       Error(expr->loc, "undefined identifier '" + expr->name + "'" + VisibilityHint(expr->name));
       actual = ResolvedType{};

@@ -427,14 +427,17 @@ void SetupApp(Node &document) {
 // art_bridge.h for the full `declare`-able DOM API and README.md's "Using
 // ART" section. Unlike the Go/C++ templates, there's no boilerplate
 // trampoline to write by hand - the artisan build itself adapts a plain
-// `function setupApp(document: Node): void` into ArtisanSetupApp.
+// `function setupApp(): void` into ArtisanSetupApp.
 constexpr const char *kAppArtTemplate = R"art(// The raw FFI surface - each a real C++ symbol in artisan's own runtime
 // (see art_bridge.h). Nothing below needs to call these directly, though:
 // `declare class Node`/`declare class Event` further down wrap them into
-// ordinary method calls (`node.findById(id)` instead of
+// ordinary method calls (`node.getElementById(id)` instead of
 // `ArtFindById(node, id)`) - see README.md's "Using ART" section for how
 // that sugar works (it's pure call-site desugaring, no vtable/dynamic
-// dispatch involved).
+// dispatch involved). `ArtDocument` specifically is also never called
+// directly below either - the bare identifier `document` is sugar for
+// exactly that call (see README.md), the same way a real browser's
+// `document` is always just there, no lookup of your own required.
 declare function ArtDocument(): Node;
 declare function ArtFindById(root: Node, id: string): Node;
 declare function ArtIsNull(node: Node): boolean;
@@ -446,7 +449,6 @@ declare function ArtSetAttribute(node: Node, name: string, value: string): void;
 declare function ArtQuerySelector(root: Node, selector: string): Node;
 declare function ArtChildCount(node: Node): number;
 declare function ArtChildAt(node: Node, index: number): Node;
-declare function ArtSetOnClick(node: Node, handler: () => void): void;
 declare function ArtAddEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
 declare function ArtRemoveEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
 // Fires your own event (any type, not just built-in ones) at a node,
@@ -461,7 +463,7 @@ declare function ArtRemoveEventListener(node: Node, eventType: string, handler: 
 // was cancelable and some listener called event.preventDefault().
 // Generic, so - unlike everything else here - it can't be wrapped as a
 // class method yet (methods can't be generic - see README.md); called
-// directly, e.g. `ArtDispatchEvent::<string>(ArtDocument(), "saved", true, true, "ok")`.
+// directly, e.g. `ArtDispatchEvent::<string>(document, "saved", true, true, "ok")`.
 declare function ArtDispatchEvent<T>(node: Node, eventType: string, bubbles: boolean, cancelable: boolean, detail: T): boolean;
 declare function ArtEventType(event: Event): string;
 declare function ArtEventTarget(event: Event): Node;
@@ -485,10 +487,14 @@ declare function ArtEventCode(event: Event): string;
 
 // A DOM handle - opaque (no accessible fields, same as `declare type`),
 // but its methods are real ART code, each a thin wrapper over the
-// matching Art* function above. `node.findById(id)` compiles to exactly
-// `ArtFindById(node, id)` - no runtime cost, just nicer to read/write.
+// matching Art* function above. `node.getElementById(id)` compiles to
+// exactly `ArtFindById(node, id)` - no runtime cost, just nicer to
+// read/write, and named/shaped to match a real browser's own DOM API as
+// closely as ART's lack of getter/property syntax allows (methods
+// everywhere a browser would use a plain property - `event.key()`
+// instead of `event.key`, etc.).
 declare class Node {
-  function findById(id: string): Node { return ArtFindById(this, id); }
+  function getElementById(id: string): Node { return ArtFindById(this, id); }
   function isNull(): boolean { return ArtIsNull(this); }
   function getTextContent(): string { return ArtGetTextContent(this); }
   function setTextContent(text: string): void { ArtSetTextContent(this, text); }
@@ -498,11 +504,13 @@ declare class Node {
   function querySelector(selector: string): Node { return ArtQuerySelector(this, selector); }
   function childCount(): number { return ArtChildCount(this); }
   function childAt(index: number): Node { return ArtChildAt(this, index); }
-  function setOnClick(handler: () => void): void { ArtSetOnClick(this, handler); }
-  // Unlike setOnClick above, this stacks (multiple listeners on the same
-  // node/type all run) rather than replacing, and the handler receives
-  // the Event itself - see the Event class below for what you can
-  // read/call on it.
+  // Stacks (multiple listeners on the same node/type all run) rather
+  // than replacing, and the handler receives the Event itself - see the
+  // Event class below for what you can read/call on it. This is the
+  // only way to register a click (or any other) listener - there's no
+  // separate "onclick"-style single-handler method, same as a real
+  // browser's own addEventListener is the modern, preferred way to do
+  // this over the legacy `el.onclick = fn` property.
   function addEventListener(eventType: string, handler: (event: Event) => void, capture: boolean): void {
     ArtAddEventListener(this, eventType, handler, capture);
   }
@@ -541,38 +549,36 @@ declare class Event {
 // README.md's "Using ART" section for why).
 let clickCount: number = 0;
 
-// A click handler is just a plain zero-argument, void-returning function -
-// pass its bare name (not a call) to node.setOnClick() below. It gets no
-// Node of its own (unlike setupApp), so it reaches the DOM through
-// ArtDocument() instead, e.g.:
+// Every node.addEventListener handler - click included, since there's no
+// separate zero-argument "onclick"-style listener kind - takes the Event
+// itself as its one parameter (unused here, but still required by the
+// (event: Event) => void shape addEventListener expects). It gets no
+// Node of its own (unlike setupApp), so it reaches the DOM through the
+// ambient `document` instead, e.g.:
 //
-//   let root: Node = ArtDocument();
-//   if (!root.isNull()) {
-//     let label: Node = root.findById("my-label");
+//   let label: Node = document.getElementById("my-label");
+//   if (!label.isNull()) {
 //     ...
 //   }
-function onButtonClick(): void {
+//
+// Pass a handler's bare name (not a call) to addEventListener, e.g.
+// `input.addEventListener("keydown", onKeyDown, false)`.
+function onButtonClick(event: Event): void {
   clickCount++;
   // Your click-time code goes here, e.g. showing the new count:
   //
-  //   let root: Node = ArtDocument();
-  //   if (!root.isNull()) {
-  //     let label: Node = root.findById("my-label");
-  //     if (!label.isNull()) {
-  //       label.setTextContent(numberToString(clickCount) + " clicks");
-  //     }
+  //   let label: Node = document.getElementById("my-label");
+  //   if (!label.isNull()) {
+  //     label.setTextContent(numberToString(clickCount) + " clicks");
   //   }
 }
 
-// A node.addEventListener handler takes the Event itself as its one
-// parameter - register it the same way, by bare name, e.g.
-// `input.addEventListener("keydown", onKeyDown, false)`.
 function onKeyDown(event: Event): void {
   // Your key-press code goes here, e.g.:
   //
   //   if (event.key() == "Enter") {
   //     event.preventDefault();
-  //     ArtDispatchEvent::<string>(ArtDocument(), "form-submitted", true, true, "ok");
+  //     ArtDispatchEvent::<string>(document, "form-submitted", true, true, "ok");
   //   }
 }
 
@@ -583,12 +589,12 @@ function onFormSubmitted(event: Event): void {
   let payload: string = ArtEventDetail::<string>(event); // "ok", from the dispatch above
 }
 
-function setupApp(document: Node): void {
+function setupApp(): void {
   // Your native startup code goes here, e.g.:
   //
-  //   let button: Node = document.findById("my-button");
+  //   let button: Node = document.getElementById("my-button");
   //   if (!button.isNull()) {
-  //     button.setOnClick(onButtonClick);
+  //     button.addEventListener("click", onButtonClick, false);
   //   }
 }
 )art";
