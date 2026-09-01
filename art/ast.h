@@ -114,6 +114,7 @@ struct Expr {
   std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields; // ObjectLiteral
 
   bool isLengthAccess = false; // Member: true when field is the built-in `.length` on an array/string
+  bool isPostfix = false; // IncDec: `x++`/`x--` (evaluates to the OLD value) vs `++x`/`--x` (the NEW value)
 
   // Call to a generic function, e.g. `identity::<number>(5)` - the
   // explicit turbofish type argument list (never inferred - see

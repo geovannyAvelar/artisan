@@ -477,8 +477,13 @@ handler type described above (`(p0: T0, p1: T1, ...) => void`, structural
 like everything else - parameter names are decorative, only the types and
 their order are checked), and generic functions (`function`/`declare
 function` only, monomorphized, explicit `::<T>` instantiation only - see
-"Generic functions" above); prefix `++`/`--` only (no postfix). No
-classes, real closures, generic interfaces/types, `any`, union types, or
+"Generic functions" above); both prefix (`++x`/`--x`, evaluates to the
+new value) and postfix (`x++`/`x--`, evaluates to the old value) forms of
+increment/decrement, on the same targets assignment already allows (a
+plain variable, an array element, or a struct field) - real TS's
+chaining rules apply here too (`x++.foo`/`x++()` aren't expressions;
+postfix always ends the expression it's attached to). No classes, real
+closures, generic interfaces/types, `any`, union types, or
 garbage collector - every array/object/string is a heap allocation
 (`malloc`) that's never freed, matching this whole framework's "native,
 ahead-of-time, no runtime" philosophy rather than the rest of a real

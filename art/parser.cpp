@@ -536,6 +536,21 @@ std::unique_ptr<Expr> Parser::ParsePostfix() {
       member->lhs = std::move(expr);
       member->name = field;
       expr = std::move(member);
+    } else if (Check(TokenKind::PlusPlus) || Check(TokenKind::MinusMinus)) {
+      // Postfix `x++`/`x--` - evaluates to the OLD value (contrast prefix
+      // `++x`/`--x` in ParseUnary, which evaluates to the new one). Binds
+      // to the fully-built postfix chain so far (`arr[i]++`, `obj.f++`,
+      // ...), and - matching real C/TS/JS - is terminal: nothing chains
+      // after it (`x++.foo`/`x++()` aren't expressions here either).
+      SourceLoc loc = Cur().loc;
+      std::string op = Cur().text;
+      pos++;
+      auto incdec = MakeExpr(ExprKind::IncDec, loc);
+      incdec->op = op;
+      incdec->isPostfix = true;
+      incdec->operand = std::move(expr);
+      expr = std::move(incdec);
+      break;
     } else {
       break;
     }

@@ -720,7 +720,9 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     llvm::Value *one = llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), 1.0);
     llvm::Value *updated = expr->op == "++" ? builder.CreateFAdd(cur, one) : builder.CreateFSub(cur, one);
     builder.CreateStore(updated, lv.addr);
-    return updated;
+    // Prefix (`++x`) evaluates to the new, just-stored value; postfix
+    // (`x++`) evaluates to whatever was there before the update.
+    return expr->isPostfix ? cur : updated;
   }
 
   case ExprKind::Call: {

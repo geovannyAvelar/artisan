@@ -500,7 +500,7 @@ let clickCount: number = 0;
 //     ...
 //   }
 function onButtonClick(): void {
-  clickCount = clickCount + 1;
+  clickCount++;
   // Your click-time code goes here, e.g. showing the new count:
   //
   //   let root: Node = ArtDocument();

@@ -67,6 +67,7 @@ std::unique_ptr<Expr> CloneExpr(const Expr &expr) {
   out->name = expr.name;
   out->op = expr.op;
   out->isLengthAccess = expr.isLengthAccess;
+  out->isPostfix = expr.isPostfix;
 
   if (expr.lhs) out->lhs = CloneExpr(*expr.lhs);
   if (expr.rhs) out->rhs = CloneExpr(*expr.rhs);
