@@ -54,7 +54,14 @@ struct Color {
 // these for that one item alone.
 enum class DisplayMode { kBlock, kFlex, kGrid };
 enum class FlexDirection { kRow, kColumn };
-enum class JustifyContent { kFlexStart, kCenter, kFlexEnd, kSpaceBetween };
+enum class JustifyContent {
+  kFlexStart,
+  kCenter,
+  kFlexEnd,
+  kSpaceBetween,
+  kSpaceAround,
+  kSpaceEvenly,
+};
 enum class AlignItems { kFlexStart, kCenter, kFlexEnd, kStretch };
 // Real CSS's default for align-content is `stretch` (see AlignContent's
 // use on Widget below for why it's fine for this enum's own default to
@@ -65,6 +72,7 @@ enum class AlignContent {
   kFlexEnd,
   kSpaceBetween,
   kSpaceAround,
+  kSpaceEvenly,
   kStretch,
 };
 enum class FlexWrap { kNowrap, kWrap };

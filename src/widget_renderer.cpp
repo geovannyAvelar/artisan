@@ -395,6 +395,18 @@ FlexLineResult LayoutFlexLine(const Widget &widget, LayoutState &state, bool isR
         betweenGap = gap + freeSpace / static_cast<float>(n - 1);
       }
       break;
+    case JustifyContent::kSpaceAround: {
+      float perItemGap = freeSpace / static_cast<float>(n);
+      leadingOffset = perItemGap / 2.0f;
+      betweenGap = gap + perItemGap;
+      break;
+    }
+    case JustifyContent::kSpaceEvenly: {
+      float perGap = freeSpace / static_cast<float>(n + 1);
+      leadingOffset = perGap;
+      betweenGap = gap + perGap;
+      break;
+    }
     }
   }
 
@@ -681,6 +693,12 @@ void RenderFlexContainer(const Widget &widget, LayoutState &state) {
       case AlignContent::kSpaceAround: {
         float perLineGap = extraCrossSpace / static_cast<float>(lines.size());
         leadingCross = perLineGap / 2.0f;
+        betweenCrossGap = widget.gap + perLineGap;
+        break;
+      }
+      case AlignContent::kSpaceEvenly: {
+        float perLineGap = extraCrossSpace / static_cast<float>(lines.size() + 1);
+        leadingCross = perLineGap;
         betweenCrossGap = widget.gap + perLineGap;
         break;
       }
@@ -1169,6 +1187,18 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
         columnGap = columnGapValue + columnFreeSpace / static_cast<float>(columnCount - 1);
       }
       break;
+    case JustifyContent::kSpaceAround: {
+      float perColumnGap = columnFreeSpace / static_cast<float>(columnCount);
+      columnLeading = perColumnGap / 2.0f;
+      columnGap = columnGapValue + perColumnGap;
+      break;
+    }
+    case JustifyContent::kSpaceEvenly: {
+      float perColumnGap = columnFreeSpace / static_cast<float>(columnCount + 1);
+      columnLeading = perColumnGap;
+      columnGap = columnGapValue + perColumnGap;
+      break;
+    }
     }
   }
   std::vector<float> columnX(columnCount);
@@ -1310,6 +1340,12 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     case AlignContent::kSpaceAround: {
       float perRowGap = rowFreeSpace / static_cast<float>(rowCount);
       rowLeading = perRowGap / 2.0f;
+      rowGap = rowGapValue + perRowGap;
+      break;
+    }
+    case AlignContent::kSpaceEvenly: {
+      float perRowGap = rowFreeSpace / static_cast<float>(rowCount + 1);
+      rowLeading = perRowGap;
       rowGap = rowGapValue + perRowGap;
       break;
     }

@@ -1038,19 +1038,30 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.flexDirection = FlexDirection::kColumn;
       }
     } else if (property == "justify-content") {
+      // flex-start/flex-end and start/end are accepted as the same pair
+      // of spellings align-items already does just below, for the same
+      // reason (no writing-mode distinction here for either flexbox or
+      // grid, so they're behaviorally identical regardless of which
+      // layout mode ends up active).
       std::string lower = ToLower(value);
-      if (lower == "flex-start") {
+      if (lower == "flex-start" || lower == "start") {
         decl.hasJustifyContent = true;
         decl.justifyContent = JustifyContent::kFlexStart;
       } else if (lower == "center") {
         decl.hasJustifyContent = true;
         decl.justifyContent = JustifyContent::kCenter;
-      } else if (lower == "flex-end") {
+      } else if (lower == "flex-end" || lower == "end") {
         decl.hasJustifyContent = true;
         decl.justifyContent = JustifyContent::kFlexEnd;
       } else if (lower == "space-between") {
         decl.hasJustifyContent = true;
         decl.justifyContent = JustifyContent::kSpaceBetween;
+      } else if (lower == "space-around") {
+        decl.hasJustifyContent = true;
+        decl.justifyContent = JustifyContent::kSpaceAround;
+      } else if (lower == "space-evenly") {
+        decl.hasJustifyContent = true;
+        decl.justifyContent = JustifyContent::kSpaceEvenly;
       }
     } else if (property == "align-items") {
       // Genuinely the same property for both flexbox and CSS Grid in
@@ -1140,14 +1151,17 @@ Declarations ParseDeclarations(const std::string &body) {
         decl.alignSelf = AlignItems::kStretch;
       }
     } else if (property == "align-content") {
+      // flex-start/flex-end and start/end - same accepted-spelling pair
+      // justify-content above and align-items just above that already
+      // have, for the same reason.
       std::string lower = ToLower(value);
-      if (lower == "flex-start") {
+      if (lower == "flex-start" || lower == "start") {
         decl.hasAlignContent = true;
         decl.alignContent = AlignContent::kFlexStart;
       } else if (lower == "center") {
         decl.hasAlignContent = true;
         decl.alignContent = AlignContent::kCenter;
-      } else if (lower == "flex-end") {
+      } else if (lower == "flex-end" || lower == "end") {
         decl.hasAlignContent = true;
         decl.alignContent = AlignContent::kFlexEnd;
       } else if (lower == "space-between") {
@@ -1156,6 +1170,9 @@ Declarations ParseDeclarations(const std::string &body) {
       } else if (lower == "space-around") {
         decl.hasAlignContent = true;
         decl.alignContent = AlignContent::kSpaceAround;
+      } else if (lower == "space-evenly") {
+        decl.hasAlignContent = true;
+        decl.alignContent = AlignContent::kSpaceEvenly;
       } else if (lower == "stretch") {
         decl.hasAlignContent = true;
         decl.alignContent = AlignContent::kStretch;
