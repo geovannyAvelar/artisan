@@ -74,6 +74,10 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.justifyItems = style.justifyItems;
   widget.alignContent = style.alignContent;
   widget.gap = style.gap;
+  widget.hasColumnGap = style.hasColumnGap;
+  widget.columnGap = style.columnGap;
+  widget.hasRowGap = style.hasRowGap;
+  widget.rowGap = style.rowGap;
   widget.flexWrap = style.flexWrap;
   widget.flexGrow = style.flexGrow;
   widget.flexShrink = style.flexShrink;

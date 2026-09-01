@@ -338,6 +338,17 @@ struct Widget {
   // align-content now does anything different.
   AlignContent alignContent = AlignContent::kFlexStart;
   float gap = 0.0f;
+  // column-gap/row-gap - CSS Grid only (RenderGridContainer); flexbox
+  // always uses gap above for both axes, real CSS's own row-gap/
+  // column-gap on a flex container isn't supported. When unset (hasXxx
+  // false), a grid container's column gaps / row gaps fall back to the
+  // plain gap value above exactly as if this property were never set -
+  // same "explicit per-axis override, auto falls back to the shared
+  // default" contract hasJustifySelf/justifySelf already established.
+  bool hasColumnGap = false;
+  float columnGap = 0.0f;
+  bool hasRowGap = false;
+  float rowGap = 0.0f;
   FlexWrap flexWrap = FlexWrap::kNowrap;
 
   // Flex *item* properties - meaningful when this Widget is someone

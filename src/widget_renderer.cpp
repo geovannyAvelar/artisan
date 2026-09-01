@@ -861,6 +861,13 @@ float ClampToMinMaxFloor(const GridTrack &track, float resolved) {
 // per-item override - group-level track distribution has no equivalent
 // "just this one item" concept in real CSS either.
 //
+// Gap: widget.gap applies between both columns and rows by default;
+// widget.hasColumnGap/hasRowGap (column-gap/row-gap - grid only, see
+// Widget::columnGap/rowGap, widget.h) each independently override it for
+// just that one axis when set, falling back to widget.gap when unset -
+// see columnGapValue/rowGapValue just below, which every gap use in this
+// function reads instead of widget.gap directly.
+//
 // Subgrid: an item that's itself display:grid with grid-template-
 // columns: subgrid doesn't resolve its own column tracks at all - it
 // adopts the exact slice of *this* container's own columnWidths its
@@ -880,6 +887,13 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   }
 
   bool hasAreas = !widget.gridTemplateAreas.empty();
+
+  // column-gap/row-gap override the shared gap on their own axis when
+  // set - see Widget::columnGap/rowGap (widget.h) for the "falls back to
+  // gap when unset" contract. Every gap use below (column tracks/cells,
+  // row tracks/cells) reads one of these instead of widget.gap directly.
+  float columnGapValue = widget.hasColumnGap ? widget.columnGap : widget.gap;
+  float rowGapValue = widget.hasRowGap ? widget.rowGap : widget.gap;
 
   // Column/row count: from the area template's own shape when one's
   // set (every row is assumed the same length as the first - see
@@ -1030,7 +1044,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // single-full-width-column behavior is just this formula's
   // columnCount == 1 case), or an area template implies a column count
   // it doesn't match.
-  float totalColumnGap = static_cast<float>(columnCount - 1) * widget.gap;
+  float totalColumnGap = static_cast<float>(columnCount - 1) * columnGapValue;
   std::vector<float> columnWidths(columnCount);
   if (isColumnSubgrid) {
     // columnCount == subgridColumnWidths.size() exactly here (the
@@ -1117,7 +1131,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   }
   float columnFreeSpace = std::max(0.0f, state.maxWidth - totalColumnWidth);
   float columnLeading = 0.0f;
-  float columnGap = widget.gap;
+  float columnGap = columnGapValue;
   if (columnFreeSpace > 0.0f) {
     switch (widget.justifyContent) {
     case JustifyContent::kFlexStart:
@@ -1130,7 +1144,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       break;
     case JustifyContent::kSpaceBetween:
       if (columnCount > 1) {
-        columnGap = widget.gap + columnFreeSpace / static_cast<float>(columnCount - 1);
+        columnGap = columnGapValue + columnFreeSpace / static_cast<float>(columnCount - 1);
       }
       break;
     }
@@ -1164,7 +1178,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     for (int c = p.col; c < p.col + p.colSpan; ++c) {
       cellWidth += columnWidths[c];
     }
-    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
+    cellWidth += static_cast<float>(p.colSpan - 1) * columnGapValue;
     if (effectiveJustifyItems == AlignItems::kStretch) {
       itemWidth[i] = cellWidth;
     } else {
@@ -1228,7 +1242,7 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     }
     float needed = MeasureItemHeightAt(widget.children[i], state.renderer, itemWidth[i]);
 
-    float available = static_cast<float>(p.rowSpan - 1) * widget.gap;
+    float available = static_cast<float>(p.rowSpan - 1) * rowGapValue;
     for (int r = p.row; r < p.row + p.rowSpan; ++r) {
       available += rowHeights[r];
     }
@@ -1248,14 +1262,14 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   // cellHeight, so a stretched row correctly grows any align-items:
   // stretch item placed in it too, the same way an explicit
   // grid-template-rows track already does.
-  float totalRowHeight = static_cast<float>(rowCount - 1) * widget.gap;
+  float totalRowHeight = static_cast<float>(rowCount - 1) * rowGapValue;
   for (float h : rowHeights) {
     totalRowHeight += h;
   }
   float rowFreeSpace =
       widget.hasHeight ? std::max(0.0f, widget.height - totalRowHeight) : 0.0f;
   float rowLeading = 0.0f;
-  float rowGap = widget.gap;
+  float rowGap = rowGapValue;
   if (rowFreeSpace > 0.0f) {
     switch (widget.alignContent) {
     case AlignContent::kFlexStart:
@@ -1268,13 +1282,13 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       break;
     case AlignContent::kSpaceBetween:
       if (rowCount > 1) {
-        rowGap = widget.gap + rowFreeSpace / static_cast<float>(rowCount - 1);
+        rowGap = rowGapValue + rowFreeSpace / static_cast<float>(rowCount - 1);
       }
       break;
     case AlignContent::kSpaceAround: {
       float perRowGap = rowFreeSpace / static_cast<float>(rowCount);
       rowLeading = perRowGap / 2.0f;
-      rowGap = widget.gap + perRowGap;
+      rowGap = rowGapValue + perRowGap;
       break;
     }
     case AlignContent::kStretch: {
@@ -1305,13 +1319,13 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
     for (int c = p.col; c < p.col + p.colSpan; ++c) {
       cellWidth += columnWidths[c];
     }
-    cellWidth += static_cast<float>(p.colSpan - 1) * widget.gap;
+    cellWidth += static_cast<float>(p.colSpan - 1) * columnGapValue;
 
     float cellHeight = 0.0f;
     for (int r = p.row; r < p.row + p.rowSpan; ++r) {
       cellHeight += rowHeights[r];
     }
-    cellHeight += static_cast<float>(p.rowSpan - 1) * widget.gap;
+    cellHeight += static_cast<float>(p.rowSpan - 1) * rowGapValue;
 
     // Stretch (the default, and this bounded subset's only behavior
     // before justify-items/align-items existed) fills the item's own

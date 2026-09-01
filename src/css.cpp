@@ -1080,6 +1080,10 @@ Declarations ParseDeclarations(const std::string &body) {
       }
     } else if (property == "gap") {
       decl.hasGap = ParsePixelLength(value, decl.gap);
+    } else if (property == "column-gap") {
+      decl.hasColumnGap = ParsePixelLength(value, decl.columnGap);
+    } else if (property == "row-gap") {
+      decl.hasRowGap = ParsePixelLength(value, decl.rowGap);
     } else if (property == "flex-wrap") {
       std::string lower = ToLower(value);
       if (lower == "nowrap") {
@@ -1698,6 +1702,14 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
     declarations.hasGap = true;
     declarations.gap = inlineStyle.gap;
   }
+  if (inlineStyle.hasColumnGap) {
+    declarations.hasColumnGap = true;
+    declarations.columnGap = inlineStyle.columnGap;
+  }
+  if (inlineStyle.hasRowGap) {
+    declarations.hasRowGap = true;
+    declarations.rowGap = inlineStyle.rowGap;
+  }
   if (inlineStyle.hasFlexWrap) {
     declarations.hasFlexWrap = true;
     declarations.flexWrap = inlineStyle.flexWrap;
@@ -1880,6 +1892,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
   PropertyWinner paddingTopWin, paddingRightWin, paddingBottomWin, paddingLeftWin;
   PropertyWinner marginTopWin, marginRightWin, marginBottomWin, marginLeftWin;
   PropertyWinner displayWin, flexDirectionWin, justifyContentWin, alignItemsWin, gapWin;
+  PropertyWinner columnGapWin, rowGapWin;
   PropertyWinner justifyItemsWin;
   PropertyWinner alignContentWin;
   PropertyWinner flexWrapWin, flexGrowWin, flexShrinkWin, flexBasisWin;
@@ -2023,6 +2036,16 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
     if (rule.declarations.hasGap && gapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGap = true;
       own.gap = rule.declarations.gap;
+    }
+    if (rule.declarations.hasColumnGap &&
+        columnGapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasColumnGap = true;
+      own.columnGap = rule.declarations.columnGap;
+    }
+    if (rule.declarations.hasRowGap &&
+        rowGapWin.ShouldTake(matchedSpecificity, ruleIndex)) {
+      own.hasRowGap = true;
+      own.rowGap = rule.declarations.rowGap;
     }
     if (rule.declarations.hasFlexWrap &&
         flexWrapWin.ShouldTake(matchedSpecificity, ruleIndex)) {

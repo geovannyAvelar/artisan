@@ -257,6 +257,12 @@ struct Declarations {
   AlignContent alignContent = AlignContent::kFlexStart;
   bool hasGap = false;
   float gap = 0.0f;
+  // Grid-only overrides of gap for a single axis - see Widget::columnGap/
+  // rowGap (widget.h) for the "falls back to gap when unset" contract.
+  bool hasColumnGap = false;
+  float columnGap = 0.0f;
+  bool hasRowGap = false;
+  float rowGap = 0.0f;
   bool hasFlexWrap = false;
   FlexWrap flexWrap = FlexWrap::kNowrap;
 

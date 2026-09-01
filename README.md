@@ -606,8 +606,11 @@ sizes to the widest such cell would be with no wrapping at all - a
 spanning cell crossing either kind of column doesn't grow it, and
 simply wraps at whatever width its crossed columns add up to, same as
 it always has. `gap` (reused from
-flexbox) applies between both columns and rows - there's no separate
-`row-gap`/`column-gap`. A child with no placement of its own (see
+flexbox) applies between both columns and rows by default; `column-gap`/
+`row-gap` each independently override it for just that one axis when
+set (grid only - flexbox doesn't recognize either, only its own shared
+`gap`), e.g. `column-gap: 40px; row-gap: 4px;` for wide column gutters
+with tight row spacing. A child with no placement of its own (see
 `grid-template-areas`/`grid-area` and `grid-column`/`grid-row` below)
 auto-places into the next cell in document order, wrapping along
 whichever axis `grid-auto-flow` names (`row`, the default, wraps to a
