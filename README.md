@@ -562,9 +562,11 @@ already has.
 layout mode alongside flexbox (kContainer only, same as everything
 above). `grid-template-columns`/`grid-template-rows` each take a plain
 space-separated track list - a fixed pixel size (`100px`, or a bare
-number), an `Nfr` fractional unit, or the `min-content`/`max-content`
-keywords, e.g. `grid-template-columns: max-content 1fr;` (a classic
-content-sized-sidebar-plus-flexible-remainder pattern) - or `repeat(N,
+number), an `Nfr` fractional unit, an `N%` percentage (resolved against
+the container's own available width, same basis `fr` itself already
+uses - see below), or the `min-content`/`max-content` keywords, e.g.
+`grid-template-columns: max-content 1fr;` (a classic content-sized-
+sidebar-plus-flexible-remainder pattern) - or `repeat(N,
 track-list)`, expanding inline to `N` copies of its (possibly
 multi-track) inner list at that position in the outer list, e.g.
 `grid-template-columns: 50px repeat(2, 1fr) 100px;` is exactly
@@ -575,30 +577,30 @@ parse time, so both are unsupported and the whole `repeat()` is skipped
 like any other unrecognized token, and nesting `repeat()`/`minmax()`
 inside `repeat()`'s own inner list isn't supported either - or
 `minmax(min, max)`, resolving `max` exactly as an ordinary track of
-whatever it is would (a fixed px, `Nfr`, or `min-content`/`max-content`
-- not real CSS's `auto`, and no nesting a second `minmax()`/`repeat()`
-inside it either), then clamped up to `min` - always a fixed px in this
-bounded subset, real CSS's own min-content/max-content/`auto` for this
-half isn't supported - if that leaves it smaller, e.g.
-`grid-template-columns: minmax(200px, 1fr) 3fr;` (a classic
-never-shrink-below-200px sidebar). Unlike real CSS's own iterative
-algorithm, a `minmax()` track's floor taking over more space than its
-own share would've given it doesn't reclaim that shortfall from
-*other* `fr` tracks - so several `minmax()` tracks whose floors alone
-already exceed the container can sum wider than it, the same "a floor
-reserves space, it doesn't negotiate for it" precedent a fixed
+whatever it is would (a fixed px, `Nfr`, `N%`, or `min-content`/
+`max-content` - not real CSS's `auto`, and no nesting a second
+`minmax()`/`repeat()` inside it either), then clamped up to `min` -
+always a fixed px in this bounded subset, real CSS's own min-content/
+max-content/`auto`/percentage for this half isn't supported - if that
+leaves it smaller, e.g. `grid-template-columns: minmax(200px, 1fr) 3fr;`
+(a classic never-shrink-below-200px sidebar). Unlike real CSS's own
+iterative algorithm, a `minmax()` track's floor taking over more space
+than its own share would've given it doesn't reclaim that shortfall
+from *other* `fr` tracks - so several `minmax()` tracks whose floors
+alone already exceed the container can sum wider than it, the same "a
+floor reserves space, it doesn't negotiate for it" precedent a fixed
 `grid-template-rows` track's own floor (below) already set. Otherwise
-this still isn't real CSS's `auto`, percentage tracks, or named lines;
-a token matching none of these forms (bare, or inside a `repeat()`) is
-skipped rather than failing the whole list. `min-content`/`max-content`
-and `fr` only resolve for columns, against the container's own
-available width (always known); on a row track, all three are treated
-as `auto` (content-sized, the same as an unspecified row) instead,
-since resolving any of them meaningfully on the row axis would need a
-known total container height most grids never set - a `minmax()` row
-track is the one exception: its own `min` half still applies as a
-floor, identically to a plain fixed-px row track (see below), only its
-`max` half is ignored the same way a bare `fr`/min-content/max-content
+this still isn't real CSS's `auto` or named lines; a token matching
+none of these forms (bare, or inside a `repeat()`) is skipped rather
+than failing the whole list. `min-content`/`max-content`, `fr`, and `%`
+only resolve for columns, against the container's own available width
+(always known); on a row track, all four are treated as `auto`
+(content-sized, the same as an unspecified row) instead, since
+resolving any of them meaningfully on the row axis would need a known
+total container height most grids never set - a `minmax()` row track is
+the one exception: its own `min` half still applies as a floor,
+identically to a plain fixed-px row track (see below), only its `max`
+half is ignored the same way a bare `fr`/min-content/max-content/`%`
 row track already is. A `min-content` column sizes to the narrowest a
 single-column-span cell placed in it could be without overflowing (for
 text, the width of its single widest unbreakable word); `max-content`

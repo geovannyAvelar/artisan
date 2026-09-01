@@ -1131,6 +1131,12 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
         totalFr += EffectiveTrackValue(track);
       } else if (kind == GridTrackKind::kFixed) {
         totalFixed += ClampToMinMaxFloor(track, EffectiveTrackValue(track));
+      } else if (kind == GridTrackKind::kPercent) {
+        // Resolved against state.maxWidth (the container's own
+        // available width - always known, same basis fr's own leftover-
+        // space math already uses below) - then counts toward
+        // totalFixed exactly like a resolved kFixed track would.
+        totalFixed += ClampToMinMaxFloor(track, EffectiveTrackValue(track) * state.maxWidth);
       } else {
         // kMinContent/kMaxContent - already resolved (floor included)
         // into columnWidths above; counts toward totalFixed the same
@@ -1149,6 +1155,8 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
         columnWidths[c] = ClampToMinMaxFloor(track, EffectiveTrackValue(track) * perFr);
       } else if (kind == GridTrackKind::kFixed) {
         columnWidths[c] = ClampToMinMaxFloor(track, EffectiveTrackValue(track));
+      } else if (kind == GridTrackKind::kPercent) {
+        columnWidths[c] = ClampToMinMaxFloor(track, EffectiveTrackValue(track) * state.maxWidth);
       }
       // kMinContent/kMaxContent: columnWidths[c] already resolved above.
     }

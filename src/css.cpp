@@ -155,11 +155,12 @@ bool ParseLengthOrPercent(const std::string &raw, float &outValue,
 }
 
 // Parses one non-repeat() track token - a plain pixel length (bare
-// number or "...px"), an "Nfr" fractional unit (e.g. "2fr"), or the
-// `min-content`/`max-content` keywords - see GridTrack (widget.h) for
-// what each becomes. A token matching none of these forms is silently
-// skipped, same "parse whatever we understand" posture
-// ParseDeclarations already has for an unrecognized property.
+// number or "...px"), an "Nfr" fractional unit (e.g. "2fr"), an "N%"
+// percentage (e.g. "50%"), or the `min-content`/`max-content` keywords -
+// see GridTrack (widget.h) for what each becomes. A token matching none
+// of these forms is silently skipped, same "parse whatever we
+// understand" posture ParseDeclarations already has for an unrecognized
+// property.
 void ParseGridTrackToken(const std::string &token, std::vector<GridTrack> &tracks) {
   std::string lower = ToLower(token);
   if (lower == "min-content") {
@@ -176,6 +177,15 @@ void ParseGridTrackToken(const std::string &token, std::vector<GridTrack> &track
           {GridTrackKind::kFraction, std::stof(lower.substr(0, lower.size() - 2))});
     } catch (const std::exception &) {
       // Not a valid "Nfr" token - skip it.
+    }
+    return;
+  }
+  if (!lower.empty() && lower.back() == '%') {
+    try {
+      tracks.push_back(
+          {GridTrackKind::kPercent, std::stof(lower.substr(0, lower.size() - 1)) / 100.0f});
+    } catch (const std::exception &) {
+      // Not a valid "N%" token - skip it.
     }
     return;
   }
