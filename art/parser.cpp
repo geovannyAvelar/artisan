@@ -64,6 +64,10 @@ Program Parser::ParseProgram() {
         auto decl = ParseInterface();
         decl->isExported = exported;
         program.interfaces.push_back(std::move(decl));
+      } else if (Check(TokenKind::KwClass)) {
+        auto decl = ParseClass(/*isOpaque=*/false);
+        decl->isExported = exported;
+        program.interfaces.push_back(std::move(decl));
       } else if (Check(TokenKind::KwFunction)) {
         auto decl = ParseFunction();
         decl->isExported = exported;
@@ -82,15 +86,20 @@ Program Parser::ParseProgram() {
           auto decl = ParseDeclareFunction();
           decl->isExported = exported;
           program.externFunctions.push_back(std::move(decl));
+        } else if (Check(TokenKind::KwClass)) {
+          auto decl = ParseClass(/*isOpaque=*/true);
+          decl->isExported = exported;
+          program.interfaces.push_back(std::move(decl));
         } else {
-          Fail("expected 'type' or 'function' after 'declare'", Cur().loc);
+          Fail("expected 'type', 'function', or 'class' after 'declare'", Cur().loc);
         }
       } else if (exported) {
-        Fail("expected 'function', 'interface', 'let', 'const', or 'declare' after 'export'", Cur().loc);
+        Fail("expected 'function', 'interface', 'class', 'let', 'const', or 'declare' after 'export'", Cur().loc);
       } else if (Check(TokenKind::KwImport)) {
         Fail("'import' must come before every other declaration in a file", Cur().loc);
       } else {
-        Fail("expected 'function', 'interface', 'let', 'const', 'declare', or 'export' at top level", Cur().loc);
+        Fail("expected 'function', 'interface', 'class', 'let', 'const', 'declare', or 'export' at top level",
+             Cur().loc);
       }
     }
   } catch (const ParseError &e) {
@@ -140,6 +149,62 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
     decl->fields.push_back(std::move(field));
   }
   Expect(TokenKind::RBrace, "to close the interface body");
+  return decl;
+}
+
+// Shared by `class` and `declare class` - see InterfaceDecl::methods' own
+// doc comment for why both reuse the same InterfaceDecl node. A `declare
+// class` (isOpaque) may only contain methods, same restriction `declare
+// type` already has on fields (it's a foreign handle - there's nothing
+// here to lay out a struct for); a plain `class` may freely interleave
+// field and method declarations.
+void Parser::ParseClassBody(InterfaceDecl *decl, bool isOpaque) {
+  Expect(TokenKind::LBrace, "to open the class body");
+  while (!Check(TokenKind::RBrace)) {
+    if (Check(TokenKind::KwFunction)) {
+      auto method = ParseFunction();
+      if (!method->typeParams.empty()) {
+        Fail("a class method can't be generic yet", method->loc);
+      }
+      // The implicit receiver - every method gets exactly this as its
+      // real first parameter, invisible in source (`obj.method(args)`
+      // never supplies it explicitly - see Sema::CheckExpr's Call case,
+      // which splices the receiver expression in as the actual first
+      // argument). Always the class's own type: ART methods have no
+      // virtual dispatch to otherwise justify a different receiver type.
+      Param self;
+      self.name = "this";
+      self.loc = method->loc;
+      auto selfType = std::make_unique<TypeNode>();
+      selfType->kind = TypeSyntaxKind::Named;
+      selfType->loc = method->loc;
+      selfType->name = decl->name;
+      self.type = std::move(selfType);
+      method->params.insert(method->params.begin(), std::move(self));
+      decl->methods.push_back(std::move(method));
+    } else if (isOpaque) {
+      Fail("'declare class' can only contain methods - it has no accessible fields, same as 'declare type'",
+           Cur().loc);
+    } else {
+      InterfaceField field;
+      field.loc = Cur().loc;
+      field.name = Expect(TokenKind::Identifier, "as a field name, or 'function' to start a method").text;
+      Expect(TokenKind::Colon, "after field name");
+      field.type = ParseType();
+      if (Check(TokenKind::Semicolon) || Check(TokenKind::Comma)) pos++;
+      decl->fields.push_back(std::move(field));
+    }
+  }
+  Expect(TokenKind::RBrace, "to close the class body");
+}
+
+std::unique_ptr<InterfaceDecl> Parser::ParseClass(bool isOpaque) {
+  auto decl = std::make_unique<InterfaceDecl>();
+  decl->loc = Cur().loc;
+  Expect(TokenKind::KwClass, isOpaque ? "after 'declare'" : "to start a class declaration");
+  decl->isOpaque = isOpaque;
+  decl->name = Expect(TokenKind::Identifier, "as the class name").text;
+  ParseClassBody(decl.get(), isOpaque);
   return decl;
 }
 

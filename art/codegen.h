@@ -99,6 +99,14 @@ private:
   void PushScope();
   void PopScope();
   VarBinding *Lookup(const std::string &name);
+  // Same lookup as Lookup(), but returns null instead of throwing when
+  // `name` isn't a variable at all - used to disambiguate a Handler-typed
+  // Identifier (see GenExpr's own case), which is either a real local/
+  // global variable holding a Handler value, or a bare reference to a
+  // top-level function used as a value (a plain code address, found in
+  // llvmFunctions instead - see Sema::CheckExpr's Identifier case for
+  // why both produce the same TypeTag::Handler resolvedType).
+  VarBinding *TryLookup(const std::string &name);
   void Declare(const std::string &name, llvm::AllocaInst *alloca, llvm::Type *type);
 };
 

@@ -226,9 +226,29 @@ struct InterfaceDecl {
   std::string name;
   std::vector<std::string> typeParams; // e.g. ["T"] for `interface Box<T>`; empty if not generic
   std::vector<InterfaceField> fields;
+  // Non-empty only for a `class`/`declare class` (a plain `interface` never
+  // has any) - `class Foo { ... function bar(...): T { ... } ... }` and
+  // `declare class` share this same InterfaceDecl representation rather
+  // than being a distinct AST node: a class is exactly an interface
+  // (same heap-allocated-struct-of-fields representation, same `Struct`
+  // ResolvedType, same opaque/non-opaque split) that additionally owns a
+  // set of methods. Each method's parser-injected first parameter (named
+  // "this", typed as this very class) is its implicit receiver;
+  // `obj.method(args)` is pure call-site sugar (see Sema::CheckExpr's
+  // Call case) for a plain call to that method with `obj` spliced in as
+  // the actual first argument - resolved statically against obj's
+  // declared type, same as everything else in ART (no vtable, no
+  // dynamic dispatch, classes can't be generic yet). Sema qualifies each
+  // method's own `name` to "ClassName$methodName" and registers/checks
+  // it exactly like any other top-level function (see Sema::Check) -
+  // Codegen never needs to know a method came from a class at all.
+  std::vector<std::unique_ptr<FunctionDecl>> methods;
   SourceLoc loc;
-  bool isOpaque = false; // `declare type Name;` - a foreign handle with no
-                          // accessible fields, never constructible with `{}`
+  bool isOpaque = false; // `declare type Name;`/`declare class Name { ... }` -
+                          // a foreign handle with no accessible fields, never
+                          // constructible with `{}` (a declare class's methods
+                          // are still real ART code, though - typically thin
+                          // wrappers around `declare function`s)
   std::string sourceFile; // see FunctionDecl's own doc comment
   bool isExported = false;
 };

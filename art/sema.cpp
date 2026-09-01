@@ -209,7 +209,7 @@ bool Sema::Check(Program &program,
   for (auto &iface : program.interfaces) {
     bool alreadyDeclared = interfaces.count(iface->name) || genericInterfaces.count(iface->name);
     if (alreadyDeclared) {
-      Error(iface->loc, "interface '" + iface->name + "' is already declared");
+      Error(iface->loc, "'" + iface->name + "' is already declared");
     }
 
     std::unordered_set<std::string> seenFields;
@@ -244,6 +244,25 @@ bool Sema::Check(Program &program,
   }
   currentFile.clear();
 
+  // Every class's methods are qualified ("ClassName$methodName") and
+  // handed off to the exact same registration/body-checking machinery as
+  // any other top-level function below - see InterfaceDecl::methods' own
+  // doc comment for why a method is just call-site sugar over a plain,
+  // qualified function rather than a distinct codegen concept. Done only
+  // once every class/interface name above is registered, since a
+  // method's own signature/body may reference any of them (including its
+  // own class, or one declared later in the same file).
+  for (auto &iface : program.interfaces) {
+    std::unordered_set<std::string> seenMethods;
+    for (auto &method : iface->methods) {
+      if (!seenMethods.insert(method->name).second) {
+        Error(method->loc, "duplicate method '" + method->name + "' in class '" + iface->name + "'");
+      }
+      method->sourceFile = iface->sourceFile;
+      method->name = iface->name + "$" + method->name;
+    }
+  }
+
   // Function signatures are registered before globals (even though a
   // global initializer must ultimately be a literal - see
   // CheckGlobalDecl) so a global's own diagnostics - e.g. a rejected
@@ -251,6 +270,8 @@ bool Sema::Check(Program &program,
   // function instead of spuriously reporting it as undefined.
   for (auto &fn : program.functions) RegisterFunctionSignature(fn.get());
   for (auto &fn : program.externFunctions) RegisterFunctionSignature(fn.get());
+  for (auto &iface : program.interfaces)
+    for (auto &method : iface->methods) RegisterFunctionSignature(method.get());
 
   for (auto &g : program.globals) CheckGlobalDecl(g.get());
 
@@ -260,6 +281,8 @@ bool Sema::Check(Program &program,
   // deal C++ templates have.
   for (auto &fn : program.functions)
     if (fn->typeParams.empty()) CheckFunctionBody(fn.get());
+  for (auto &iface : program.interfaces)
+    for (auto &method : iface->methods) CheckFunctionBody(method.get());
 
   return diagnostics.empty();
 }
@@ -707,8 +730,58 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
   }
 
   case ExprKind::Call: {
+    if (expr->lhs->kind == ExprKind::Member) {
+      // `obj.method(args)` - always resolved statically against obj's
+      // declared type (no vtable/dynamic dispatch - see
+      // InterfaceDecl::methods' own doc comment), so this is pure
+      // call-site sugar for a plain call to the class's already-
+      // qualified method function, with obj spliced in as the actual
+      // first argument once every other argument has been checked.
+      Expr *memberExpr = expr->lhs.get();
+      ResolvedType objT = CheckExpr(memberExpr->lhs.get(), nullptr);
+      if (!expr->typeArgs.empty()) {
+        Error(expr->loc, "a method call can't take explicit type arguments yet");
+      }
+      if (objT.tag != TypeTag::Struct) {
+        if (objT.tag != TypeTag::Unknown) {
+          Error(expr->loc, "cannot call '." + memberExpr->name + "' on type '" + objT.ToString() +
+                                "' - only a class's methods support call syntax");
+        }
+        for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+        actual = ResolvedType{};
+        break;
+      }
+      InterfaceDecl *iface = interfaces.at(objT.structName);
+      FunctionDecl *method = nullptr;
+      for (auto &m : iface->methods)
+        if (m->name == iface->name + "$" + memberExpr->name) { method = m.get(); break; }
+      if (!method) {
+        bool hasField = false;
+        for (auto &f : iface->fields)
+          if (f.name == memberExpr->name) { hasField = true; break; }
+        Error(expr->loc, "'" + iface->name + "' has no method '" + memberExpr->name + "'" +
+                              (hasField ? " (it's a field, not callable)" : ""));
+        for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+        actual = ResolvedType{};
+        break;
+      }
+      expr->resolvedCalleeName = method->name;
+      // method->params[0] is the implicit `this` receiver - not part of
+      // the ART-visible argument list obj.method(args) supplies.
+      size_t userParamCount = method->params.size() - 1;
+      if (userParamCount != expr->elements.size()) {
+        Error(expr->loc, "method '" + memberExpr->name + "' expects " + std::to_string(userParamCount) +
+                              " argument(s), got " + std::to_string(expr->elements.size()));
+      }
+      size_t n = std::min(userParamCount, expr->elements.size());
+      for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &method->params[i + 1].resolvedType);
+      for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
+      expr->elements.insert(expr->elements.begin(), std::move(memberExpr->lhs));
+      actual = method->resolvedReturnType;
+      break;
+    }
     if (expr->lhs->kind != ExprKind::Identifier) {
-      Error(expr->loc, "only direct calls to a named function are supported");
+      Error(expr->loc, "only direct calls to a named function or a method call ('obj.method(...)') are supported");
       for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
       actual = ResolvedType{};
       break;
@@ -828,7 +901,11 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       for (auto &candidate : iface->fields)
         if (candidate.name == expr->name) { field = &candidate; break; }
       if (!field) {
-        Error(expr->loc, "interface '" + iface->name + "' has no field '" + expr->name + "'");
+        bool isMethod = false;
+        for (auto &m : iface->methods)
+          if (m->name == iface->name + "$" + expr->name) { isMethod = true; break; }
+        Error(expr->loc, "interface '" + iface->name + "' has no field '" + expr->name + "'" +
+                              (isMethod ? " - it's a method, and can only be used with call syntax ('(...)')" : ""));
         actual = ResolvedType{};
       } else {
         actual = field->resolvedType;

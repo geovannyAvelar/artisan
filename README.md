@@ -523,6 +523,76 @@ too: a generic's own body/fields always resolve against the file that
 private helper `math.art` uses internally stays unreachable from
 `app.art` even through a generic function `app.art` calls into.
 
+### Classes
+
+`class`/`declare class` add methods - `obj.method(args)` - on top of what
+`interface`/`declare type` already give you (a heap-allocated struct of
+fields). A class is deliberately *not* real OOP: no inheritance, no
+virtual/dynamic dispatch, and a method can't be generic (yet) - a method
+call is pure call-site sugar, always resolved statically against the
+receiver's own declared type, for a plain call to that method with the
+receiver spliced in as the real first argument:
+
+```ts
+class Counter {
+  count: number;
+
+  function increment(): void {
+    this.count = this.count + 1;
+  }
+  function add(amount: number): void {
+    this.count = this.count + amount;
+  }
+}
+
+function main(): number {
+  let c: Counter = { count: 0 }; // construction is unchanged - a class is
+                                  // still just an interface underneath
+  c.increment();
+  c.add(10);
+  return c.count; // fields stay directly readable too - 11
+}
+```
+
+`this` is implicit - never written in a method's own parameter list -
+and always typed as the class itself; there's no `new`, so a class
+instance is built the exact same way an interface's already is (an
+object literal against an explicit target type).
+
+`declare class` is the opaque counterpart (no accessible fields, same as
+`declare type`), for wrapping a `declare function`-based FFI surface into
+ergonomic method calls instead of `ArtDoSomething(handle, ...)` C-style
+calls - this is exactly how `artisan-cli new --lang art`'s scaffold
+exposes the DOM bridge:
+
+```ts
+declare function ArtFindById(root: Node, id: string): Node;
+declare function ArtIsNull(node: Node): boolean;
+
+declare class Node {
+  function findById(id: string): Node { return ArtFindById(this, id); }
+  function isNull(): boolean { return ArtIsNull(this); }
+}
+
+function setupApp(document: Node): void {
+  let button: Node = document.findById("my-button");
+  if (!button.isNull()) {
+    // ...
+  }
+}
+```
+
+A `declare class` method's body is real, ordinary ART code (not itself
+extern-bound) - typically a one-line forward to the matching
+`declare function`, but free to do more (validate an argument, combine
+several bridge calls, ...). The underlying `Art*` functions keep their
+own names and still work as plain free functions too - the class is
+purely an additional, optional way to call them.
+
+A method name can't be a reserved word - `event.type()` doesn't parse
+(`type` is `declare type`'s keyword), which is why the scaffold's `Event`
+class calls it `eventType()` instead.
+
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and
 the next, the same way any other global does:
@@ -571,25 +641,27 @@ top-level), `if`/`else`, `while`, C-style `for`, `for...of` over an array,
 above, `boolean`, `string` (with `+` concatenation, `==`/`!=`, `.length`,
 and `s[i]` indexing - immutable, no `s[i] = ...`), `T[]` arrays,
 structural interfaces (an object literal must match a declared
-`interface` exactly - no excess or missing fields), the parameterized
-handler type described above (`(p0: T0, p1: T1, ...) => void`, structural
-like everything else - parameter names are decorative, only the types and
+`interface` exactly - no excess or missing fields), `class`/`declare
+class` (methods on top of an interface/opaque type - see "Classes"
+above; no inheritance or dynamic dispatch), the parameterized handler
+type described above (`(p0: T0, p1: T1, ...) => void`, structural like
+everything else - parameter names are decorative, only the types and
 their order are checked), and generics - both functions and interfaces/
 `declare type` (`function`/`declare function`/`interface`/`declare type`,
 monomorphized, explicit instantiation only: `::<T>` at a function call
 site, plain `<T>` at a type reference - see "Generic functions"/"Generic
-interfaces" above for why those differ); both prefix (`++x`/`--x`,
-evaluates to the new value) and postfix (`x++`/`x--`, evaluates to the
-old value) forms of increment/decrement, on the same targets assignment
-already allows (a plain variable, an array element, or a struct field) -
-real TS's chaining rules apply here too (`x++.foo`/`x++()` aren't
-expressions; postfix always ends the expression it's attached to). No
-classes, real closures, `any`, union types, or garbage collector - every
-array/object/string is a heap allocation (`malloc`) that's never freed,
-matching this whole framework's "native, ahead-of-time, no runtime"
-philosophy rather than the rest of a real
-TypeScript. See the doc comments in `art/*.h`/`art/*.cpp` for the exact
-grammar and type-checking rules.
+interfaces" above for why those differ; classes/methods can't be generic
+yet); both prefix (`++x`/`--x`, evaluates to the new value) and postfix
+(`x++`/`x--`, evaluates to the old value) forms of increment/decrement,
+on the same targets assignment already allows (a plain variable, an
+array element, or a struct field) - real TS's chaining rules apply here
+too (`x++.foo`/`x++()` aren't expressions; postfix always ends the
+expression it's attached to). No inheritance, real closures, `any`,
+union types, or garbage collector - every array/object/string is a
+heap allocation (`malloc`) that's never freed, matching this whole
+framework's "native, ahead-of-time, no runtime" philosophy rather than
+the rest of a real TypeScript. See the doc comments in
+`art/*.h`/`art/*.cpp` for the exact grammar and type-checking rules.
 
 Building an ART app needs LLVM 18 installed (`llvm-18-dev` or
 equivalent) - unlike Skia/lexbor/QuickJS this isn't a git submodule, and

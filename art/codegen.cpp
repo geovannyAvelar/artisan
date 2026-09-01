@@ -211,14 +211,20 @@ llvm::Value *Codegen::GenStringIndex(llvm::Value *strPtr, llvm::Value *idxVal) {
 void Codegen::PushScope() { scopes.emplace_back(); }
 void Codegen::PopScope() { scopes.pop_back(); }
 
-Codegen::VarBinding *Codegen::Lookup(const std::string &name) {
+Codegen::VarBinding *Codegen::TryLookup(const std::string &name) {
   for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
     auto found = it->find(name);
     if (found != it->end()) return &found->second;
   }
   auto globalIt = globalVars.find(name);
   if (globalIt != globalVars.end()) return &globalIt->second;
-  throw std::runtime_error("codegen: undefined variable '" + name + "' - Sema should have rejected this program");
+  return nullptr;
+}
+
+Codegen::VarBinding *Codegen::Lookup(const std::string &name) {
+  VarBinding *b = TryLookup(name);
+  if (!b) throw std::runtime_error("codegen: undefined variable '" + name + "' - Sema should have rejected this program");
+  return b;
 }
 
 void Codegen::Declare(const std::string &name, llvm::AllocaInst *alloca, llvm::Type *type) {
@@ -260,6 +266,14 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   std::vector<FunctionDecl *> concreteFunctions;
   for (auto &fn : program.functions)
     if (fn->typeParams.empty()) concreteFunctions.push_back(fn.get());
+  // A class's methods (see InterfaceDecl::methods) are ordinary, already-
+  // qualified FunctionDecls owned by their InterfaceDecl rather than
+  // Program::functions - Sema registered/checked them exactly like any
+  // other function (see Sema::Check), so they're generated the same way
+  // too, just collected from a different place. Classes can't be generic
+  // yet, so there's no per-instantiation template-skipping to do here.
+  for (auto &iface : program.interfaces)
+    for (auto &method : iface->methods) concreteFunctions.push_back(method.get());
   std::vector<FunctionDecl *> externFunctions;
   for (auto &fn : program.externFunctions)
     if (fn->typeParams.empty()) externFunctions.push_back(fn.get());
@@ -636,8 +650,16 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
 
   case ExprKind::Identifier: {
     if (expr->resolvedType.tag == TypeTag::Handler) {
-      // Not a variable - a bare reference to a top-level function, used as
-      // a plain code-address value (see Sema::CheckExpr's Identifier case).
+      // A Handler-typed Identifier is either a real local/global variable
+      // holding a Handler value (e.g. a parameter forwarded into another
+      // call - `function wrap(h: () => void): void { other(h); }`) or a
+      // bare reference to a top-level function used as a value, a plain
+      // code address with no variable/alloca of its own at all (see
+      // Sema::CheckExpr's Identifier case - both produce the same
+      // TypeTag::Handler resolvedType, so only an actual variable lookup
+      // tells them apart, not the type tag alone).
+      VarBinding *b = TryLookup(expr->name);
+      if (b) return builder.CreateLoad(b->type, b->alloca, expr->name);
       return llvmFunctions.at(expr->name);
     }
     VarBinding *b = Lookup(expr->name);

@@ -32,6 +32,7 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::KwImport: return "'import'";
   case TokenKind::KwFrom: return "'from'";
   case TokenKind::KwExport: return "'export'";
+  case TokenKind::KwClass: return "'class'";
   case TokenKind::LParen: return "'('";
   case TokenKind::RParen: return "')'";
   case TokenKind::LBrace: return "'{'";
@@ -87,6 +88,7 @@ const std::unordered_map<std::string, TokenKind> kKeywords = {
     {"import", TokenKind::KwImport},
     {"from", TokenKind::KwFrom},
     {"export", TokenKind::KwExport},
+    {"class", TokenKind::KwClass},
 };
 }
 
