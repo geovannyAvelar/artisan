@@ -95,6 +95,7 @@ void ApplyStyle(Widget &widget, const Declarations &style) {
   widget.hasAlignSelf = style.hasAlignSelf;
   widget.alignSelf = style.alignSelf;
   widget.gridAutoFlow = style.gridAutoFlow;
+  widget.gridAutoFlowDense = style.gridAutoFlowDense;
 }
 
 bool IsAllWhitespace(const std::string &text) {

@@ -321,6 +321,7 @@ struct Declarations {
   AlignItems alignSelf = AlignItems::kStretch;
   bool hasGridAutoFlow = false;
   GridAutoFlow gridAutoFlow = GridAutoFlow::kRow;
+  bool gridAutoFlowDense = false;
 
   // `content` - only meaningful when this Declarations was resolved for
   // a `::before`/`::after` pseudo-element (StyleSheet::Resolve's `target`

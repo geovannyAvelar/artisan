@@ -1019,24 +1019,29 @@ Declarations ParseDeclarations(const std::string &body) {
     } else if (property == "grid-row") {
       decl.hasGridRow = ParseGridLinePlacement(value, decl.gridRow);
     } else if (property == "grid-auto-flow") {
-      // Real CSS's valid values are `row`, `column`, `row dense`,
-      // `column dense`, and bare `dense` (implying row) - only the
-      // leading row/column keyword is ever consulted here, since this
-      // engine's auto-placement has never tracked cell occupancy at all
-      // (see GridAutoFlow, widget.h) and `dense` packing is meaningless
-      // without it, but a `dense` modifier still parses (rather than
-      // making the whole property unrecognized) so it doesn't lose
-      // whichever row/column keyword came with it.
+      // Real CSS's grammar is `[ row | column ] || dense` - row/column
+      // and dense can appear in either order, and either half can be
+      // omitted (bare `dense` implies row; bare `row`/`column` implies
+      // not-dense) - so this just looks for each keyword anywhere among
+      // the whitespace-separated tokens rather than assuming a fixed
+      // position.
       std::string lower = ToLower(value);
       std::istringstream tokens(lower);
-      std::string first;
-      tokens >> first;
-      if (first == "row" || first == "dense") {
+      std::string tok;
+      bool sawRow = false, sawColumn = false, sawDense = false;
+      while (tokens >> tok) {
+        if (tok == "row") {
+          sawRow = true;
+        } else if (tok == "column") {
+          sawColumn = true;
+        } else if (tok == "dense") {
+          sawDense = true;
+        }
+      }
+      if (sawRow || sawColumn || sawDense) {
         decl.hasGridAutoFlow = true;
-        decl.gridAutoFlow = GridAutoFlow::kRow;
-      } else if (first == "column") {
-        decl.hasGridAutoFlow = true;
-        decl.gridAutoFlow = GridAutoFlow::kColumn;
+        decl.gridAutoFlow = sawColumn ? GridAutoFlow::kColumn : GridAutoFlow::kRow;
+        decl.gridAutoFlowDense = sawDense;
       }
     } else if (property == "flex-direction") {
       std::string lower = ToLower(value);
@@ -1870,6 +1875,7 @@ void MergeInlineStyle(const Node &node, Declarations &declarations) {
   if (inlineStyle.hasGridAutoFlow) {
     declarations.hasGridAutoFlow = true;
     declarations.gridAutoFlow = inlineStyle.gridAutoFlow;
+    declarations.gridAutoFlowDense = inlineStyle.gridAutoFlowDense;
   }
 }
 
@@ -2220,6 +2226,7 @@ Declarations StyleSheet::Resolve(const Node &node, const Declarations &inherited
         gridAutoFlowWin.ShouldTake(matchedSpecificity, ruleIndex)) {
       own.hasGridAutoFlow = true;
       own.gridAutoFlow = rule.declarations.gridAutoFlow;
+      own.gridAutoFlowDense = rule.declarations.gridAutoFlowDense;
     }
     if (rule.declarations.hasContent &&
         contentWin.ShouldTake(matchedSpecificity, ruleIndex)) {

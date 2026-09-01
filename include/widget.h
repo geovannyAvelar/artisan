@@ -165,15 +165,17 @@ struct GridLinePlacement {
 // widget_renderer.cpp) fills first: kRow (the default) wraps to a new
 // row once the current one runs out of columns, same as every grid
 // before this property existed; kColumn wraps to a new column once the
-// current one runs out of rows instead. Real CSS's `dense` packing
-// modifier (re-filling earlier holes an explicit placement left open,
-// rather than always moving forward) isn't supported - this engine's
-// auto-placement has never tracked cell occupancy at all (see
-// RenderGridContainer's own doc comment on the placement precedence
-// ladder), and dense packing is meaningless without it; `grid-auto-flow:
-// row dense`/`column dense` still resolve their own row/column keyword
-// correctly, just without the dense behavior (see ParseDeclarations,
-// css.cpp).
+// current one runs out of rows instead. The `dense` packing modifier
+// (`grid-auto-flow: row dense`/`column dense`/bare `dense`, implying
+// row) is a separate bool - Widget::gridAutoFlowDense below - since
+// real CSS's own grammar lets it combine with either keyword: when set,
+// auto-placement re-scans from the very start of the grid for every
+// item instead of only ever moving forward from the previous item's own
+// position, so a later, smaller item can fill a hole an earlier
+// explicit or wider placement left open - see RenderGridContainer's own
+// placement loop for the shared cell-occupancy scan both modes use, the
+// cursor reset being dense's only difference from the default ("sparse")
+// behavior.
 enum class GridAutoFlow { kRow, kColumn };
 
 enum class WidgetKind {
@@ -499,6 +501,7 @@ struct Widget {
   // auto-placement, not anything about this Widget as someone else's
   // child.
   GridAutoFlow gridAutoFlow = GridAutoFlow::kRow;
+  bool gridAutoFlowDense = false; // The `dense` modifier - see GridAutoFlow above.
 };
 
 } // namespace artisan

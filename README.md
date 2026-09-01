@@ -662,10 +662,12 @@ above when their own track count matches the area template's; otherwise
 width and rows to auto content-sizing, so `grid-template-areas` alone
 (no explicit tracks at all) is enough to get a working layout. A child
 whose own `grid-area` doesn't match any name in the template - or that
-has none at all - still auto-places into the next free-by-index cell in
-document order the same as it would without any area template, so named
-and unnamed children can mix, though placement for the unnamed ones
-doesn't try to route around cells a named child already claimed.
+has none at all - still auto-places into the next free cell in document
+order the same as it would without any area template, so named and
+unnamed children can mix; unlike an earlier version of this engine, the
+unnamed ones do correctly route around cells a named child already
+claimed (see `grid-auto-flow` below for the placement algorithm this
+now shares with every other kind of explicit placement).
 
 `grid-column`/`grid-row` place a child by numeric, 1-indexed grid line
 instead of a name - line 1 is before the first track, line 2 between
@@ -704,10 +706,10 @@ start, the other defaults to line 1 rather than being auto-placed on
 its own axis - real CSS's actual algorithm for a partially-explicit
 item is a lot more elaborate than this implements. A `grid-area` match
 always wins over `grid-column`/`grid-row` on the same element; below
-that, explicit placement of any kind (named or line-based) is exactly
-as prone to overlapping an auto-placed sibling as `grid-template-areas`
-already documents above, for the same reason (auto-placement is a
-simple next-free-index counter, not occupancy-aware).
+that, every explicit placement (named or line-based) is resolved first,
+in document order, and every auto-placed sibling is placed only after,
+scanning for cells none of them already claimed (see `grid-auto-flow`
+below for the full placement algorithm).
 
 `justify-items`/`align-items` control whether a grid item stretches to
 fill its own cell(s) (the default, and what every item did before these
@@ -744,15 +746,21 @@ wraps to a new row once the current one runs out of columns;
 using however many rows `grid-template-rows` declares as the wrap
 point (falling back to 1 - one item per column - when it's unset,
 mirroring how an unset `grid-template-columns` falls back to a single
-column for row-flow). Real CSS's `dense` packing modifier (re-filling
-earlier holes an explicit placement left open, rather than always
-moving forward) isn't supported - this engine's auto-placement has
-never tracked cell occupancy at all (see `grid-template-areas` and
-`grid-column`/`grid-row` above for where that same gap already applies
-to explicit placement), so dense packing has nothing to do; a `dense`
-keyword still parses without breaking the property (`grid-auto-flow:
-column dense` still flows by column), it just has no additional effect
-of its own.
+column for row-flow). Placement now happens in two passes, matching
+real CSS's own algorithm: every item with a definite position (a
+`grid-area` match, or an explicit `grid-column`/`grid-row`) is placed
+first, in document order, each claiming its own cells in a shared
+occupancy grid; every remaining item is then auto-placed, in document
+order, scanning that same occupancy grid for the next free cell of its
+own size - so an auto-placed item correctly skips cells a definite
+sibling already claimed, rather than just counting forward by raw item
+index (a gap this bounded subset used to have entirely). The `dense`
+packing modifier (`grid-auto-flow: row dense`/`column dense`, or bare
+`dense`, implying row) is now supported too: it restarts that scan from
+the very beginning of the grid for every auto-placed item instead of
+only ever continuing forward from the previous one's own position (the
+default, "sparse" behavior) - so a later, smaller item can fill a hole
+an earlier, wider one left open, rather than leaving it empty forever.
 
 `grid-template-columns: subgrid` lets a nested grid adopt its parent's
 column tracks instead of sizing its own - columns only, mirroring the

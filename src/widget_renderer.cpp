@@ -764,16 +764,117 @@ float MeasureFlexHeightAt(const Widget &widget, const IRenderer &renderer,
 }
 
 // One item's resolved cell placement - row/col (0-indexed, top-left of
-// its span) and rowSpan/colSpan (always >= 1; > 1 only ever comes from
-// a named grid-area whose occurrences span more than one cell - see
-// FindGridAreaPlacement below, since this bounded subset has no
-// grid-column/grid-row line-based span syntax of its own).
+// its span) and rowSpan/colSpan (always >= 1; > 1 from either a named
+// grid-area whose occurrences span more than one cell - see
+// FindGridAreaPlacement below - or an explicit/auto grid-column/
+// grid-row `span N`).
 struct GridItemPlacement {
   int row;
   int col;
   int rowSpan;
   int colSpan;
 };
+
+// Growable cell-occupancy grid backing grid-auto-flow's placement scan
+// (both "sparse", the default, and `dense` - see GridAutoFlow, widget.h)
+// - marks which (row, col) cells are already claimed by an earlier
+// item's placement, growing either dimension on demand so a placement
+// past the current bounds (definite or auto-placed) never overflows it.
+// Used by RenderGridContainer's own two-pass placement loop: every
+// definite placement (grid-area match, or explicit grid-column/
+// grid-row) marks its cells first, then every auto-placed item scans
+// this same grid (via ScanRowMajor/ScanColumnMajor below) for the next
+// free span-sized cell run, so it correctly routes around whatever the
+// definite items already claimed instead of just walking forward by raw
+// item count.
+struct GridOccupancy {
+  std::vector<std::vector<bool>> cells;
+
+  void EnsureSize(int rows, int cols) {
+    if (static_cast<int>(cells.size()) < rows) {
+      cells.resize(rows);
+    }
+    for (auto &row : cells) {
+      if (static_cast<int>(row.size()) < cols) {
+        row.resize(cols, false);
+      }
+    }
+  }
+
+  bool IsFree(int row, int col, int rowSpan, int colSpan) {
+    EnsureSize(row + rowSpan, col + colSpan);
+    for (int r = row; r < row + rowSpan; ++r) {
+      for (int c = col; c < col + colSpan; ++c) {
+        if (cells[r][c]) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  void Occupy(int row, int col, int rowSpan, int colSpan) {
+    EnsureSize(row + rowSpan, col + colSpan);
+    for (int r = row; r < row + rowSpan; ++r) {
+      for (int c = col; c < col + colSpan; ++c) {
+        cells[r][c] = true;
+      }
+    }
+  }
+};
+
+// Scans `occupancy` row-major (row 0's columns left to right, then row
+// 1's, and so on) starting at (startRow, startCol) for the next cell
+// whose rowSpan x colSpan block is entirely free - grid-auto-flow: row's
+// own placement order (the default). `crossCount` is the fixed column
+// count a row wraps at (autoPlaceColumnCount in the caller) - clamped to
+// >= 0 via std::max so a span at least that wide (which could never
+// satisfy a "starts before crossCount - colSpan" bound) still gets
+// tried at column 0 of each row rather than skipping every row
+// outright, the same "let it grow past the bound" reasoning an
+// over-wide explicit placement already gets elsewhere in this bounded
+// subset. Always terminates: row grows without bound, and IsFree grows
+// `occupancy` with fresh (free) cells as it goes, so an all-free row is
+// always eventually reached.
+GridItemPlacement ScanRowMajor(GridOccupancy &occupancy, int startRow, int startCol,
+                                int rowSpan, int colSpan, int crossCount) {
+  int maxCol = std::max(0, crossCount - colSpan);
+  int row = startRow;
+  int col = startCol;
+  while (true) {
+    if (col > maxCol) {
+      col = 0;
+      ++row;
+      continue;
+    }
+    if (occupancy.IsFree(row, col, rowSpan, colSpan)) {
+      return {row, col, rowSpan, colSpan};
+    }
+    ++col;
+  }
+}
+
+// Same idea as ScanRowMajor, but column-major (column 0's rows top to
+// bottom, then column 1's, ...) - grid-auto-flow: column's own placement
+// order. `crossCount` is the fixed row count a column wraps at
+// (autoPlaceRowCount in the caller).
+GridItemPlacement ScanColumnMajor(GridOccupancy &occupancy, int startRow, int startCol,
+                                   int rowSpan, int colSpan, int crossCount) {
+  int maxRow = std::max(0, crossCount - rowSpan);
+  int row = startRow;
+  int col = startCol;
+  while (true) {
+    if (row > maxRow) {
+      row = 0;
+      ++col;
+      continue;
+    }
+    if (occupancy.IsFree(row, col, rowSpan, colSpan)) {
+      return {row, col, rowSpan, colSpan};
+    }
+    ++row;
+  }
+}
 
 // The bounding box of every cell in `areas` naming `name` - real CSS
 // requires those occurrences to form a solid rectangle; this doesn't
@@ -991,43 +1092,54 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
   autoPlaceRowCount = std::max(1, autoPlaceRowCount);
   bool columnFlow = widget.gridAutoFlow == GridAutoFlow::kColumn;
 
-  // Resolve every item's placement. Precedence, matching GridLinePlacement's
-  // own doc comment (widget.h): a grid-area match wins first; otherwise
-  // an explicit grid-column/grid-row start line places the item outright
-  // (the other axis, if it has no explicit start of its own, defaults to
-  // line 1); otherwise a bare `span N` (no explicit start on either
-  // axis) still auto-places in document order, just at that span instead
-  // of always 1x1; otherwise plain 1x1 auto-placement, same as an item
-  // with none of this set at all. Auto-placement itself wraps along
-  // whichever axis grid-auto-flow names (row, the default, or column -
-  // see autoPlaceColumnCount/autoPlaceRowCount above).
+  // Resolve every item's placement, in real CSS Grid's own two-step
+  // order: everything with a *definite* position - a grid-area name
+  // match, or an explicit grid-column/grid-row start on either axis
+  // (the other axis, if unset, still defaults to line 1 - real CSS's
+  // actual algorithm for a partially-explicit item is a lot more
+  // elaborate than this implements) - is placed first, in document
+  // order, each one claiming its own cells in a shared occupancy grid
+  // (GridOccupancy above); then everything else (no area match, no
+  // explicit start on either axis - possibly still a bare `span N`) is
+  // auto-placed in document order, scanning that same occupancy grid
+  // (ScanRowMajor/ScanColumnMajor above) for the next free cell of its
+  // own size along whichever axis grid-auto-flow names (row, the
+  // default, wraps to a new row once the current one runs out of
+  // columns; column wraps to a new column once the current one runs out
+  // of rows - see autoPlaceColumnCount/autoPlaceRowCount above). This
+  // lets an auto-placed item correctly route around a sibling's own
+  // definite placement instead of just walking forward by raw item
+  // count, a gap this bounded subset used to have entirely. The scan
+  // starts wherever the previous auto-placed item's own cell was (never
+  // backtracking past it) except under grid-auto-flow: dense
+  // (Widget::gridAutoFlowDense), which restarts it from the very
+  // beginning of the grid for every item instead, so a later, smaller
+  // item can fill a hole an earlier, wider one left open.
+  GridOccupancy occupancy;
   std::vector<GridItemPlacement> placements(n);
-  int nextAutoIndex = 0;
+  std::vector<bool> needsAutoPlacement(n, false);
   for (int i = 0; i < n; ++i) {
     const Widget &child = widget.children[i];
     GridItemPlacement placed;
+    bool isDefinite = false;
     if (hasAreas && !child.gridArea.empty() &&
         FindGridAreaPlacement(widget.gridTemplateAreas, child.gridArea, placed)) {
-      // Found via area match - placed already set.
-    } else {
+      isDefinite = true;
+    } else if (child.gridColumn.hasStart || child.gridRow.hasStart) {
       int colSpan = std::max(1, child.gridColumn.span);
       int rowSpan = std::max(1, child.gridRow.span);
-      if (child.gridColumn.hasStart || child.gridRow.hasStart) {
-        int col = child.gridColumn.hasStart
-                      ? ResolveGridLineStart(child.gridColumn.start, autoPlaceColumnCount)
-                      : 0;
-        int row = child.gridRow.hasStart
-                      ? ResolveGridLineStart(child.gridRow.start, autoPlaceRowCount)
-                      : 0;
-        placed = {row, col, rowSpan, colSpan};
-      } else {
-        int idx = nextAutoIndex++;
-        if (columnFlow) {
-          placed = {idx % autoPlaceRowCount, idx / autoPlaceRowCount, rowSpan, colSpan};
-        } else {
-          placed = {idx / autoPlaceColumnCount, idx % autoPlaceColumnCount, rowSpan, colSpan};
-        }
-      }
+      int col = child.gridColumn.hasStart
+                    ? ResolveGridLineStart(child.gridColumn.start, autoPlaceColumnCount)
+                    : 0;
+      int row = child.gridRow.hasStart
+                    ? ResolveGridLineStart(child.gridRow.start, autoPlaceRowCount)
+                    : 0;
+      placed = {row, col, rowSpan, colSpan};
+      isDefinite = true;
+    }
+    if (!isDefinite) {
+      needsAutoPlacement[i] = true;
+      continue;
     }
 
     // A subgrid's own column count is fixed at exactly how many tracks
@@ -1043,6 +1155,35 @@ void RenderGridContainer(const Widget &widget, LayoutState &state) {
       placed.colSpan = std::min(placed.colSpan, autoPlaceColumnCount - placed.col);
     }
     placements[i] = placed;
+    occupancy.Occupy(placed.row, placed.col, placed.rowSpan, placed.colSpan);
+  }
+  int cursorRow = 0;
+  int cursorCol = 0;
+  for (int i = 0; i < n; ++i) {
+    if (!needsAutoPlacement[i]) {
+      continue;
+    }
+    const Widget &child = widget.children[i];
+    int colSpan = std::max(1, child.gridColumn.span);
+    int rowSpan = std::max(1, child.gridRow.span);
+    if (widget.gridAutoFlowDense) {
+      cursorRow = 0;
+      cursorCol = 0;
+    }
+    GridItemPlacement placed =
+        columnFlow ? ScanColumnMajor(occupancy, cursorRow, cursorCol, rowSpan, colSpan,
+                                      autoPlaceRowCount)
+                   : ScanRowMajor(occupancy, cursorRow, cursorCol, rowSpan, colSpan,
+                                  autoPlaceColumnCount);
+    // Same subgrid clamp as the definite-placement pass above.
+    if (isColumnSubgrid) {
+      placed.col = std::min(placed.col, autoPlaceColumnCount - 1);
+      placed.colSpan = std::min(placed.colSpan, autoPlaceColumnCount - placed.col);
+    }
+    placements[i] = placed;
+    occupancy.Occupy(placed.row, placed.col, placed.rowSpan, placed.colSpan);
+    cursorRow = placed.row;
+    cursorCol = placed.col;
   }
 
   // Final column/row counts: at least as many as an area template
