@@ -232,6 +232,181 @@ If moving this checkout later breaks the build, update the `replace` line
 in `goapp/go.mod` to point at the new location (same underlying constraint
 `ARTISAN_PROJECT_SOURCE_DIR` already has for the C++ path).
 
+## Using ART
+
+ART is a small, statically typed language of this repo's own design -
+TypeScript-like syntax with the dynamic parts removed (no `any`, no
+prototypes, no dynamic property access), compiled ahead of time to native
+machine code via LLVM (see `art/`) rather than interpreted. A project's
+`app.art` - one file at the project root, like `app.js`, not a whole
+module directory the way `goapp/` is (ART has no multi-file/import system
+yet) - is compiled by the standalone `art` compiler and linked straight
+into the binary, the same "runs compiled, not interpreted" deal
+`ARTISAN_APP_CPP_SOURCES`/`ARTISAN_APP_GO_SOURCE` get.
+
+```bash
+artisan-cli new my-app --lang art
+```
+
+scaffolds `app.art` with every DOM function below already `declare`d and
+an empty `setupApp`. An ART app must define exactly this function:
+
+```ts
+function onButtonClick(): void {
+  // ...
+}
+
+function setupApp(document: Node): void {
+  let button: Node = ArtFindById(document, "my-button");
+  if (!ArtIsNull(button)) {
+    ArtSetOnClick(button, onButtonClick);
+    ArtSetTextContent(button, "Ready");
+  }
+}
+```
+
+`setupApp` runs once whenever a page loads, same as `SetupApp(Node&)`/
+Go's `ArtisanSetupApp`/a script's top-level code all are. `Node` is an
+opaque foreign type (`declare type Node;`) - a plain handle ART code
+passes around but never constructs or looks inside; the DOM API itself is
+a curated subset of `include/node_c_api.h` re-exposed as ART-callable
+`declare function`s (`include/art_bridge.h` has the exact signatures -
+copied into every scaffolded `app.art`): `ArtDocument`, `ArtFindById`,
+`ArtQuerySelector`, `ArtIsNull` (the only way to test a lookup for "no
+match" - ART has no null literal of its own to compare against),
+`ArtGetTextContent`/`ArtSetTextContent`, `ArtGetAttribute`/
+`ArtHasAttribute`/`ArtSetAttribute`, `ArtChildCount`/`ArtChildAt`, and
+`ArtSetOnClick`.
+
+`ArtDocument()` returns the same root `Node` `setupApp`'s own parameter
+is - the current page's document, whatever it is at the moment of the
+call. It exists specifically for a handler (see `ArtSetOnClick` below):
+unlike `setupApp`, a handler takes no arguments, so without a way to ask
+for the document directly it would have no path to the DOM at all except
+whatever a top-level `let`/`const` could carry forward - and a `Node`
+can't be one of those (see below). `include/art_bridge_context.h`
+tracks which `Node` it currently points to, updated by `main.cpp` once
+per page load/navigation (the same place `node_c_api_bridge.h`'s
+`SetGoTimerContext` already is) - `ArtIsNull` on its result is `true`
+only in the narrow window between one page's tree being torn down and
+the next one finishing its build, which a handler invoked from a live
+page will never actually observe.
+
+`ArtSetOnClick(node, handler)` registers a click handler - `handler` isn't
+a call, just a bare reference to a top-level `function ...(): void`
+(`void` return - the only function-pointer-shaped value ART has, written
+as a type like `() => void`). Passing a function by name this way needs
+no closures or heap boxing the way a real callback usually would: ART
+functions can't capture outer variables in the first place, so the
+reference is just that function's own compiled address, handed straight
+to `Node::SetOnClick` as a plain C function pointer - contrast Go's
+`ArtisanNodeSetOnClick`, which has to carry a `uintptr_t` handle through a
+Go-side registry (`cgo.Handle`) instead, since a Go closure can't produce
+a raw callable address like this.
+
+`ArtAddEventListener(node, eventType, handler, capture)` is the general
+form - any event type (`"keydown"`, `"change"`, `"input"`, ...), and
+unlike `ArtSetOnClick` it *stacks*: registering a second listener for the
+same node/type doesn't replace the first, both run (`Node::AddEventListener`,
+same as real `addEventListener`). Its `handler` takes the `Event` itself
+as one parameter - `(event: Event) => void` rather than `() => void` -
+which is why the handler type isn't fixed to zero arguments: `handler`'s
+matching a function's actual parameter list, checked structurally the
+same way any other type is (a `() => void` where a `(event: Event) =>
+void` is expected, or vice versa, is a compile error, not a silent
+mismatch). `Event` is another opaque foreign type (`declare type Event;`),
+read through its own curated `declare function`s: `ArtEventType`,
+`ArtEventTarget` (a `Node`), `ArtEventBubbles`/`ArtEventCancelable`,
+`ArtEventPreventDefault`/`ArtEventDefaultPrevented`,
+`ArtEventStopPropagation`, and the MouseEvent/KeyboardEvent data
+(`ArtEventClientX`/`ArtEventClientY`, `ArtEventCtrlKey`/`ArtEventShiftKey`/
+`ArtEventAltKey`/`ArtEventMetaKey`, `ArtEventKey`/`ArtEventCode`) - all
+copied into every scaffolded `app.art`.
+
+`ArtRemoveEventListener(node, eventType, handler, capture)` removes every
+listener matching all four exactly - a mismatched call (wrong handler,
+wrong `capture`, or one never added at all) is a safe no-op, same as real
+`removeEventListener`. `Node::RemoveEventListener` has no built-in notion
+of "the same handler" (`EventHandler` is a type-erased `std::function`,
+not comparable on its own) - it takes a predicate instead, and
+`art_bridge.cpp` supplies one via `std::function::target<T>()`, the exact
+mechanism `node_c_api.cpp`'s Go path (`GoCallback`) and `js_engine.cpp`'s
+JS path (`JsCallback`) already use for the same reason, just recovering a
+named wrapper class around ART's raw function pointer instead of a Go
+handle or a JS closure - `ArtAddEventListener` above stores one of these
+(not a bare lambda, which has no nameable type to recover later)
+specifically so removal can find it again.
+
+Not exposed: `stopImmediatePropagation`, and a `CustomEvent`'s `detail`
+payload (untyped by nature - not something a statically-typed language
+can represent without generics).
+
+A top-level `let`/`const` is a handler's actual memory across calls -
+`clicks`/`enabled`/etc. below keep their value between one `onClick` and
+the next, the same way any other global does:
+
+```ts
+let clicks: number = 0;
+const maxClicks: number = 5;
+
+function onClick(): void {
+  if (clicks < maxClicks) {
+    clicks = clicks + 1;
+  }
+}
+```
+
+Its initializer must be a literal number/boolean/string, not a call,
+arithmetic, an object/array literal, or another global - ART has no
+static-initialization-order mechanism to run arbitrary code before
+`setupApp`/`main`, and there'd be nowhere to put the result anyway for an
+array/interface global, whose value is a `malloc`'d heap allocation, not
+a compile-time constant. This also means a global can only be `number`/
+`boolean`/`string` - no `Node`, array, or interface globals - so a
+handler still can't stash a `Node` it found earlier in one directly; it
+calls `ArtDocument()`/`ArtFindById` again instead (cheap - both are
+simple pointer lookups, not a real query), the same way it would reach
+the DOM at all in the first place.
+
+`numberToString(n: number): string` - a real built-in, not a
+`declare function` (it needs no C++ counterpart in a project's own code,
+unlike everything `art_bridge.h` exposes - it's available in any ART
+program, even one with no DOM involved at all) - is the other half of
+displaying a counter like `clicks` above:
+`ArtSetTextContent(label, numberToString(clicks) + " clicks")`. It
+formats via libc's `snprintf("%.15g", ...)` rather than reimplementing
+double-to-string from scratch, which gets ordinary values exactly right
+(`42` -> `"42"`, `3.14` -> `"3.14"`, `-7` -> `"-7"`) but isn't a
+guaranteed match for real JS's own `Number`-to-string algorithm at the
+edges - `NaN`/`Infinity` print as `"nan"`/`"inf"` (libc's spelling, not
+JS's), `-0` prints as `"-0"` rather than `"0"`, and extremely large/small
+magnitudes may round or switch to scientific notation slightly
+differently.
+
+The language itself: `function`/`interface`/`let`/`const` (locals and
+top-level), `if`/`else`, `while`, C-style `for`, `for...of` over an array,
+`number` (a double, same as real TS) with the `numberToString` builtin
+above, `boolean`, `string` (with `+` concatenation, `==`/`!=`, `.length`,
+and `s[i]` indexing - immutable, no `s[i] = ...`), `T[]` arrays,
+structural interfaces (an object literal must match a declared
+`interface` exactly - no excess or missing fields), and the parameterized
+handler type described above (`(p0: T0, p1: T1, ...) => void`, structural
+like everything else - parameter names are decorative, only the types and
+their order are checked); prefix `++`/`--` only (no postfix). No
+classes, real closures, generics, `any`, union types, or garbage
+collector - every array/object/string is a heap allocation (`malloc`)
+that's never freed, matching this whole framework's "native,
+ahead-of-time, no runtime" philosophy rather than the rest of a real
+TypeScript. See the doc comments in `art/*.h`/`art/*.cpp` for the exact
+grammar and type-checking rules.
+
+Building an ART app needs LLVM 18 installed (`llvm-18-dev` or
+equivalent) - unlike Skia/lexbor/QuickJS this isn't a git submodule, and
+unlike the rest of this framework's dependencies it's only ever required
+when `ARTISAN_APP_ART_SOURCE`/`app.art` is actually configured: a
+C++/Go/JS-only project never pulls LLVM in at all (see the root
+`CMakeLists.txt`'s conditional `add_subdirectory(art)`).
+
 ## Using JavaScript
 
 An `app.js` at the project root is auto-discovered and embedded, same as

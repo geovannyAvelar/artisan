@@ -1,5 +1,6 @@
 #include "app.h"
 #include "app_script.h"
+#include "art_bridge_context.h"
 #include "compiled_document.h"
 #include "css.h"
 #include "dom_node.h"
@@ -445,9 +446,11 @@ int main(int argc, char *argv[]) {
     }
 
     document.reset();
+    artisan::SetArtDocumentContext(nullptr);
     jsEngine.reset();
 
     document = page->build();
+    artisan::SetArtDocumentContext(document.get());
     timerQueue = TimerQueue{};
     animationFrameQueue = AnimationFrameQueue{};
     artisan::SetGoTimerContext(timerQueue, animationFrameQueue);

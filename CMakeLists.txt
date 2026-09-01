@@ -97,6 +97,8 @@ set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
     "Optional script embedded into the app and run once at startup")
 set(ARTISAN_APP_GO_SOURCE "" CACHE STRING
     "Optional directory of a Go app (its own go.mod/main.go, see go/artisango) compiled and linked into the app")
+set(ARTISAN_APP_ART_SOURCE "" CACHE STRING
+    "Optional single .art file (see art/), compiled ahead of time with the ART compiler and linked into the app")
 
 set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
@@ -176,18 +178,65 @@ if(ARTISAN_APP_GO_SOURCE)
     )
     add_custom_target(artisan_go_archive DEPENDS "${GENERATED_GO_ARCHIVE}")
 else()
-    # No Go app configured - ArtisanSetupApp (and the three callback
-    # hooks node_c_api.cpp's GoCallback always references, whether or
-    # not anything ends up calling ArtisanNodeSetOnClick/
-    # RequestAnimationFrame) still need to exist so the app links, the
-    # same way GetAppScript() above always exists whether or not a
-    # script was configured.
+    # No Go app configured - the three callback hooks node_c_api.cpp's
+    # GoCallback always references, whether or not anything ends up
+    # calling ArtisanNodeSetOnClick/RequestAnimationFrame, still need to
+    # exist so the app links, the same way GetAppScript() above always
+    # exists whether or not a script was configured. ArtisanSetupApp
+    # itself is handled separately below, since an ART app (not just "no
+    # native app at all") can also provide it.
     file(WRITE "${GENERATED_GO_STUB_CPP}"
         "#include \"node_c_api.h\"\n"
-        "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n"
         "extern \"C\" void ArtisanGoInvokeHandler(uintptr_t) {}\n"
         "extern \"C\" void ArtisanGoReleaseHandler(uintptr_t) {}\n"
         "extern \"C\" void ArtisanGoInvokeAnimationFrameHandler(uintptr_t, double) {}\n")
+endif()
+
+# ARTISAN_APP_ART_SOURCE is the ART counterpart to ARTISAN_APP_GO_SOURCE
+# above: a single .art file (mirroring ARTISAN_APP_JS_SOURCE's "one file
+# at the project root" convention, not Go's whole-module-directory one -
+# ART has no multi-file/import system yet) compiled ahead of time with
+# the ART compiler (art/ - a separate CMake project, only pulled in here
+# when actually needed, since it requires LLVM) into a native object file
+# and linked straight into the artisan binary, same as Skia's/Go's own
+# prebuilt artifacts above. It must define `function setupApp(document:
+# Node): void` - see art_bridge.h for the `declare`-able DOM API it can
+# call, and README.md's "Using ART" section.
+set(GENERATED_ART_OBJECT "${CMAKE_BINARY_DIR}/generated_art_app.o")
+
+if(ARTISAN_APP_ART_SOURCE)
+    add_subdirectory("${PROJECT_SOURCE_DIR}/art" artisan_art_compiler EXCLUDE_FROM_ALL)
+
+    add_custom_command(
+        OUTPUT "${GENERATED_ART_OBJECT}"
+        COMMAND $<TARGET_FILE:art> --emit-obj -o "${GENERATED_ART_OBJECT}" "${ARTISAN_APP_ART_SOURCE}"
+        DEPENDS art "${ARTISAN_APP_ART_SOURCE}"
+        COMMENT "Compiling ${ARTISAN_APP_ART_SOURCE} into a native object file"
+        VERBATIM
+    )
+    add_custom_target(artisan_art_object DEPENDS "${GENERATED_ART_OBJECT}")
+endif()
+
+# ArtisanSetupApp itself: a real Go archive (above) provides it if
+# configured; otherwise an ART app's compiled `setupApp` (see
+# GENERATED_ART_OBJECT above) is adapted to it here (ART's own codegen
+# never names anything "ArtisanSetupApp" - only the driver's naming
+# convention, "setupApp", ties the two together); otherwise a plain
+# no-op, the same "always exists, whether or not anything configured it"
+# pattern GetAppScript()/the stub above use.
+set(GENERATED_SETUP_APP_STUB_CPP "${CMAKE_BINARY_DIR}/generated_setup_app_stub.cpp")
+
+if(NOT ARTISAN_APP_GO_SOURCE)
+    if(ARTISAN_APP_ART_SOURCE)
+        file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
+            "#include \"node_c_api.h\"\n"
+            "extern \"C\" void setupApp(void *document);\n"
+            "extern \"C\" void ArtisanSetupApp(ArtisanNode *document) { setupApp(document); }\n")
+    else()
+        file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
+            "#include \"node_c_api.h\"\n"
+            "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n")
+    endif()
 endif()
 
 # A project using Go (or one with no native app code at all) has nothing
@@ -224,6 +273,7 @@ add_executable(artisan
     src/widget_tree_builder.cpp
     src/js_engine.cpp
     src/node_c_api.cpp
+    src/art_bridge.cpp
     src/css.cpp
     src/timer_queue.cpp
     src/animation_frame_queue.cpp
@@ -233,11 +283,16 @@ add_executable(artisan
 )
 
 if(NOT ARTISAN_APP_GO_SOURCE)
-    target_sources(artisan PRIVATE "${GENERATED_GO_STUB_CPP}")
+    target_sources(artisan PRIVATE "${GENERATED_GO_STUB_CPP}" "${GENERATED_SETUP_APP_STUB_CPP}")
 endif()
 
 if(NOT ARTISAN_APP_CPP_SOURCES)
     target_sources(artisan PRIVATE "${GENERATED_CPP_STUB}")
+endif()
+
+if(ARTISAN_APP_ART_SOURCE)
+    target_sources(artisan PRIVATE "${GENERATED_ART_OBJECT}")
+    add_dependencies(artisan artisan_art_object)
 endif()
 
 target_include_directories(artisan

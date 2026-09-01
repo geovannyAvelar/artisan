@@ -15,9 +15,10 @@
 // there's exactly one way a project is laid out.
 //
 // `new` writes out a starting point for one native language - C++
-// (src/main.cpp, the default) or, with --lang go, Go (goapp/) - a project
-// uses one or the other, never both (see DiscoverProject). Script
-// (app.js) is orthogonal to that choice and can layer on either.
+// (src/main.cpp, the default), with --lang go, Go (goapp/), or with
+// --lang art, ART (app.art, see art/) - a project uses exactly one of
+// these, never more than one (see DiscoverProject). Script (app.js) is
+// orthogonal to that choice and can layer on any of them.
 //
 // `component` scaffolds a smaller, reusable pairing within an existing
 // project: a markup fragment (components/<name>.html, meant to be pasted
@@ -73,10 +74,14 @@ void PrintBuildUsage() {
          "        organization here (not a route).\n"
          "  <project-dir>/goapp/            a native Go app instead, if the\n"
          "        project uses that language - its own go.mod/main.go (see\n"
-         "        go/artisango), compiled ahead of time, never both this\n"
-         "        and src/**/*.cpp in the same project.\n"
+         "        go/artisango), compiled ahead of time, never combined\n"
+         "        with src/**/*.cpp or app.art in the same project.\n"
+         "  <project-dir>/app.art           a native ART app instead (see\n"
+         "        art/) - one file, compiled ahead of time, never combined\n"
+         "        with src/**/*.cpp or goapp/ in the same project.\n"
          "  <project-dir>/app.js            optional embedded script -\n"
-         "        orthogonal to the C++/Go choice above, works with either.\n\n"
+         "        orthogonal to the native-language choice above, works\n"
+         "        with any of them.\n\n"
          "  --build-dir     Where to configure/build (default: ./build).\n"
          "  -o, --output    Copy the built binary here.\n"
          "  --run           Run the binary after a successful build.\n";
@@ -194,8 +199,9 @@ std::vector<PageEntry> DiscoverPages(const fs::path &pagesDir) {
 struct DiscoveredProject {
   std::vector<std::string> htmlEntries; // "name=absolute/path.html", one per page.
   std::vector<fs::path> cppPaths;
-  fs::path jsPath; // Empty if app.js doesn't exist.
-  fs::path goPath; // Empty if goapp/go.mod doesn't exist.
+  fs::path jsPath;  // Empty if app.js doesn't exist.
+  fs::path goPath;  // Empty if goapp/go.mod doesn't exist.
+  fs::path artPath; // Empty if app.art doesn't exist.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
@@ -236,17 +242,26 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.goPath = fs::absolute(goPath);
   }
 
+  // An ART app is a single file, like app.js - not a directory/module the
+  // way a Go app is, since ART has no multi-file/import system yet.
+  fs::path artPath = projectDir / "app.art";
+  if (fs::exists(artPath)) {
+    discovered.artPath = fs::absolute(artPath);
+  }
+
   // A project drives its DOM natively from exactly one language, never
-  // both at once - a Go app and C++ sources both trying to run their own
-  // SetupApp-equivalent against the same page on load would be two
-  // independent, unordered sources of truth for the same startup
+  // more than one at once - each of C++/Go/ART runs its own SetupApp-
+  // equivalent against the same page on load, so any two at once would
+  // be independent, unordered sources of truth for the same startup
   // behavior. Script (app.js) doesn't compete here since it's already
   // designed to layer on top of whichever native language runs.
-  if (!discovered.cppPaths.empty() && !discovered.goPath.empty()) {
+  int nativeLangCount = (!discovered.cppPaths.empty() ? 1 : 0) + (!discovered.goPath.empty() ? 1 : 0) +
+                        (!discovered.artPath.empty() ? 1 : 0);
+  if (nativeLangCount > 1) {
     std::cerr << "artisan-cli: " << projectDir
-               << " has both src/**/*.cpp and goapp/ - a project can only "
-                  "use one native language at a time. Remove src/*.cpp "
-                  "for a Go project, or goapp/ for a C++ one.\n";
+               << " has more than one of src/**/*.cpp, goapp/, and app.art "
+                  "- a project can only use one native language at a "
+                  "time. Remove the ones you don't want.\n";
     std::exit(1);
   }
 
@@ -261,6 +276,7 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
 int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
                        const std::vector<fs::path> &cppAbs,
                        const fs::path &jsAbs, const fs::path &goAbs,
+                       const fs::path &artAbs,
                        const std::string &buildDirStr,
                        const std::string &outputPathStr, bool run) {
   fs::path projectSourceDir = ARTISAN_PROJECT_SOURCE_DIR;
@@ -286,6 +302,9 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 
   configureCmd << " -DARTISAN_APP_GO_SOURCE="
                << ShellQuote(goAbs.empty() ? "" : goAbs.string());
+
+  configureCmd << " -DARTISAN_APP_ART_SOURCE="
+               << ShellQuote(artAbs.empty() ? "" : artAbs.string());
 
   if (RunCommand(configureCmd.str()) != 0) {
     std::cerr << "artisan-cli: cmake configure failed\n";
@@ -330,7 +349,7 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 }
 
 void PrintNewUsage() {
-  std::cerr << "usage: artisan-cli new <project-dir> [--lang cpp|go]\n\n"
+  std::cerr << "usage: artisan-cli new <project-dir> [--lang cpp|go|art]\n\n"
                "Scaffolds a new artisan project at <project-dir>:\n"
                "  pages/index.html   starter markup - the page the app\n"
                "                     opens on; add more pages/*.html (or\n"
@@ -346,8 +365,17 @@ void PrintNewUsage() {
                "    goapp/           a Go app (go.mod/main.go) exporting\n"
                "                     ArtisanSetupApp - see go/artisango and\n"
                "                     README.md's \"Using Go\" section.\n\n"
-               "A project uses one native language, never both. Build it\n"
-               "afterward with:\n"
+               "  --lang art\n"
+               "    app.art          an ART app (see art/) - a statically\n"
+               "                     typed, TypeScript-like language\n"
+               "                     compiled ahead of time with the ART\n"
+               "                     compiler. Defines `function setupApp\n"
+               "                     (document: Node): void` and calls\n"
+               "                     into the DOM through `declare\n"
+               "                     function`s - see include/art_bridge.h\n"
+               "                     and README.md's \"Using ART\" section.\n\n"
+               "A project uses one native language, never more than one.\n"
+               "Build it afterward with:\n"
                "  artisan-cli build <project-dir>\n";
 }
 
@@ -394,6 +422,103 @@ void SetupApp(Node &document) {
 
 } // namespace artisan
 )cpp";
+
+// setupApp is the ART counterpart to SetupApp/ArtisanSetupApp above - see
+// art_bridge.h for the full `declare`-able DOM API and README.md's "Using
+// ART" section. Unlike the Go/C++ templates, there's no boilerplate
+// trampoline to write by hand - the artisan build itself adapts a plain
+// `function setupApp(document: Node): void` into ArtisanSetupApp.
+constexpr const char *kAppArtTemplate = R"art(declare type Node;
+declare type Event;
+
+declare function ArtDocument(): Node;
+declare function ArtFindById(root: Node, id: string): Node;
+declare function ArtIsNull(node: Node): boolean;
+declare function ArtGetTextContent(node: Node): string;
+declare function ArtSetTextContent(node: Node, text: string): void;
+declare function ArtGetAttribute(node: Node, name: string): string;
+declare function ArtHasAttribute(node: Node, name: string): boolean;
+declare function ArtSetAttribute(node: Node, name: string, value: string): void;
+declare function ArtQuerySelector(root: Node, selector: string): Node;
+declare function ArtChildCount(node: Node): number;
+declare function ArtChildAt(node: Node, index: number): Node;
+declare function ArtSetOnClick(node: Node, handler: () => void): void;
+
+// General event listening - "keydown", "change", "input", or any other
+// type Node::DispatchEvent fires. Unlike ArtSetOnClick above, this stacks
+// (multiple listeners on the same node/type all run) rather than
+// replacing, and the handler receives the Event itself - see the
+// ArtEvent* functions below for what you can read/call on it.
+declare function ArtAddEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
+// Removes a listener previously added with the exact same node/eventType/
+// handler/capture - a mismatched call (wrong handler, or one never added)
+// is a safe no-op.
+declare function ArtRemoveEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
+declare function ArtEventType(event: Event): string;
+declare function ArtEventTarget(event: Event): Node;
+declare function ArtEventBubbles(event: Event): boolean;
+declare function ArtEventCancelable(event: Event): boolean;
+declare function ArtEventPreventDefault(event: Event): void;
+declare function ArtEventDefaultPrevented(event: Event): boolean;
+declare function ArtEventStopPropagation(event: Event): void;
+declare function ArtEventClientX(event: Event): number;
+declare function ArtEventClientY(event: Event): number;
+declare function ArtEventCtrlKey(event: Event): boolean;
+declare function ArtEventShiftKey(event: Event): boolean;
+declare function ArtEventAltKey(event: Event): boolean;
+declare function ArtEventMetaKey(event: Event): boolean;
+declare function ArtEventKey(event: Event): string;
+declare function ArtEventCode(event: Event): string;
+
+// A top-level `let`/`const` is state that survives across calls - e.g. a
+// click handler's own counter. Its initializer must be a literal number/
+// boolean/string (no calls, arithmetic, or other globals - see
+// README.md's "Using ART" section for why).
+let clickCount: number = 0;
+
+// A click handler is just a plain zero-argument, void-returning function -
+// pass its bare name (not a call) to ArtSetOnClick below. It gets no Node
+// of its own (unlike setupApp), so it reaches the DOM through
+// ArtDocument() instead, e.g.:
+//
+//   let root: Node = ArtDocument();
+//   if (!ArtIsNull(root)) {
+//     let label: Node = ArtFindById(root, "my-label");
+//     ...
+//   }
+function onButtonClick(): void {
+  clickCount = clickCount + 1;
+  // Your click-time code goes here, e.g. showing the new count:
+  //
+  //   let root: Node = ArtDocument();
+  //   if (!ArtIsNull(root)) {
+  //     let label: Node = ArtFindById(root, "my-label");
+  //     if (!ArtIsNull(label)) {
+  //       ArtSetTextContent(label, numberToString(clickCount) + " clicks");
+  //     }
+  //   }
+}
+
+// An ArtAddEventListener handler takes the Event itself as its one
+// parameter - register it the same way, by bare name, e.g.
+// `ArtAddEventListener(input, "keydown", onKeyDown, false)`.
+function onKeyDown(event: Event): void {
+  // Your key-press code goes here, e.g.:
+  //
+  //   if (ArtEventKey(event) == "Enter") {
+  //     ArtEventPreventDefault(event);
+  //   }
+}
+
+function setupApp(document: Node): void {
+  // Your native startup code goes here, e.g.:
+  //
+  //   let button: Node = ArtFindById(document, "my-button");
+  //   if (!ArtIsNull(button)) {
+  //     ArtSetOnClick(button, onButtonClick);
+  //   }
+}
+)art";
 
 // go.mod's replace directive needs an absolute path to go/artisango - the
 // same checkout artisan-cli itself was built from (ARTISAN_PROJECT_SOURCE_DIR,
@@ -574,8 +699,8 @@ int RunNew(int argc, char *argv[]) {
     }
   }
 
-  if (lang != "cpp" && lang != "go") {
-    std::cerr << "artisan-cli: --lang must be \"cpp\" or \"go\", got \""
+  if (lang != "cpp" && lang != "go" && lang != "art") {
+    std::cerr << "artisan-cli: --lang must be \"cpp\", \"go\", or \"art\", got \""
                << lang << "\"\n";
     return 1;
   }
@@ -601,13 +726,16 @@ int RunNew(int argc, char *argv[]) {
     CreateDirectory(projectDir / "goapp");
     WriteFile(projectDir / "goapp" / "go.mod", GoModTemplate());
     WriteFile(projectDir / "goapp" / "main.go", kMainGoTemplate);
+  } else if (lang == "art") {
+    WriteFile(projectDir / "app.art", kAppArtTemplate);
   } else {
     CreateDirectory(projectDir / "src");
     WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
     WriteFile(projectDir / "CMakeLists.txt", CMakeListsTemplate());
   }
 
-  std::cout << "artisan-cli: created a new " << (lang == "go" ? "Go" : "C++")
+  std::string langLabel = lang == "go" ? "Go" : lang == "art" ? "ART" : "C++";
+  std::cout << "artisan-cli: created a new " << langLabel
             << " project at " << fs::absolute(projectDir).string() << "\n\n"
             << "Next steps:\n"
             << "  artisan-cli build " << fs::absolute(projectDir).string()
@@ -822,7 +950,8 @@ int RunBuild(int argc, char *argv[]) {
   }
 
   return ConfigureAndBuild(discovered.htmlEntries, discovered.cppPaths,
-                            discovered.jsPath, discovered.goPath, buildDirStr,
+                            discovered.jsPath, discovered.goPath,
+                            discovered.artPath, buildDirStr,
                             outputPathStr, run);
 }
 
