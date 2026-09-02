@@ -30,7 +30,11 @@ function onButtonClick(event: Event): void {
   }
 }
 
-function setupApp(): void {
+// No `function setupApp()` wrapper needed - bare top-level statements
+// become its body (see "Top-level statements" below). Wrapped in a
+// block because it uses `document`, which a bare top-level `let` can't
+// (that's always a persistent global instead).
+{
   let button: Node = document.getElementById("my-button");
   if (!button.isNull()) {
     button.addEventListener("click", onButtonClick, false);
@@ -245,6 +249,45 @@ interface Config { retries: number; }
 let config: Config = { retries: 3 };  // an object literal - real code, run once
 let doubled: number = config.retries * 2;  // references an earlier global
 ```
+
+### Top-level statements
+
+A top-level *statement* (an `if`, `while`, bare call, or block - not a
+declaration or a `let`/`const`) doesn't declare anything, so there's
+nothing to persist: it's collected, across every file in the merged
+program (dependency-first order, same as globals), into the body of a
+generated `setupApp` - the procedural alternative to writing `function
+setupApp(): void { ... }` explicitly. Both produce the exact same
+`setupApp` C symbol main.cpp's trampoline already calls once per page
+load; a project just can't have both (a clear compile error, not a
+silent pick-one).
+
+```ts
+addToTotal(10);
+if (total > 5) { addToTotal(20); }
+```
+
+The two lists (persistent globals vs. per-call top-level statements)
+exist because they're genuinely different lifetimes, not two ways to
+write the same thing - and writing a bare top-level `let` where you
+meant a per-run local fails loudly: a global that directly calls the
+ambient `document` (or anything backed by it) is a compile error, since
+a global initializes once, before any page has ever loaded - not the
+narrow "no page loaded yet" window `.isNull()` normally covers
+elsewhere, but the permanent state at that point. Wrap it in a block to
+get a real local instead, re-run fresh every `setupApp` call:
+
+```ts
+{
+  let button: Node = document.getElementById("my-button");
+  if (!button.isNull()) { button.addEventListener("click", onButtonClick, false); }
+}
+```
+
+(This check only catches a *direct* call in a global's own initializer,
+not one reached indirectly through another function it calls into - a
+narrower guarantee than "provably safe", but enough to catch the
+obvious mistake.)
 
 ## The DOM bridge
 

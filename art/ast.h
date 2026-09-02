@@ -313,13 +313,31 @@ struct Program {
   std::vector<std::unique_ptr<InterfaceDecl>> interfaces;
   std::vector<std::unique_ptr<FunctionDecl>> functions;
   std::vector<std::unique_ptr<FunctionDecl>> externFunctions; // `declare function ...;` - body is always null
-  // Top-level `let`/`const` (each a StmtKind::VarDecl) - handler state that
-  // outlives any single setupApp/function call. Restricted to a literal
-  // number/boolean/string initializer (see Sema::CheckGlobalDecl): ART has
-  // no static-initialization-order mechanism to run arbitrary code before
-  // setupApp/main, and an array/interface global would need a `malloc`
-  // call, which can never be a compile-time constant initializer anyway.
+  // Top-level `let`/`const` (each a StmtKind::VarDecl) - handler state
+  // that outlives any single setupApp/function call. Any type, any
+  // initializer expression (see Sema::CheckGlobalDecl) - a bare number/
+  // boolean/string literal becomes a real compile-time constant;
+  // anything else (a call, an object/array literal, ...) is computed
+  // once, in declaration order, by a generated module constructor (see
+  // Codegen::GenGlobalInit) that runs before main/setupApp, the same
+  // "real code, run once, before anything else" mechanism the garbage
+  // collector's own initialization already uses.
   std::vector<std::unique_ptr<Stmt>> globals;
+  // Bare top-level statements (an `if`/`while`/`for`/block/expression -
+  // never a VarDecl, which always goes to `globals` above instead) - the
+  // procedural alternative to writing an explicit `function setupApp():
+  // void { ... }`: collected, across every file in the merged program
+  // (dependency-first order, same as `globals`), into a generated
+  // function literally named "setupApp" (see Codegen::GenSetupAppBody) -
+  // main.cpp's existing trampoline already calls exactly that symbol
+  // once per page load, so nothing about the C++ integration needs to
+  // change. Mutually exclusive with an explicit `function setupApp()` -
+  // see Sema::Check. Unlike `globals` (initialized once, at process
+  // start, via a module constructor), these run every time the
+  // generated `setupApp` itself is called - the two lists exist
+  // specifically because those are different lifetimes, not
+  // interchangeable ways to write the same thing.
+  std::vector<std::unique_ptr<Stmt>> topLevelStmts;
 };
 
 } // namespace ART

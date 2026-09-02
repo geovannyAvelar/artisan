@@ -98,8 +98,15 @@ Program Parser::ParseProgram() {
       } else if (Check(TokenKind::KwImport)) {
         Fail("'import' must come before every other declaration in a file", Cur().loc);
       } else {
-        Fail("expected 'function', 'interface', 'class', 'let', 'const', 'declare', or 'export' at top level",
-             Cur().loc);
+        // Not a declaration - a top-level *statement* instead (see
+        // Program::topLevelStmts' own doc comment): an `if`/`while`/
+        // `for`/block/bare expression, run once per page load as part
+        // of the generated setupApp - the procedural alternative to
+        // writing `function setupApp(): void { ... }` explicitly.
+        // `return` parses here too (ParseStmt doesn't distinguish
+        // context) but is rejected by Sema - there's nothing to return
+        // from at the top level.
+        program.topLevelStmts.push_back(ParseStmt());
       }
     }
   } catch (const ParseError &e) {

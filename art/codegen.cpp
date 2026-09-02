@@ -313,6 +313,17 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   // initializer may call one), but not yet defined - see its own doc
   // comment in codegen.h.
   GenGlobalInit(program.globals);
+  // Always ensures a "setupApp" symbol exists - main.cpp's trampoline
+  // calls it unconditionally, so a project with neither an explicit
+  // `function setupApp()` nor any top-level statements still needs one,
+  // just an empty one (GenSetupAppBody handles an empty `stmts` the same
+  // way any other function with an empty body would). An explicit
+  // `function setupApp()`, if the project has one, already declared
+  // this exact symbol via DeclareFunctionSignatures above - Sema::Check
+  // guarantees topLevelStmts is empty whenever that's the case, so
+  // there's nothing to actually generate here either way, just skip
+  // re-declaring the same symbol twice.
+  if (!llvmFunctions.count("setupApp")) GenSetupAppBody(program.topLevelStmts);
   for (auto *fn : concreteFunctions) GenFunction(fn);
   for (auto *fn : instantiations)
     if (fn->body) GenFunction(fn);
@@ -439,6 +450,27 @@ void Codegen::GenGlobalInit(std::vector<std::unique_ptr<Stmt>> &globals) {
   // priority constructors first, so GC_init is always safe to have
   // already run by the time any initializer here might allocate.
   llvm::appendToGlobalCtors(*module, ctorFn, /*Priority=*/1);
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenSetupAppBody(std::vector<std::unique_ptr<Stmt>> &stmts) {
+  auto *fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {}, false);
+  auto *fn = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage, "setupApp", module.get());
+  llvmFunctions["setupApp"] = fn;
+  currentFunction = fn;
+
+  auto *entry = llvm::BasicBlock::Create(context, "entry", fn);
+  builder.SetInsertPoint(entry);
+  PushScope();
+
+  for (auto &s : stmts) GenStmt(s.get());
+
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateRetVoid();
+  }
+
+  PopScope();
+  currentFunction = nullptr;
 }
 
 // Backs Sema::SeedBuiltins' "numberToString" - real double-to-string

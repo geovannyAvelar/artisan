@@ -189,6 +189,23 @@ private:
   static std::string MangleMethod(const std::string &className, const std::string &propName);
 
   bool AlwaysReturns(Stmt *stmt);
+
+  // True if `expr` (already checked - this walks the already-rewritten
+  // tree, so it sees the ambient `document` sugar's real target) directly
+  // calls ArtDocument anywhere within it, recursively. Used by
+  // CheckGlobalDecl to reject a global whose initializer would run
+  // `document`/anything backed by it at process start, before any page
+  // has ever loaded - unlike the well-documented "narrow window between
+  // one page's tree tearing down and the next one finishing" ArtIsNull
+  // covers, this is the *permanent* state until the first navigate()
+  // call, so it's not a rare edge case worth just documenting, it's
+  // always broken. Only catches a *direct* call in the initializer
+  // itself, not one reached indirectly through another function it
+  // calls - a real, narrower guarantee than "provably safe", but enough
+  // to catch the obvious, easy-to-write mistake (e.g. `let button: Node
+  // = document.getElementById(...)` at the bare top level, instead of
+  // inside a block - see README.md's note on this).
+  bool ExprUsesAmbientDocument(const Expr *expr) const;
 };
 
 } // namespace ART

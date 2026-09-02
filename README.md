@@ -251,14 +251,28 @@ artisan-cli new my-app --lang art
 
 scaffolds `app.art` with the DOM bridge below already `declare`d and
 wrapped in `declare class Node`/`declare class Event` (see "Classes"
-below), plus an empty `setupApp`. An ART app must define exactly this
-function:
+below), plus an empty setup section. An ART app needs a `setupApp` -
+either an explicit function, or (the default the scaffold uses) just
+bare top-level statements, which the compiler collects into one for you:
 
 ```ts
 function onButtonClick(event: Event): void {
   // ...
 }
 
+{
+  let button: Node = document.getElementById("my-button");
+  if (!button.isNull()) {
+    button.addEventListener("click", onButtonClick, false);
+    button.textContent = "Ready";
+  }
+}
+```
+
+or, written the explicit-function way instead (the two are
+interchangeable, but a project can't mix them):
+
+```ts
 function setupApp(): void {
   let button: Node = document.getElementById("my-button");
   if (!button.isNull()) {
@@ -268,12 +282,23 @@ function setupApp(): void {
 }
 ```
 
-`setupApp` runs once whenever a page loads, same as `SetupApp(Node&)`/
-Go's `ArtisanSetupApp`/a script's top-level code all are. `document` is
-ambient - always just there, the same way a real browser's own global
-`document` is, not something `setupApp` (or anything else) has to be
-handed or look up itself (see its own doc comment further down for
-exactly how). `Node` is an opaque foreign type (`declare class Node;`
+Either way, `setupApp` runs once whenever a page loads, same as
+`SetupApp(Node&)`/Go's `ArtisanSetupApp`/a script's top-level code all
+are - main.cpp's C++ trampoline calls the exact same `setupApp` symbol
+regardless of which form produced it. The block around the top-level
+version above isn't decorative: a *bare* top-level `let` (unwrapped) is
+always a persistent global (see "Top-level state" below), initialized
+once at process start, before any page has ever loaded - so `document`
+is always unusable directly in one (a compile error, not a runtime
+surprise). A block's own `let`s are ordinary locals, re-run fresh every
+time `setupApp` runs, exactly like `{ }` already means everywhere else
+in ART - wrap any procedural setup code that touches `document` in one.
+
+`document` is ambient - always just there, the same way a real
+browser's own global `document` is, not something `setupApp` (or
+anything else) has to be handed or look up itself (see its own doc
+comment further down for exactly how). `Node` is an opaque foreign type
+(`declare class Node;`
 underneath - see "Classes" below) - a plain handle ART code passes around
 but never constructs or looks inside; the DOM API itself is a curated
 subset of `include/node_c_api.h`, exposed as ART-callable `declare
@@ -755,6 +780,41 @@ not specially enforced beyond that. This is what makes it possible to
 hold real, persistent app state at the top level - a `Node` a handler
 found earlier, a whole struct, a `Signal<T>` (see "Signals" below) -
 without threading it through every function that needs it.
+
+A top-level *statement* (anything that isn't a declaration or a `let`/
+`const` - an `if`, a `while`, a bare call, a block) is different: it
+doesn't declare anything, so there's nothing to persist - it's collected
+(across every file in the merged program, dependency-first, same order
+`globals` already merges in) into the body of a generated `setupApp`,
+run every time that's called, not once at process start. This is the
+procedural style shown under "Quick start" above - the compiler
+generates the exact same `setupApp` C symbol either way, so it composes
+with `declare class`/`declare function`/everything else exactly like an
+explicit `function setupApp()` would; the only rule is a project can't
+have both (a clear compile error, not a silent pick-one).
+
+The two lists exist because they're genuinely different lifetimes, not
+two ways to write the same thing - and mixing them up the natural way
+(a bare `let` where you meant a per-run local) fails loudly rather than
+quietly: a global that directly calls the ambient `document` (or
+anything backed by it) is a compile error, since a global initializes
+once, before any page has ever loaded, and `document` is unusable there
+- not the narrow "no page loaded yet" window `.isNull()` normally covers
+elsewhere, but the *permanent* state at that point. Wrap it in a block
+instead:
+
+```ts
+{
+  let button: Node = document.getElementById("my-button"); // a real local -
+  if (!button.isNull()) {                                  // re-run fresh
+    button.addEventListener("click", onButtonClick, false); // every setupApp
+  }                                                          // call
+}
+```
+
+(This check only catches a *direct* call in the global's own
+initializer, not one reached indirectly through another function it
+calls into - real, but a narrower guarantee than "provably safe".)
 
 `numberToString(n: number): string` - a real built-in, not a
 `declare function` (it needs no C++ counterpart in a project's own code,

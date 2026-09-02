@@ -629,14 +629,30 @@ function onFormSubmitted(event: Event): void {
   let payload: string = ArtEventDetail::<string>(event); // "ok", from the dispatch above
 }
 
-function setupApp(): void {
-  // Your native startup code goes here, e.g.:
-  //
-  //   let button: Node = document.getElementById("my-button");
-  //   if (!button.isNull()) {
-  //     button.addEventListener("click", onButtonClick, false);
-  //   }
-}
+// Your native startup code goes here - no `function setupApp(): void`
+// wrapper needed. These are ordinary top-level statements, run once per
+// page load (main.cpp calls the exact same "setupApp" symbol it always
+// has - the compiler just generates it from this code instead of a
+// user-written function now). If you'd rather keep the explicit
+// function form (e.g. to match older ART code), write `function
+// setupApp(): void { ... }` instead - the two are interchangeable, but
+// not combinable in the same project.
+//
+// Wrap it in a block, like below - NOT a bare top-level `let`: an
+// unwrapped one is always a *persistent global* (see the `clickCount`
+// note above), initialized once at process start, before any page has
+// ever loaded, so anything touching `document` there - `document`
+// itself included - fails to compile (a global's initializer can never
+// use it). A block's own `let`s are ordinary locals instead, re-run
+// fresh every time this code runs, exactly like everywhere else `{ }`
+// already means that in ART.
+//
+//   {
+//     let button: Node = document.getElementById("my-button");
+//     if (!button.isNull()) {
+//       button.addEventListener("click", onButtonClick, false);
+//     }
+//   }
 )art";
 
 // go.mod's replace directive needs an absolute path to go/artisango - the

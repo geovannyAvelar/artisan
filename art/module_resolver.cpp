@@ -167,6 +167,13 @@ Program ModuleResolver::ResolveAndMerge(const std::string &entryPath) {
       g->sourceFile = path;
       merged.globals.push_back(std::move(g));
     }
+    // Dependency-first order (same as every list above) - an imported
+    // file's own top-level statements run before the importing file's,
+    // matching how real ES module evaluation order works.
+    for (auto &s : prog.topLevelStmts) {
+      s->sourceFile = path;
+      merged.topLevelStmts.push_back(std::move(s));
+    }
   }
   return merged;
 }

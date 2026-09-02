@@ -114,6 +114,22 @@ private:
   // needs its signature declared, not yet defined) but doesn't itself
   // need any function's body generated first.
   void GenGlobalInit(std::vector<std::unique_ptr<Stmt>> &globals);
+  // Emits a real, externally-visible function literally named
+  // "setupApp" (`void setupApp(void)`, exactly the symbol main.cpp's
+  // generated_setup_app_stub.cpp already calls once per page load) whose
+  // body runs `stmts` in order - see Program::topLevelStmts' own doc
+  // comment for why this exists as a second, separate mechanism from
+  // GenGlobalInit above rather than one unified thing: a global's
+  // initializer runs once, ever, at process start; this runs every time
+  // setupApp itself is called. Only ever invoked when nothing already
+  // declared this exact symbol (see its own call site in Generate()) -
+  // an explicit `function setupApp()` the project wrote itself takes
+  // priority and this is skipped entirely (Sema::Check guarantees
+  // `stmts` is empty whenever that's the case); with neither, `stmts` is
+  // simply empty and this still emits a real, empty `setupApp` - the
+  // trampoline calls the symbol unconditionally, so it always has to
+  // exist.
+  void GenSetupAppBody(std::vector<std::unique_ptr<Stmt>> &stmts);
   void GenBuiltinNumberToString(); // defines the LLVM function backing Sema::SeedBuiltins' "numberToString"
   void GenFunction(FunctionDecl *decl);
 

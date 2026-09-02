@@ -449,16 +449,26 @@ bool Sema::Check(Program &program,
     }
   }
 
-  // Function signatures are registered before globals (even though a
-  // global initializer must ultimately be a literal - see
-  // CheckGlobalDecl) so a global's own diagnostics - e.g. a rejected
-  // call expression's arguments - can still resolve a forward-declared
+  // Function signatures are registered before globals/top-level
+  // statements so either's own diagnostics - e.g. a rejected call
+  // expression's arguments - can still resolve a forward-declared
   // function instead of spuriously reporting it as undefined.
   for (auto &fn : program.functions) RegisterFunctionSignature(fn.get());
   for (auto &fn : program.externFunctions) RegisterFunctionSignature(fn.get());
   for (auto &iface : program.interfaces) {
     if (!iface->typeParams.empty()) continue; // a generic class - see InstantiateInterface instead
     for (auto &method : iface->methods) RegisterFunctionSignature(method.get());
+  }
+
+  // A project writing top-level statements (see Program::topLevelStmts'
+  // own doc comment) instead of an explicit `function setupApp()` can't
+  // also define one - both would try to produce the same generated
+  // "setupApp" symbol, and there'd be no sensible way to decide which
+  // one actually runs.
+  if (!program.topLevelStmts.empty() && functions.count("setupApp")) {
+    Error(program.topLevelStmts.front()->loc,
+          "this project has both top-level statements and an explicit 'function setupApp()' - pick one: either "
+          "remove the explicit function and let these statements become its body, or move this code inside it");
   }
 
   for (auto &g : program.globals) CheckGlobalDecl(g.get());
@@ -474,6 +484,19 @@ bool Sema::Check(Program &program,
     if (!iface->typeParams.empty()) continue;
     for (auto &method : iface->methods) CheckFunctionBody(method.get());
   }
+
+  // Checked like any function body would be, just with no enclosing
+  // FunctionDecl (currentFunction stays null - see CheckStmt's Return
+  // case) and no scope of its own to push: each statement's own
+  // identifiers resolve via the ordinary global lookup path (Lookup
+  // falls through to the `globals` map when no local scope is active),
+  // so a top-level statement referencing an earlier global "just works"
+  // with no extra machinery.
+  for (auto &s : program.topLevelStmts) {
+    currentFile = s->sourceFile;
+    CheckStmt(s.get());
+  }
+  currentFile.clear();
 
   return diagnostics.empty();
 }
@@ -498,6 +521,14 @@ void Sema::CheckGlobalDecl(Stmt *stmt) {
   // initialization have, not specially enforced beyond that.
   ResolvedType actual = CheckExpr(stmt->expr.get(), hasDeclared ? &declared : nullptr);
   stmt->resolvedVarType = hasDeclared ? declared : actual;
+
+  if (ExprUsesAmbientDocument(stmt->expr.get())) {
+    Error(stmt->loc, "a top-level global's initializer can't use 'document' (directly) - a global is "
+                      "initialized once, at process start, before any page has ever loaded, so 'document' is "
+                      "always unusable there, not just in the narrow window ArtIsNull covers elsewhere. Wrap "
+                      "this in a bare top-level block ('{ ... }') instead - see README.md's note on top-level "
+                      "statements vs. globals");
+  }
 
   if (!hasDeclared && actual.tag == TypeTag::Unknown) {
     Error(stmt->loc, "cannot infer a type for '" + stmt->varName + "' - add an explicit type annotation");
@@ -684,6 +715,23 @@ bool Sema::AlwaysReturns(Stmt *stmt) {
   }
 }
 
+// See this method's own doc comment in sema.h.
+bool Sema::ExprUsesAmbientDocument(const Expr *expr) const {
+  if (!expr) return false;
+  if (expr->kind == ExprKind::Call) {
+    auto ambient = kAmbientGlobals.find("document");
+    if (ambient != kAmbientGlobals.end() && expr->resolvedCalleeName == ambient->second) return true;
+  }
+  if (ExprUsesAmbientDocument(expr->lhs.get())) return true;
+  if (ExprUsesAmbientDocument(expr->rhs.get())) return true;
+  if (ExprUsesAmbientDocument(expr->operand.get())) return true;
+  for (auto &e : expr->elements)
+    if (ExprUsesAmbientDocument(e.get())) return true;
+  for (auto &f : expr->fields)
+    if (ExprUsesAmbientDocument(f.second.get())) return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------
 // Statements
 // ---------------------------------------------------------------------
@@ -745,6 +793,15 @@ void Sema::CheckStmt(Stmt *stmt) {
     break;
   }
   case StmtKind::Return: {
+    if (!currentFunction) {
+      // Only possible from a top-level statement (see
+      // Program::topLevelStmts) - a function body always has
+      // currentFunction set (see CheckFunctionBody/CheckGenericCall/
+      // InstantiateInterface).
+      Error(stmt->loc, "cannot 'return' outside a function");
+      if (stmt->expr) CheckExpr(stmt->expr.get(), nullptr);
+      break;
+    }
     ResolvedType retT = currentFunction->resolvedReturnType;
     if (retT.tag == TypeTag::Void) {
       if (stmt->expr) {
