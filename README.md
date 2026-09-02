@@ -1,4 +1,4 @@
-# ARTISAN - *A*daptive *R*untime for *T*ranslation of *I*nterpreted *S*cripts to *A*pplications *N*atively
+# ARTISAN - **A**daptive **R**untime for **T**ranslation of **I**nterpreted **S**cripts to **A**pplications **N**atively
 
 A framework for building native desktop apps from HTML-like markup. Markup
 is compiled ahead-of-time (by `artisanc`) into a widget tree baked straight
