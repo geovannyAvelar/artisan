@@ -888,7 +888,6 @@ more small piece: calling a Handler-*valued* expression, not just a bare
 function name - see below):
 
 ```ts
-const MAX_SUBSCRIBERS: number = 16;
 function noopEffect(): void {}
 
 // Which effect is currently running, if any - ambient by necessity: any
@@ -901,6 +900,7 @@ export class Signal<T> {
   raw: T;
   subscribers: () => void[];
   subscriberCount: number;
+  capacity: number;
 
   get value(): T {
     if (currentEffect != noopEffect) { this.subscribe(currentEffect); }
@@ -917,10 +917,24 @@ export class Signal<T> {
       if (this.subscribers[i] == fn) { return; } // already subscribed
       i = i + 1;
     }
-    if (this.subscriberCount < MAX_SUBSCRIBERS) {
-      this.subscribers[this.subscriberCount] = fn;
-      this.subscriberCount = this.subscriberCount + 1;
+    if (this.subscriberCount == this.capacity) { this.grow(); }
+    this.subscribers[this.subscriberCount] = fn;
+    this.subscriberCount = this.subscriberCount + 1;
+  }
+
+  // A real growable vector, not a fixed cap: reallocates via
+  // `makeArray<T>` (see "Runtime-sized arrays" below) and copies the
+  // existing subscribers over, doubling capacity each time.
+  function grow(): void {
+    let newCapacity: number = this.capacity * 2;
+    let newSubscribers: () => void[] = makeArray::<() => void>(newCapacity, noopEffect);
+    let i: number = 0;
+    while (i < this.subscriberCount) {
+      newSubscribers[i] = this.subscribers[i];
+      i = i + 1;
     }
+    this.subscribers = newSubscribers;
+    this.capacity = newCapacity;
   }
 
   function notify(): void {
@@ -934,11 +948,7 @@ export class Signal<T> {
 }
 
 export function makeSignal<T>(initial: T): Signal<T> {
-  return { raw: initial, subscriberCount: 0, subscribers: [
-    noopEffect, noopEffect, noopEffect, noopEffect, noopEffect, noopEffect,
-    noopEffect, noopEffect, noopEffect, noopEffect, noopEffect, noopEffect,
-    noopEffect, noopEffect, noopEffect, noopEffect
-  ] };
+  return { raw: initial, subscriberCount: 0, capacity: 4, subscribers: makeArray::<() => void>(4, noopEffect) };
 }
 
 export function effect(fn: () => void): void {
@@ -980,14 +990,31 @@ symbol lookup - see `Expr::isIndirectCall`) - full run-time cost of one
 call, same as any other, just resolved through a value instead of a
 name.
 
-Two deliberate limitations, both to keep this simple rather than because
-of some deeper wall: no `unsubscribe` (a binding lives for the app's
-whole lifetime, which is what a small desktop app almost always wants
-anyway), and each signal's subscriber list has a fixed capacity
-(`MAX_SUBSCRIBERS`) rather than growing without bound - ART has no
-runtime-sized array allocation yet (every array literal still spells out
-every element), so `makeSignal<T>` pre-fills a fixed-size placeholder
-array once, hidden from callers, instead.
+One deliberate limitation, to keep this simple rather than because of
+some deeper wall: no `unsubscribe` - a binding lives for the app's whole
+lifetime, which is what a small desktop app almost always wants anyway.
+
+### Runtime-sized arrays
+
+`makeArray<T>(size: number, fill: T): T[]` is a builtin - like
+`numberToString`, not something a project declares - that allocates a
+real array whose length is only known at runtime, filling every slot
+with `fill`. It's what `grow()` above uses to make a signal's subscriber
+list actually unbounded, and it's the general-purpose way to build any
+growable structure in ART: every array *literal* (`[a, b, c]`) still has
+to spell out every element at compile time, so without this there'd be
+no way to allocate one whose size depends on a variable.
+
+```ts
+let xs: number[] = makeArray::<number>(10, 0); // ten zeros
+```
+
+`fill` is a single value stored into every slot - for a reference type
+(a struct, another array, a `Handler`), every slot ends up pointing at
+the *same* object, not independent copies (the same well-known gotcha a
+real `Array(n).fill(obj)` has in JS). `size` must be `>= 0`; a negative
+value is undefined, the same "not a runtime-checked contract" deal
+`ArtChildAt`'s own out-of-bounds access already has.
 
 Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
 Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is

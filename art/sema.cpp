@@ -333,6 +333,53 @@ void Sema::SeedBuiltins() {
   functions["numberToString"] = numberToString.get();
   builtinNames.insert("numberToString");
   builtins.push_back(std::move(numberToString));
+
+  // makeArray<T>(size: number, fill: T): T[] - allocates a real,
+  // *runtime-sized* array (every array literal, `[a, b, c]`, still has
+  // to spell out every element at compile time - this is the one way to
+  // build one whose length is only known at runtime). Registered as a
+  // generic *template*, not a concrete function - like numberToString
+  // above it has no ART-level body (there'd be nothing to build one
+  // FROM: allocating a runtime-sized array is exactly the one thing
+  // nothing already in the language can do), but unlike numberToString
+  // it needs one real, hand-generated LLVM definition *per distinct T
+  // actually used* (see Codegen::GenBuiltinMakeArray), the same
+  // "template, no body, resolved and generated per instantiation" shape
+  // a generic `declare function` already has (see CheckGenericCall's own
+  // handling of a null `tmpl->body`) - `fill`'s param type is written as
+  // a bare `T` TypeNode specifically so normal generic substitution
+  // resolves it correctly per call site, the same way any other generic
+  // function's own params would.
+  auto makeArray = std::make_unique<FunctionDecl>();
+  makeArray->name = "makeArray";
+  makeArray->typeParams.push_back("T");
+
+  Param sizeParam;
+  sizeParam.name = "size";
+  auto sizeType = std::make_unique<TypeNode>();
+  sizeType->kind = TypeSyntaxKind::Number;
+  sizeParam.type = std::move(sizeType);
+  makeArray->params.push_back(std::move(sizeParam));
+
+  Param fillParam;
+  fillParam.name = "fill";
+  auto fillType = std::make_unique<TypeNode>();
+  fillType->kind = TypeSyntaxKind::Named;
+  fillType->name = "T";
+  fillParam.type = std::move(fillType);
+  makeArray->params.push_back(std::move(fillParam));
+
+  auto retElemType = std::make_unique<TypeNode>();
+  retElemType->kind = TypeSyntaxKind::Named;
+  retElemType->name = "T";
+  auto retType = std::make_unique<TypeNode>();
+  retType->kind = TypeSyntaxKind::Array;
+  retType->element = std::move(retElemType);
+  makeArray->returnType = std::move(retType);
+
+  genericFunctions["makeArray"] = makeArray.get();
+  builtinNames.insert("makeArray");
+  builtins.push_back(std::move(makeArray));
 }
 
 bool Sema::Check(Program &program,

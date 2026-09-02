@@ -101,6 +101,20 @@ for (let x of xs) {
 }
 ```
 
+An array *literal* always spells out every element at compile time -
+`makeArray<T>(size: number, fill: T): T[]`, a builtin (like
+`numberToString`), is the way to allocate one whose length is only
+known at runtime, filling every slot with `fill`:
+
+```ts
+let zeros: number[] = makeArray::<number>(10, 0);
+```
+
+`fill` is a single value stored into every slot - for a reference type
+(a struct, another array, a `Handler`), every slot ends up pointing at
+the *same* object, the same well-known gotcha a real `Array(n).fill(obj)`
+has in JS.
+
 ### Functions
 
 ```ts
@@ -337,10 +351,11 @@ A `Signal<T>` is a reactive value: reading `.value` inside an `effect()`
 automatically subscribes that effect to it, and writing `.value`
 automatically re-runs every effect that ever read it. This isn't a
 compiler feature - it's an ordinary generic class, built entirely from
-generics, `get`/`set` accessors, non-literal globals, and indirect
-calls (see [What's not in ART](#whats-not-in-art) for the two honest
-limitations this trades away to stay simple: no `unsubscribe`, and a
-fixed subscriber capacity per signal).
+generics, `get`/`set` accessors, non-literal globals, indirect calls,
+and runtime-sized arrays (a signal's own subscriber list genuinely
+grows, via `makeArray<T>` - see [Types](#types) above) - see
+[What's not in ART](#whats-not-in-art) for the one honest limitation
+this trades away to stay simple: no `unsubscribe`.
 
 ```ts
 let clickCount: Signal<number> = makeSignal::<number>(0);
@@ -399,8 +414,6 @@ compiler with no runtime being able to make good on it at all):
   (`::<T>` or `<T>`).
 - **No `any`, no union types, no `null`/`undefined`.** A lookup that can
   fail returns something `.isNull()`-checkable instead.
-- **No runtime-sized array allocation.** Every array literal spells out
-  every element; there's no `new Array(n)` equivalent yet.
 - **No manual memory management.** Everything is GC'd (see
   [Memory management](#memory-management)) - there's no `free`/`delete`
   to omit accidentally, but also none available if you wanted it.

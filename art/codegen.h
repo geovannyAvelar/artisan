@@ -131,6 +131,16 @@ private:
   // exist.
   void GenSetupAppBody(std::vector<std::unique_ptr<Stmt>> &stmts);
   void GenBuiltinNumberToString(); // defines the LLVM function backing Sema::SeedBuiltins' "numberToString"
+  // Defines one instantiation's LLVM function backing Sema::SeedBuiltins'
+  // "makeArray" generic template - called once per distinct T actually
+  // used (see Generate()'s own split of sema.Instantiations() into
+  // "makeArray$..." vs everything else), since the per-element storage
+  // size/shape (see ArrayElemStorageType) depends on T. Mirrors
+  // ExprKind::ArrayLiteral's own codegen almost exactly - same header
+  // shape, same bool-packed-as-i8 element storage - just with a real
+  // loop instead of one unrolled store per element, since `size` here is
+  // a runtime value, not a compile-time-known element count.
+  void GenBuiltinMakeArray(FunctionDecl *inst);
   void GenFunction(FunctionDecl *decl);
 
   void GenStmt(Stmt *stmt);

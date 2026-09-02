@@ -303,12 +303,29 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   std::vector<FunctionDecl *> externFunctions;
   for (auto &fn : program.externFunctions)
     if (fn->typeParams.empty()) externFunctions.push_back(fn.get());
+  // "makeArray$..." instantiations (see Sema::SeedBuiltins/
+  // GenBuiltinMakeArray) are split out here rather than joining
+  // `instantiations` below - unlike a generic function/`declare
+  // function`'s own instantiations (a real ART body to compile, or a
+  // bare extern declaration resolved at link time), each of these needs
+  // Codegen to hand-generate a real definition directly, so it's neither
+  // of those two cases. The "makeArray$" prefix alone is enough to tell
+  // them apart safely: Sema's own duplicate-declaration checking already
+  // guarantees no user function can ever be named "makeArray" too.
   std::vector<FunctionDecl *> instantiations;
-  for (auto &[mangledName, inst] : sema.Instantiations()) instantiations.push_back(inst);
+  std::vector<FunctionDecl *> makeArrayInstantiations;
+  for (auto &[mangledName, inst] : sema.Instantiations()) {
+    if (mangledName.rfind("makeArray$", 0) == 0) {
+      makeArrayInstantiations.push_back(inst);
+    } else {
+      instantiations.push_back(inst);
+    }
+  }
 
   DeclareFunctionSignatures(concreteFunctions, /*allowMainRename=*/true);
   DeclareFunctionSignatures(externFunctions, /*allowMainRename=*/false);
   DeclareFunctionSignatures(instantiations, /*allowMainRename=*/false);
+  DeclareFunctionSignatures(makeArrayInstantiations, /*allowMainRename=*/false);
   // Needs every function signature already declared above (a global
   // initializer may call one), but not yet defined - see its own doc
   // comment in codegen.h.
@@ -327,6 +344,7 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   for (auto *fn : concreteFunctions) GenFunction(fn);
   for (auto *fn : instantiations)
     if (fn->body) GenFunction(fn);
+  for (auto *fn : makeArrayInstantiations) GenBuiltinMakeArray(fn);
   // program.externFunctions and a generic `declare function`'s own
   // instantiations (body == nullptr) stay as bare external declarations,
   // resolved at link time against whatever object/library actually
@@ -520,6 +538,61 @@ void Codegen::GenBuiltinNumberToString() {
   builder.CreateStore(len, builder.CreateStructGEP(GetArrayHeaderType(), header, 0));
   builder.CreateStore(buf, builder.CreateStructGEP(GetArrayHeaderType(), header, 1));
   builder.CreateRet(header);
+  currentFunction = nullptr;
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenBuiltinMakeArray(FunctionDecl *inst) {
+  const ResolvedType &elemType = *inst->resolvedReturnType.elementType;
+  llvm::Type *storageTy = ArrayElemStorageType(elemType);
+  uint64_t elemSize = elemType.tag == TypeTag::Boolean ? 1 : 8; // i8 vs {double,ptr} - same convention ArrayLiteral uses
+
+  llvm::Function *fn = llvmFunctions.at(inst->name);
+  currentFunction = fn;
+  auto *entry = llvm::BasicBlock::Create(context, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *sizeArg = fn->getArg(0);
+  llvm::Value *fillArg = fn->getArg(1);
+  sizeArg->setName("size");
+  fillArg->setName("fill");
+
+  llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+  // `size` must be >= 0 - same "undefined for nonsensical input" deal
+  // ArtChildAt's own out-of-bounds contract already has, not something
+  // checked at runtime.
+  llvm::Value *count = builder.CreateFPToSI(sizeArg, i64Ty, "count");
+  llvm::Value *totalBytes = builder.CreateMul(count, llvm::ConstantInt::get(i64Ty, elemSize));
+  llvm::Value *dataPtr = GenHeapAlloc(totalBytes);
+
+  llvm::AllocaInst *iAlloca = CreateEntryAlloca(fn, i64Ty, "i");
+  builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), iAlloca);
+
+  auto *condBB = llvm::BasicBlock::Create(context, "makearray.cond", fn);
+  auto *bodyBB = llvm::BasicBlock::Create(context, "makearray.body", fn);
+  auto *endBB = llvm::BasicBlock::Create(context, "makearray.end", fn);
+
+  builder.CreateBr(condBB);
+  builder.SetInsertPoint(condBB);
+  llvm::Value *iVal = builder.CreateLoad(i64Ty, iAlloca);
+  llvm::Value *cond = builder.CreateICmpSLT(iVal, count);
+  builder.CreateCondBr(cond, bodyBB, endBB);
+
+  builder.SetInsertPoint(bodyBB);
+  llvm::Value *elemPtr = builder.CreateGEP(storageTy, dataPtr, {iVal});
+  llvm::Value *toStore = fillArg;
+  if (elemType.tag == TypeTag::Boolean) toStore = builder.CreateZExt(fillArg, llvm::Type::getInt8Ty(context));
+  builder.CreateStore(toStore, elemPtr);
+  llvm::Value *iNext = builder.CreateAdd(iVal, llvm::ConstantInt::get(i64Ty, 1));
+  builder.CreateStore(iNext, iAlloca);
+  builder.CreateBr(condBB);
+
+  builder.SetInsertPoint(endBB);
+  llvm::Value *headerPtr = GenHeapAlloc(16);
+  builder.CreateStore(count, builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 0));
+  builder.CreateStore(dataPtr, builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 1));
+  builder.CreateRet(headerPtr);
+
   currentFunction = nullptr;
 }
 
