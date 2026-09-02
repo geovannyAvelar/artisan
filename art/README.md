@@ -761,9 +761,25 @@ cmake --build art/build
 art/build/art some_file.ts -o out && ./out
 ```
 
-There's no dedicated test suite yet - correctness is verified by
-compiling and running real `.ts` programs (and, for anything touching
-the DOM bridge, a small standalone C++ harness linking the compiled
-object file directly against `dom_node.cpp`/`art_bridge.cpp` and firing
-real `Node::Click()`/`DispatchEvent()` calls) rather than unit-testing
-the compiler's internals in isolation.
+`art/tests/run.sh` is the regression suite: every `art/tests/*.ts`
+program (and each `art/tests/<name>/app.ts` multi-file one) is
+compiled, linked into a real binary, and *run* - its own `main():
+number` returns a failure count, so a nonzero exit always names a real
+regression, not just a compile error. These need nothing beyond `art`
+itself (i.e. LLVM) - none of them touch the DOM/timer bridge. Anything
+that does (`art/tests/*.tsx`) is compile-only (`--emit-obj`): actually
+linking and running one needs the real bridge object files plus libgc/
+SDL2, out of scope for this script, so these only prove the compiler
+itself accepts the program, not that it behaves correctly at runtime -
+DOM/event behavior is instead verified the way it always has been in
+this project, a standalone C++ harness linking the compiled object file
+directly against `dom_node.cpp`/`art_bridge.cpp` and firing real
+`Node::Click()`/`DispatchEvent()` calls, just not checked into the repo
+as a persistent, re-runnable suite the way `art/tests/` is.
+`art/tests/errors/*` are the opposite of both: expected to *fail* to
+compile, a real language mistake caught, not a regression.
+
+```bash
+art/tests/run.sh                 # uses art/build/art by default
+art/tests/run.sh path/to/art     # or point it at a different binary
+```
