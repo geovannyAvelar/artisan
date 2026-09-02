@@ -679,6 +679,49 @@ browser too - `node.textContent` (get/set) and `event.key`/`.target`/
 `addEventListener`/... stay ordinary methods, matching how those are
 methods in a real browser as well.
 
+#### Generic classes
+
+`class`/`declare class` can take type parameters exactly like `interface`/
+`declare type` already can - `class Name<T> { ... }`, instantiated as
+`Name<Type>` at a type reference (same monomorphized, explicit-only deal
+generic interfaces have - see "Generic interfaces" above - not `::<T>`,
+which is only for a *call*): each distinct `Name<Type>` actually used
+gets its own real, independently-checked struct layout and its own real,
+separately-compiled copies of every method/accessor, the same way each
+generic *function* instantiation does. A method/accessor still can't be
+individually generic (`function foo<U>(...)` inside a class body is
+still rejected) - only the class itself can - and `this` inside one is
+typed as `Name<T>` (the class's own type parameters, referenced bare),
+so it resolves back to whichever concrete instantiation is actually
+running:
+
+```ts
+class Signal<T> {
+  raw: T;
+
+  get value(): T { return this.raw; }
+  set value(v: T) { this.raw = v; }
+}
+
+function main(): number {
+  let count: Signal<number> = { raw: 0 };
+  let name: Signal<string> = { raw: "start" };
+
+  count.value = count.value + 5;
+  name.value = name.value + "!";
+
+  return count.value; // 5 - Signal<number> and Signal<string> are two
+                       // completely independent, coexisting types
+}
+```
+
+This is the pattern to reach for anywhere you'd otherwise hand-write one
+near-identical class per value type (`NumberSignal`, `StringSignal`, ...) -
+a single generic definition, monomorphized per type actually used, same
+tradeoffs as generic functions/interfaces already have (no type
+inference, explicit instantiation only, one real compiled copy per
+distinct type argument combination - see "Generic functions" above).
+
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and
 the next, the same way any other global does:
@@ -733,11 +776,13 @@ interface/opaque type - see "Classes" above; no inheritance or dynamic
 dispatch), the parameterized handler type described above (`(p0: T0,
 p1: T1, ...) => void`, structural like everything else - parameter names
 are decorative, only the types and their order are checked), and
-generics - both functions and interfaces/`declare type` (`function`/
-`declare function`/`interface`/`declare type`, monomorphized, explicit
-instantiation only: `::<T>` at a function call site, plain `<T>` at a
-type reference - see "Generic functions"/"Generic interfaces" above for
-why those differ; classes/methods/accessors can't be generic yet); both
+generics - functions, interfaces/`declare type`, and classes/`declare
+class` alike (`function`/`declare function`/`interface`/`declare type`/
+`class`/`declare class`, monomorphized, explicit instantiation only:
+`::<T>` at a function call site, plain `<T>` at a type reference - see
+"Generic functions"/"Generic interfaces"/"Generic classes" above for why
+those differ; a method/accessor still can't be individually generic,
+only the class itself can); both
 prefix (`++x`/`--x`, evaluates to the new value) and postfix (`x++`/
 `x--`, evaluates to the old value) forms of increment/decrement, on the
 same targets assignment already allows (a plain variable, an array

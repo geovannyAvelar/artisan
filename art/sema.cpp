@@ -133,6 +133,64 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
     cf.resolvedType = ResolveType(f.type.get());
     inst->fields.push_back(std::move(cf));
   }
+
+  // Class methods/accessors (see InterfaceDecl::methods) - cloned and
+  // checked fresh per instantiation, the exact same "never checked in
+  // template form" deal a generic function's own body has (see
+  // CheckGenericCall): each clone gets its own AST since Sema mutates
+  // resolvedType in place and two instantiations (e.g. `Box<number>` and
+  // `Box<string>`) must not share nodes. Qualified against `mangled`
+  // (this instantiation's own name, e.g. "Box$number"), not `tmpl->name`
+  // ("Box") - see Check()'s class-registration pass for why the template
+  // itself is never qualified at all. Get/set pairing and namespace-
+  // clash validation already ran once, on the template, there - nothing
+  // about those checks is type-dependent, so there's nothing to redo per
+  // instantiation. A method's `this` parameter, injected by the parser
+  // as `ClassName<T1, T2, ...>` for a generic class (see
+  // Parser::InjectImplicitThis), resolves back to this exact
+  // instantiation via the `interfaces[mangled] = inst` registration
+  // above - safe even for a self-referential generic class for the same
+  // reason fields already are.
+  for (auto &m : tmpl->methods) {
+    auto methodClone = std::make_unique<FunctionDecl>();
+    methodClone->name = m->isGetter    ? MangleGetter(mangled, m->name)
+                         : m->isSetter ? MangleSetter(mangled, m->name)
+                                       : MangleMethod(mangled, m->name);
+    methodClone->loc = m->loc;
+    methodClone->sourceFile = tmpl->sourceFile;
+    methodClone->isGetter = m->isGetter;
+    methodClone->isSetter = m->isSetter;
+
+    methodClone->params.reserve(m->params.size());
+    for (auto &p : m->params) {
+      Param cp;
+      cp.name = p.name;
+      cp.loc = p.loc;
+      cp.resolvedType = ResolveType(p.type.get());
+      methodClone->params.push_back(std::move(cp));
+    }
+    methodClone->resolvedReturnType = ResolveType(m->returnType.get());
+
+    FunctionDecl *instMethod = methodClone.get();
+    inst->methods.push_back(std::move(methodClone));
+
+    if (m->body) {
+      instMethod->body = CloneStmt(*m->body);
+      FunctionDecl *savedCurrentFunction = currentFunction;
+      currentFunction = instMethod;
+      PushScope();
+      for (auto &p : instMethod->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false);
+      CheckStmt(instMethod->body.get());
+      PopScope();
+      if (instMethod->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(instMethod->body.get())) {
+        Error(m->loc, "method '" + m->name + "' does not return a value of type " +
+                          instMethod->resolvedReturnType.ToString() + " on all code paths (instantiated as '" +
+                          instMethod->name + "')");
+      }
+      currentFunction = savedCurrentFunction;
+    }
+  }
+
   currentFile = savedFile;
   currentSubstitution = savedSubst;
 
@@ -319,7 +377,17 @@ bool Sema::Check(Program &program,
   // only legal kind of duplicate here) but nothing else may collide with
   // an already-used name: two getters, two setters, two plain methods, a
   // getter/setter alongside a plain method, or any of those alongside an
-  // already-declared field.
+  // already-declared field. This name-shape validation runs even for a
+  // generic class template (it's purely about which names exist and
+  // what kind each is, nothing to do with the type parameters actually
+  // substituted later) - but a generic template's own methods are never
+  // qualified/registered here at all, only per actual instantiation (see
+  // InstantiateInterface), the same "never checked in template form"
+  // deal a generic function's own body has (see the loops below) -
+  // `iface->name` alone wouldn't even be a safe qualification prefix for
+  // a template anyway, since two different instantiations (e.g.
+  // `Box<number>`/`Box<string>`) need two distinctly-qualified copies of
+  // each method, not one shared between them.
   for (auto &iface : program.interfaces) {
     std::unordered_set<std::string> fieldNames;
     for (auto &f : iface->fields) fieldNames.insert(f.name);
@@ -354,10 +422,12 @@ bool Sema::Check(Program &program,
           Error(method->loc, "duplicate method '" + propName + "' in class '" + iface->name + "'");
         }
       }
-      method->sourceFile = iface->sourceFile;
-      method->name = method->isGetter    ? MangleGetter(iface->name, propName)
-                      : method->isSetter ? MangleSetter(iface->name, propName)
-                                          : MangleMethod(iface->name, propName);
+      if (iface->typeParams.empty()) {
+        method->sourceFile = iface->sourceFile;
+        method->name = method->isGetter    ? MangleGetter(iface->name, propName)
+                        : method->isSetter ? MangleSetter(iface->name, propName)
+                                            : MangleMethod(iface->name, propName);
+      }
     }
   }
 
@@ -368,19 +438,24 @@ bool Sema::Check(Program &program,
   // function instead of spuriously reporting it as undefined.
   for (auto &fn : program.functions) RegisterFunctionSignature(fn.get());
   for (auto &fn : program.externFunctions) RegisterFunctionSignature(fn.get());
-  for (auto &iface : program.interfaces)
+  for (auto &iface : program.interfaces) {
+    if (!iface->typeParams.empty()) continue; // a generic class - see InstantiateInterface instead
     for (auto &method : iface->methods) RegisterFunctionSignature(method.get());
+  }
 
   for (auto &g : program.globals) CheckGlobalDecl(g.get());
 
   // A generic function's body is never checked in template form - only
   // each concrete instantiation a call site actually asks for (see
   // CheckGenericCall), lazily, the same "never fully checked until used"
-  // deal C++ templates have.
+  // deal C++ templates have. A generic class's own methods have the
+  // exact same deal (see InstantiateInterface).
   for (auto &fn : program.functions)
     if (fn->typeParams.empty()) CheckFunctionBody(fn.get());
-  for (auto &iface : program.interfaces)
+  for (auto &iface : program.interfaces) {
+    if (!iface->typeParams.empty()) continue;
     for (auto &method : iface->methods) CheckFunctionBody(method.get());
+  }
 
   return diagnostics.empty();
 }

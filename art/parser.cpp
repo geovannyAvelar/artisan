@@ -158,15 +158,27 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
 // Sema::CheckExpr's Call/Member/Assign handling, which splices the
 // receiver expression in as the actual first argument). Always the
 // class's own type: ART methods have no virtual dispatch to otherwise
-// justify a different receiver type.
-void Parser::InjectImplicitThis(FunctionDecl *method, const std::string &className) {
+// justify a different receiver type. For a generic class (`decl-
+// >typeParams` non-empty), `this` is `ClassName<T1, T2, ...>` - its own
+// type parameters, referenced bare, exactly like a generic interface's
+// own field types already do (see ResolveType's Named case) - so `this`
+// resolves back to whichever concrete instantiation is actually being
+// checked (see Sema::InstantiateInterface), not the template itself.
+void Parser::InjectImplicitThis(FunctionDecl *method, const InterfaceDecl *decl) {
   Param self;
   self.name = "this";
   self.loc = method->loc;
   auto selfType = std::make_unique<TypeNode>();
   selfType->kind = TypeSyntaxKind::Named;
   selfType->loc = method->loc;
-  selfType->name = className;
+  selfType->name = decl->name;
+  for (const std::string &typeParam : decl->typeParams) {
+    auto argType = std::make_unique<TypeNode>();
+    argType->kind = TypeSyntaxKind::Named;
+    argType->loc = method->loc;
+    argType->name = typeParam;
+    selfType->genericArgs.push_back(std::move(argType));
+  }
   self.type = std::move(selfType);
   method->params.insert(method->params.begin(), std::move(self));
 }
@@ -209,7 +221,7 @@ std::unique_ptr<FunctionDecl> Parser::ParseAccessor(InterfaceDecl *decl, bool is
   method->body = ParseBlock();
   method->isGetter = isGetter;
   method->isSetter = !isGetter;
-  InjectImplicitThis(method.get(), decl->name);
+  InjectImplicitThis(method.get(), decl);
   return method;
 }
 
@@ -233,7 +245,7 @@ void Parser::ParseClassBody(InterfaceDecl *decl, bool isOpaque) {
       if (!method->typeParams.empty()) {
         Fail("a class method can't be generic yet", method->loc);
       }
-      InjectImplicitThis(method.get(), decl->name);
+      InjectImplicitThis(method.get(), decl);
       decl->methods.push_back(std::move(method));
     } else if (isOpaque) {
       Fail("'declare class' can only contain methods/accessors - it has no accessible fields, same as "
@@ -259,6 +271,7 @@ std::unique_ptr<InterfaceDecl> Parser::ParseClass(bool isOpaque) {
   Expect(TokenKind::KwClass, isOpaque ? "after 'declare'" : "to start a class declaration");
   decl->isOpaque = isOpaque;
   decl->name = Expect(TokenKind::Identifier, "as the class name").text;
+  ParseOptionalTypeParams(decl->typeParams);
   ParseClassBody(decl.get(), isOpaque);
   return decl;
 }

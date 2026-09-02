@@ -46,7 +46,7 @@ private:
   std::unique_ptr<InterfaceDecl> ParseClass(bool isOpaque);
   void ParseClassBody(InterfaceDecl *decl, bool isOpaque);
   std::unique_ptr<FunctionDecl> ParseAccessor(InterfaceDecl *decl, bool isGetter);
-  void InjectImplicitThis(FunctionDecl *method, const std::string &className);
+  void InjectImplicitThis(FunctionDecl *method, const InterfaceDecl *decl);
   void ParseOptionalTypeParams(std::vector<std::string> &outTypeParams);
   void ParseParamsAndReturnType(FunctionDecl *decl);
   std::unique_ptr<TypeNode> ParseType();

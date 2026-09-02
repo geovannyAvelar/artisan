@@ -286,9 +286,19 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   // qualified FunctionDecls owned by their InterfaceDecl rather than
   // Program::functions - Sema registered/checked them exactly like any
   // other function (see Sema::Check), so they're generated the same way
-  // too, just collected from a different place. Classes can't be generic
-  // yet, so there's no per-instantiation template-skipping to do here.
-  for (auto &iface : program.interfaces)
+  // too, just collected from a different place. Collected from
+  // sema.Interfaces() rather than program.interfaces specifically so a
+  // generic class's own instantiations (see Sema::InstantiateInterface)
+  // are included too - those live only in Sema's own interfaces map
+  // (interfaceInstantiationStorage), never in Program::interfaces itself
+  // (the template there is skipped entirely - never checked/qualified in
+  // template form, same "no per-instantiation template-skipping needed
+  // here since the template was never in this set to begin with" deal
+  // sema.Instantiations() already has for generic functions below).
+  // sema.Interfaces() also already contains every plain, non-generic
+  // class exactly once, so this fully replaces (not just supplements)
+  // walking program.interfaces directly.
+  for (auto &[name, iface] : sema.Interfaces())
     for (auto &method : iface->methods) concreteFunctions.push_back(method.get());
   std::vector<FunctionDecl *> externFunctions;
   for (auto &fn : program.externFunctions)
