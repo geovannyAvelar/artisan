@@ -140,6 +140,29 @@ void *ArtChildAt(void *node, double index) {
   return ArtisanNodeChildAt(static_cast<ArtisanNode *>(node), static_cast<size_t>(index));
 }
 
+void *ArtCreateElement(ArtString *tag) { return ArtisanCreateElement(tag->data); }
+
+void *ArtCreateTextNode(ArtString *text) { return ArtisanCreateTextNode(text->data); }
+
+void *ArtAppendChild(void *parent, void *child) {
+  return ArtisanNodeAppendChild(static_cast<ArtisanNode *>(parent), static_cast<ArtisanNode *>(child));
+}
+
+void *ArtInsertBefore(void *parent, void *child, void *before) {
+  return ArtisanNodeInsertBefore(static_cast<ArtisanNode *>(parent), static_cast<ArtisanNode *>(child),
+                                  static_cast<ArtisanNode *>(before));
+}
+
+void *ArtRemoveChild(void *parent, void *child) {
+  return ArtisanNodeRemoveChild(static_cast<ArtisanNode *>(parent), static_cast<ArtisanNode *>(child));
+}
+
+void *ArtRemove(void *node) { return ArtisanNodeRemove(static_cast<ArtisanNode *>(node)); }
+
+void *ArtCloneNode(void *node, bool deep) {
+  return ArtisanNodeCloneNode(static_cast<ArtisanNode *>(node), deep);
+}
+
 void ArtSetOnClick(void *node, ArtHandler handler) {
   // Goes straight to Node::SetOnClick rather than through node_c_api.h's
   // ArtisanNodeSetOnClick, which only knows how to wrap a Go-style

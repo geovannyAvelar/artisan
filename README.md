@@ -285,7 +285,16 @@ possible - all copied into every scaffolded `app.art`:
 (the only way to test a lookup for "no match" - ART has no null literal
 of its own to compare against), `.textContent` (get/set), `.getAttribute
 (name)`/`.hasAttribute(name)`/`.setAttribute(name, value)`,
-`.childCount()`/`.childAt(index)`.
+`.childCount()`/`.childAt(index)`, and a full set of tree-mutation
+methods for building UI at runtime rather than only reading/editing what
+`pages/*.html` already compiled in: `document.createElement(tag)`/
+`.createTextNode(text)` (a detached node - leaks if never appended,
+same accepted tradeoff Go/JS already have, see `include/node_c_api.h`),
+`node.appendChild(child)`/`.insertBefore(child, before)` (`before` must
+be an existing child, never null - ART has no null literal to pass, so
+`appendChild` covers "insert at the end" instead), `.removeChild(child)`/
+`.remove()` (detaches, doesn't free - same leaks-if-never-reattached
+deal a freshly created node has), and `.cloneNode(deep)`.
 
 `document` (see `kAmbientGlobals` in `art/sema.cpp`) isn't a real
 variable or a declared function of its own - it's pure sugar, rewritten

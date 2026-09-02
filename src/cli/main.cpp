@@ -449,6 +449,22 @@ declare function ArtSetAttribute(node: Node, name: string, value: string): void;
 declare function ArtQuerySelector(root: Node, selector: string): Node;
 declare function ArtChildCount(node: Node): number;
 declare function ArtChildAt(node: Node, index: number): Node;
+// Creates a detached node - not yet part of any tree until passed to
+// ArtAppendChild/ArtInsertBefore below. A node created and never
+// appended just leaks (this is a real C++-owned node, not ART's own
+// GC-managed heap) - see art_bridge.h for the full ownership story.
+declare function ArtCreateElement(tag: string): Node;
+declare function ArtCreateTextNode(text: string): Node;
+// Returns the appended/inserted node back, matching a real browser's own
+// appendChild/insertBefore. Unlike a real browser, `before` must be an
+// actual existing child, never null (ART has no null literal of its own
+// to pass) - use appendChild for "insert at the end" instead of
+// insertBefore(child, null).
+declare function ArtAppendChild(parent: Node, child: Node): Node;
+declare function ArtInsertBefore(parent: Node, child: Node, before: Node): Node;
+declare function ArtRemoveChild(parent: Node, child: Node): Node;
+declare function ArtRemove(node: Node): Node;
+declare function ArtCloneNode(node: Node, deep: boolean): Node;
 declare function ArtAddEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
 declare function ArtRemoveEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
 // Fires your own event (any type, not just built-in ones) at a node,
@@ -506,6 +522,23 @@ declare class Node {
   function querySelector(selector: string): Node { return ArtQuerySelector(this, selector); }
   function childCount(): number { return ArtChildCount(this); }
   function childAt(index: number): Node { return ArtChildAt(this, index); }
+  // `this` is unused (ignored) here - matches document.createElement in a
+  // real browser (a Document method, not really "of" any particular
+  // node), but every ART method needs a receiver, so it's callable on
+  // any Node, document included, e.g. `document.createElement("div")`.
+  function createElement(tag: string): Node { return ArtCreateElement(tag); }
+  function createTextNode(text: string): Node { return ArtCreateTextNode(text); }
+  // Returns the appended/inserted node back, matching a real browser.
+  // `before` must be an actual existing child of this node - use
+  // appendChild for "insert at the end" instead of insertBefore(child,
+  // null), which ART can't express (no null literal of its own).
+  function appendChild(child: Node): Node { return ArtAppendChild(this, child); }
+  function insertBefore(child: Node, before: Node): Node { return ArtInsertBefore(this, child, before); }
+  function removeChild(child: Node): Node { return ArtRemoveChild(this, child); }
+  // Detaches this node from its own parent directly - no need to look
+  // the parent up first just to call removeChild on it.
+  function remove(): Node { return ArtRemove(this); }
+  function cloneNode(deep: boolean): Node { return ArtCloneNode(this, deep); }
   // Stacks (multiple listeners on the same node/type all run) rather
   // than replacing, and the handler receives the Event itself - see the
   // Event class below for what you can read/call on it. This is the

@@ -64,6 +64,41 @@ void ArtSetAttribute(void *node, ArtString *name, ArtString *value);
 double ArtChildCount(void *node);
 void *ArtChildAt(void *node, double index);
 
+// Creates a detached element/text node - not yet part of any tree until
+// passed to ArtAppendChild/ArtInsertBefore below. See
+// ArtisanCreateElement/ArtisanCreateTextNode's own doc comment for the
+// ownership model this inherits as-is: alive but leaked (not ART's own
+// GC-managed heap - this is a real, C++-owned artisan::Node) if created
+// and never appended - the same accepted tradeoff the existing Go/JS
+// bindings already have, not something ART's own GC involves itself in.
+void *ArtCreateElement(ArtString *tag);
+void *ArtCreateTextNode(ArtString *text);
+
+// Appends/inserts `child` (from ArtCreateElement/ArtCreateTextNode above,
+// or detached via ArtRemove/ArtRemoveChild below) into `parent`'s
+// children - see ArtisanNodeAppendChild/ArtisanNodeInsertBefore. Returns
+// `child` back, matching real DOM's own appendChild/insertBefore return
+// value. Unlike real DOM's insertBefore, `before` here must be an actual
+// existing child, never null (ART has no null literal of its own to
+// pass) - use ArtAppendChild for "insert at the end" instead of
+// insertBefore(child, null).
+void *ArtAppendChild(void *parent, void *child);
+void *ArtInsertBefore(void *parent, void *child, void *before);
+
+// Detaches `child`/this node from its parent, re-registering it as a
+// pending node (same state ArtCreateElement's own result starts in -
+// alive but leaked unless re-appended). nullptr (see ArtIsNull) if
+// `child` isn't actually a child of `parent` (ArtRemoveChild), or if
+// `node` has no parent (ArtRemove). See Node::RemoveChild/Remove.
+void *ArtRemoveChild(void *parent, void *child);
+void *ArtRemove(void *node);
+
+// A new, detached, pending node (same ownership state as
+// ArtCreateElement's result) - same tag/text/attributes as `node`, never
+// event listeners. `deep`: also clones every descendant. See
+// Node::CloneNode.
+void *ArtCloneNode(void *node, bool deep);
+
 // A void-returning ART function, passed as a plain code address (see
 // art/codegen.cpp's ExprKind::Identifier handling for a bare function-
 // name reference - ART's only function-pointer-shaped value, written
