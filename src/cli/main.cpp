@@ -465,6 +465,19 @@ declare function ArtInsertBefore(parent: Node, child: Node, before: Node): Node;
 declare function ArtRemoveChild(parent: Node, child: Node): Node;
 declare function ArtRemove(node: Node): Node;
 declare function ArtCloneNode(node: Node, deep: boolean): Node;
+// The "class" attribute's space-separated tokens. ArtClassListToggle:
+// `hasForce == false` toggles membership; `hasForce == true` pins it to
+// `force` instead (real `classList.toggle(name, force)` semantics - ART
+// has no optional parameters, so both booleans are always required).
+declare function ArtClassListAdd(node: Node, name: string): void;
+declare function ArtClassListRemove(node: Node, name: string): void;
+declare function ArtClassListContains(node: Node, name: string): boolean;
+declare function ArtClassListToggle(node: Node, name: string, hasForce: boolean, force: boolean): boolean;
+// `node`'s inline `style="..."` attribute, one property at a time - only
+// color/backgroundColor/fontWeight/borderColor/borderWidth are
+// supported. "" if the property isn't set; an empty value removes it.
+declare function ArtGetStyle(node: Node, property: string): string;
+declare function ArtSetStyle(node: Node, property: string, value: string): void;
 declare function ArtAddEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
 declare function ArtRemoveEventListener(node: Node, eventType: string, handler: (event: Event) => void, capture: boolean): void;
 // Fires your own event (any type, not just built-in ones) at a node,
@@ -539,6 +552,21 @@ declare class Node {
   // the parent up first just to call removeChild on it.
   function remove(): Node { return ArtRemove(this); }
   function cloneNode(deep: boolean): Node { return ArtCloneNode(this, deep); }
+  // The "class" attribute's space-separated tokens - flattened onto Node
+  // directly (`node.classListAdd(...)`, not a nested `classList` object).
+  function classListAdd(name: string): void { ArtClassListAdd(this, name); }
+  function classListRemove(name: string): void { ArtClassListRemove(this, name); }
+  function classListContains(name: string): boolean { return ArtClassListContains(this, name); }
+  // Plain toggle: classListToggle(name, false, false). Forced membership
+  // (real classList.toggle(name, force)): classListToggle(name, true, force).
+  function classListToggle(name: string, hasForce: boolean, force: boolean): boolean {
+    return ArtClassListToggle(this, name, hasForce, force);
+  }
+  // This node's inline `style="..."` attribute, one property at a time -
+  // only color/backgroundColor/fontWeight/borderColor/borderWidth are
+  // supported. "" if unset; setting "" removes the property.
+  function getStyle(property: string): string { return ArtGetStyle(this, property); }
+  function setStyle(property: string, value: string): void { ArtSetStyle(this, property, value); }
   // Stacks (multiple listeners on the same node/type all run) rather
   // than replacing, and the handler receives the Event itself - see the
   // Event class below for what you can read/call on it. This is the

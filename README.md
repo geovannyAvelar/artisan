@@ -321,6 +321,32 @@ be an existing child, never null - ART has no null literal to pass, so
 `.remove()` (detaches, doesn't free - same leaks-if-never-reattached
 deal a freshly created node has), and `.cloneNode(deep)`.
 
+`.classListAdd(name)`/`.classListRemove(name)`/`.classListContains(name)`/
+`.classListToggle(name, hasForce, force)` manage the `"class"`
+attribute's space-separated tokens - flattened directly onto `Node`
+rather than a nested `classList` object, since there's no separate
+handle for it at the C API level either (`ArtisanNodeClassListAdd` etc.
+in `include/node_c_api.h` take the node itself). `classListToggle`
+covers real `classList.toggle(name, force)`'s two call shapes with ART's
+always-required parameters (no optional arguments in the language):
+`classListToggle(name, false, false)` toggles membership plainly;
+`classListToggle(name, true, force)` pins it to `force` instead. Returns
+the resulting membership (`true` = now present). `.getStyle(property)`/
+`.setStyle(property, value)` read/write one inline `style="..."`
+property at a time - only `color`/`backgroundColor`/`fontWeight`/
+`borderColor`/`borderWidth` are supported (the same five a `<style>`
+block supports - see `css.h`); `""` means the property isn't set, and
+setting `""` removes it, same "" convention `getAttribute` already has.
+
+```ts
+function onItemClick(event: Event): void {
+  let item: Node = event.target;
+  let wasSelected: boolean = item.classListContains("selected");
+  item.classListToggle("selected", false, false);
+  if (wasSelected) { item.setStyle("color", ""); } else { item.setStyle("color", "blue"); }
+}
+```
+
 `document` (see `kAmbientGlobals` in `art/sema.cpp`) isn't a real
 variable or a declared function of its own - it's pure sugar, rewritten
 at compile time into a call to the `declare function ArtDocument():

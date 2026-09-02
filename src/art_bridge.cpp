@@ -163,6 +163,33 @@ void *ArtCloneNode(void *node, bool deep) {
   return ArtisanNodeCloneNode(static_cast<ArtisanNode *>(node), deep);
 }
 
+void ArtClassListAdd(void *node, ArtString *name) {
+  ArtisanNodeClassListAdd(static_cast<ArtisanNode *>(node), name->data);
+}
+
+void ArtClassListRemove(void *node, ArtString *name) {
+  ArtisanNodeClassListRemove(static_cast<ArtisanNode *>(node), name->data);
+}
+
+bool ArtClassListContains(void *node, ArtString *name) {
+  return ArtisanNodeClassListContains(static_cast<ArtisanNode *>(node), name->data);
+}
+
+bool ArtClassListToggle(void *node, ArtString *name, bool hasForce, bool force) {
+  return ArtisanNodeClassListToggle(static_cast<ArtisanNode *>(node), name->data, hasForce, force);
+}
+
+ArtString *ArtGetStyle(void *node, ArtString *property) {
+  char *value = ArtisanNodeStyleGet(static_cast<ArtisanNode *>(node), property->data);
+  ArtString *result = MakeArtString(value != nullptr ? value : "");
+  if (value != nullptr) ArtisanFreeString(value);
+  return result;
+}
+
+void ArtSetStyle(void *node, ArtString *property, ArtString *value) {
+  ArtisanNodeStyleSet(static_cast<ArtisanNode *>(node), property->data, value->data);
+}
+
 void ArtSetOnClick(void *node, ArtHandler handler) {
   // Goes straight to Node::SetOnClick rather than through node_c_api.h's
   // ArtisanNodeSetOnClick, which only knows how to wrap a Go-style

@@ -99,6 +99,32 @@ void *ArtRemove(void *node);
 // Node::CloneNode.
 void *ArtCloneNode(void *node, bool deep);
 
+// The "class" attribute's space-separated tokens - see
+// ArtisanNodeClassListAdd/Remove/Contains/Toggle (node_c_api.h). Flattened
+// onto Node directly (`node.classListAdd(...)`, not a separate
+// `classList` object) - there's no separate handle for it at the C API
+// level either, just these four operations against the node's own
+// "class" attribute. `ArtClassListToggle`: `hasForce == false` toggles
+// membership; `hasForce == true` pins it to `force` instead (real
+// `classList.toggle(name, force)` semantics - ART has no optional
+// parameters to make `force` truly optional, so both booleans are always
+// required, same convention `ArtAddEventListener`'s `capture` already
+// has). Returns the resulting membership (true = now present).
+void ArtClassListAdd(void *node, ArtString *name);
+void ArtClassListRemove(void *node, ArtString *name);
+bool ArtClassListContains(void *node, ArtString *name);
+bool ArtClassListToggle(void *node, ArtString *name, bool hasForce, bool force);
+
+// `node`'s inline `style="..."` attribute, one property at a time - only
+// the five properties a `<style>` block supports here (color/
+// backgroundColor/fontWeight/borderColor/borderWidth - see css.h). ""
+// (not null - ART's string type can't represent that, same convention
+// ArtGetAttribute already has) if the property isn't set. An empty
+// `value` passed to ArtSetStyle removes the property, matching
+// ArtisanNodeStyleSet.
+ArtString *ArtGetStyle(void *node, ArtString *property);
+void ArtSetStyle(void *node, ArtString *property, ArtString *value);
+
 // A void-returning ART function, passed as a plain code address (see
 // art/codegen.cpp's ExprKind::Identifier handling for a bare function-
 // name reference - ART's only function-pointer-shaped value, written

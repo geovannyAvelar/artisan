@@ -347,6 +347,28 @@ null literal of its own to compare against. `ArtIsNull`/`.isNull()`
 being `true` is otherwise the whole story: no exceptions, no thrown
 errors anywhere in ART.
 
+`classListAdd`/`classListRemove`/`classListContains`/`classListToggle`
+manage the `"class"` attribute's space-separated tokens - flattened
+directly onto `Node` (`item.classListAdd("selected")`), not a nested
+`classList` object, since there's no separate handle for it at the C API
+level either. `classListToggle(name, hasForce, force)` covers real
+`classList.toggle(name, force)`'s two shapes with ART's always-required
+parameters: `classListToggle(name, false, false)` is a plain toggle;
+`classListToggle(name, true, force)` pins membership to `force`.
+`getStyle`/`setStyle` read/write one inline `style="..."` property at a
+time (`color`, `backgroundColor`, `fontWeight`, `borderColor`,
+`borderWidth` - the same five a `<style>` block supports); `""` means
+unset, and setting `""` removes the property.
+
+```ts
+function onItemClick(event: Event): void {
+  let item: Node = event.target;
+  let wasSelected: boolean = item.classListContains("selected");
+  item.classListToggle("selected", false, false);
+  if (wasSelected) { item.setStyle("color", ""); } else { item.setStyle("color", "blue"); }
+}
+```
+
 `ArtDispatchEvent<T>`/`ArtEventDetail<T>` are the one part of the bridge
 still called as free functions, not methods - a method/accessor can't be
 generic yet (see [Generics](#generics)). `T` can be `number`, `boolean`,
