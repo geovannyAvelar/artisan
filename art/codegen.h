@@ -97,6 +97,23 @@ private:
   void GenGCInit();
   void DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls, bool allowMainRename);
   void GenGlobalDecl(Stmt *stmt); // a top-level `let`/`const` - see Program::globals
+  // Companion to GenGlobalDecl: every global whose initializer isn't a
+  // bare number/boolean/string literal (GenGlobalDecl already handles
+  // those as real compile-time llvm::Constants) needs its initializer
+  // expression actually *run* to get a value - a call, an object/array
+  // literal, another global, a bare function reference, ... none of
+  // which are compile-time constants. Emits one more module constructor
+  // (see GenGCInit's own doc comment for the mechanism), at a lower
+  // priority so it always runs after GC_init (an initializer that
+  // allocates needs GC_malloc already safe to call), evaluating each
+  // such global's initializer via the ordinary GenExpr machinery and
+  // storing the result - in declaration order, so an initializer may
+  // read an *earlier* global's already-stored value but not a *later*
+  // one's (see Sema::CheckGlobalDecl's own doc comment). Must run after
+  // DeclareFunctionSignatures (an initializer calling a function only
+  // needs its signature declared, not yet defined) but doesn't itself
+  // need any function's body generated first.
+  void GenGlobalInit(std::vector<std::unique_ptr<Stmt>> &globals);
   void GenBuiltinNumberToString(); // defines the LLVM function backing Sema::SeedBuiltins' "numberToString"
   void GenFunction(FunctionDecl *decl);
 

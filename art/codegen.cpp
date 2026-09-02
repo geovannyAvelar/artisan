@@ -309,6 +309,10 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   DeclareFunctionSignatures(concreteFunctions, /*allowMainRename=*/true);
   DeclareFunctionSignatures(externFunctions, /*allowMainRename=*/false);
   DeclareFunctionSignatures(instantiations, /*allowMainRename=*/false);
+  // Needs every function signature already declared above (a global
+  // initializer may call one), but not yet defined - see its own doc
+  // comment in codegen.h.
+  GenGlobalInit(program.globals);
   for (auto *fn : concreteFunctions) GenFunction(fn);
   for (auto *fn : instantiations)
     if (fn->body) GenFunction(fn);
@@ -360,31 +364,81 @@ void Codegen::DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls
 }
 
 void Codegen::GenGlobalDecl(Stmt *stmt) {
-  // Sema guarantees the initializer is a bare literal matching one of
-  // these three kinds - a real, compile-time llvm::Constant, so no
-  // IRBuilder/basic-block machinery is needed to build it (there's no
-  // static-initialization-order step at all: the global just already
-  // holds its initial value before any code runs, same as any other
-  // statically-initialized global would).
   llvm::Type *ty = MapType(stmt->resolvedVarType);
-  llvm::Constant *init;
-  switch (stmt->expr->kind) {
-  case ExprKind::NumberLiteral:
-    init = llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), stmt->expr->numberValue);
-    break;
-  case ExprKind::BoolLiteral:
-    init = llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), stmt->expr->boolValue ? 1 : 0);
-    break;
-  case ExprKind::StringLiteral:
-    init = BuildStringConstant(stmt->expr->name);
-    break;
-  default:
-    throw std::runtime_error("codegen: non-literal global initializer - Sema should have rejected this program");
+  ExprKind k = stmt->expr->kind;
+
+  // A bare number/boolean/string literal is a real, compile-time
+  // llvm::Constant - no IRBuilder/basic-block machinery needed to build
+  // it, and (unlike the general case below) genuinely never changes
+  // after this, so it's safe to mark isConstant for an ART `const` too.
+  if (k == ExprKind::NumberLiteral || k == ExprKind::BoolLiteral || k == ExprKind::StringLiteral) {
+    llvm::Constant *init;
+    switch (k) {
+    case ExprKind::NumberLiteral:
+      init = llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), stmt->expr->numberValue);
+      break;
+    case ExprKind::BoolLiteral:
+      init = llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), stmt->expr->boolValue ? 1 : 0);
+      break;
+    default:
+      init = BuildStringConstant(stmt->expr->name);
+      break;
+    }
+    auto *global = new llvm::GlobalVariable(*module, ty, /*isConstant=*/stmt->isConst,
+                                             llvm::GlobalValue::InternalLinkage, init, "global." + stmt->varName);
+    globalVars[stmt->varName] = VarBinding{global, ty};
+    return;
   }
 
-  auto *global = new llvm::GlobalVariable(*module, ty, /*isConstant=*/stmt->isConst,
-                                           llvm::GlobalValue::InternalLinkage, init, "global." + stmt->varName);
+  // Anything else (a call, an object/array literal, another global, a
+  // bare function reference, ...) isn't a compile-time constant - declare
+  // the global now, zero-valued, and let GenGlobalInit's module
+  // constructor compute/store its real value once, in declaration order,
+  // as real code (see its own doc comment). Never isConstant, even for
+  // an ART `const`: GenGlobalInit still needs to store into it exactly
+  // once - ART-level immutability past that point is already fully
+  // enforced by Sema (CheckLValueTarget rejects reassigning a `const`),
+  // not by an LLVM-level guarantee.
+  llvm::Constant *zero = llvm::Constant::getNullValue(ty);
+  auto *global = new llvm::GlobalVariable(*module, ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+                                           zero, "global." + stmt->varName);
   globalVars[stmt->varName] = VarBinding{global, ty};
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenGlobalInit(std::vector<std::unique_ptr<Stmt>> &globals) {
+  bool anyNonLiteral = false;
+  for (auto &g : globals) {
+    ExprKind k = g->expr->kind;
+    if (k != ExprKind::NumberLiteral && k != ExprKind::BoolLiteral && k != ExprKind::StringLiteral) {
+      anyNonLiteral = true;
+      break;
+    }
+  }
+  if (!anyNonLiteral) return;
+
+  llvm::FunctionType *ctorTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {}, false);
+  auto *ctorFn = llvm::Function::Create(ctorTy, llvm::Function::InternalLinkage, "art.globals_ctor", module.get());
+  auto *entry = llvm::BasicBlock::Create(context, "entry", ctorFn);
+  llvm::Function *savedCurrentFunction = currentFunction;
+  currentFunction = ctorFn;
+  builder.SetInsertPoint(entry);
+
+  for (auto &g : globals) {
+    ExprKind k = g->expr->kind;
+    if (k == ExprKind::NumberLiteral || k == ExprKind::BoolLiteral || k == ExprKind::StringLiteral) continue;
+    llvm::Value *val = GenExpr(g->expr.get());
+    VarBinding &binding = globalVars.at(g->varName);
+    builder.CreateStore(val, binding.alloca);
+  }
+
+  builder.CreateRetVoid();
+  currentFunction = savedCurrentFunction;
+
+  // A higher priority number than GenGCInit's 0 - LLVM runs lower-
+  // priority constructors first, so GC_init is always safe to have
+  // already run by the time any initializer here might allocate.
+  llvm::appendToGlobalCtors(*module, ctorFn, /*Priority=*/1);
 }
 
 // Backs Sema::SeedBuiltins' "numberToString" - real double-to-string
@@ -774,6 +828,25 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
   }
 
   case ExprKind::Call: {
+    if (expr->isIndirectCall) {
+      // `lhs` is a Handler-*valued* expression (a variable, array
+      // element, ...), not a named function or class method - there's no
+      // symbol to look up, just a computed function-pointer value (see
+      // Sema::CheckExpr's Call case). The function type only needs
+      // param types (every Handler is void-returning), taken from lhs's
+      // own resolved type rather than re-deriving it from the argument
+      // expressions, so an indirect call with zero arguments still
+      // builds the right (empty) signature.
+      llvm::Value *calleeVal = GenExpr(expr->lhs.get());
+      std::vector<llvm::Type *> paramTypes;
+      paramTypes.reserve(expr->lhs->resolvedType.handlerParamTypes->size());
+      for (auto &p : *expr->lhs->resolvedType.handlerParamTypes) paramTypes.push_back(MapType(p));
+      auto *fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), paramTypes, false);
+      std::vector<llvm::Value *> args;
+      args.reserve(expr->elements.size());
+      for (auto &argExpr : expr->elements) args.push_back(GenExpr(argExpr.get()));
+      return builder.CreateCall(fnTy, calleeVal, args);
+    }
     // resolvedCalleeName is the plain name for an ordinary call, or the
     // mangled per-instantiation name for a generic one (see
     // Sema::CheckGenericCall) - either way, exactly what

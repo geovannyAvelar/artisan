@@ -151,6 +151,19 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
   // instantiation via the `interfaces[mangled] = inst` registration
   // above - safe even for a self-referential generic class for the same
   // reason fields already are.
+  // Two phases, exactly mirroring how Check() already handles a non-
+  // generic class's methods (register every signature first via
+  // RegisterFunctionSignature, then check every body via
+  // CheckFunctionBody) - a method must be able to call a sibling method
+  // declared *later* in the same class body (e.g. `get value()` calling
+  // `this.subscribe(...)`, defined further down - see "Signals" in
+  // README.md), so every method's mere existence in inst->methods has to
+  // be visible before any of their bodies are checked. A single
+  // interleaved pass (clone-then-immediately-check, one method at a
+  // time) would only ever see methods textually *before* the one
+  // currently being checked.
+  std::vector<FunctionDecl *> instMethods;
+  instMethods.reserve(tmpl->methods.size());
   for (auto &m : tmpl->methods) {
     auto methodClone = std::make_unique<FunctionDecl>();
     methodClone->name = m->isGetter    ? MangleGetter(mangled, m->name)
@@ -173,7 +186,12 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
 
     FunctionDecl *instMethod = methodClone.get();
     inst->methods.push_back(std::move(methodClone));
+    instMethods.push_back(instMethod);
+  }
 
+  for (size_t idx = 0; idx < tmpl->methods.size(); idx++) {
+    FunctionDecl *m = tmpl->methods[idx].get();
+    FunctionDecl *instMethod = instMethods[idx];
     if (m->body) {
       instMethod->body = CloneStmt(*m->body);
       FunctionDecl *savedCurrentFunction = currentFunction;
@@ -466,24 +484,26 @@ void Sema::CheckGlobalDecl(Stmt *stmt) {
   ResolvedType declared;
   if (hasDeclared) declared = ResolveType(stmt->declaredType.get());
 
-  if (hasDeclared && declared.tag != TypeTag::Number && declared.tag != TypeTag::Boolean &&
-      declared.tag != TypeTag::String && declared.tag != TypeTag::Unknown) {
-    Error(stmt->loc, "a top-level variable can only be 'number', 'boolean', or 'string' - found '" +
-                          declared.ToString() +
-                          "' (there's no way to statically initialize an array, interface, or "
-                          "handler global yet)");
-  }
-
-  ExprKind k = stmt->expr->kind;
-  if (k != ExprKind::NumberLiteral && k != ExprKind::BoolLiteral && k != ExprKind::StringLiteral) {
-    Error(stmt->loc, "a top-level '" + std::string(stmt->isConst ? "const" : "let") +
-                          "' initializer must be a literal number, boolean, or string - ART has no "
-                          "static-initialization-order mechanism to run arbitrary code (a call, "
-                          "arithmetic, another global, ...) before setupApp/main runs");
-  }
-
+  // A top-level `let`/`const` can be any type and any initializer
+  // expression, checked exactly like a local variable's own - see
+  // Codegen::GenGlobalInit for how a non-literal one (a call, an object/
+  // array literal, another global, ...) actually gets computed: real
+  // code, run once via a module constructor, in declaration order,
+  // rather than a compile-time constant (which only a bare number/
+  // boolean/string literal can still be - see GenGlobalDecl). A global's
+  // own initializer may reference an *earlier* global (already stored by
+  // then) but not a *later* one (still holds its type's zero value at
+  // that point) - ordinary top-to-bottom declaration-order semantics,
+  // the same "declare before use" rule most languages with static
+  // initialization have, not specially enforced beyond that.
   ResolvedType actual = CheckExpr(stmt->expr.get(), hasDeclared ? &declared : nullptr);
   stmt->resolvedVarType = hasDeclared ? declared : actual;
+
+  if (!hasDeclared && actual.tag == TypeTag::Unknown) {
+    Error(stmt->loc, "cannot infer a type for '" + stmt->varName + "' - add an explicit type annotation");
+  } else if (!hasDeclared && actual.tag == TypeTag::Void) {
+    Error(stmt->loc, "cannot declare '" + stmt->varName + "' with type void");
+  }
 
   if (globals.count(stmt->varName) || functions.count(stmt->varName)) {
     Error(stmt->loc, "'" + stmt->varName + "' is already declared");
@@ -1025,39 +1045,77 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       actual = method->resolvedReturnType;
       break;
     }
-    if (expr->lhs->kind != ExprKind::Identifier) {
-      Error(expr->loc, "only direct calls to a named function or a method call ('obj.method(...)') are supported");
-      for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
-      actual = ResolvedType{};
-      break;
-    }
     if (!expr->typeArgs.empty()) {
+      if (expr->lhs->kind != ExprKind::Identifier) {
+        Error(expr->loc, "only a direct call to a named generic function can take explicit type arguments");
+        for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+        actual = ResolvedType{};
+        break;
+      }
       actual = CheckGenericCall(expr);
       break;
     }
-    const std::string &callee = expr->lhs->name;
-    expr->resolvedCalleeName = callee;
-    auto it = functions.find(callee);
-    if (it == functions.end() || !IsVisible(callee)) {
-      if (it == functions.end() && genericFunctions.count(callee) && IsVisible(callee)) {
+
+    if (expr->lhs->kind == ExprKind::Identifier && !Lookup(expr->lhs->name)) {
+      // No local/global *variable* shadows this name - try it as an
+      // ordinary named-function call first (unchanged from before this
+      // callee could also be an indirect one - see below).
+      const std::string &callee = expr->lhs->name;
+      auto it = functions.find(callee);
+      if (it != functions.end() && IsVisible(callee)) {
+        expr->resolvedCalleeName = callee;
+        FunctionDecl *fn = it->second;
+        if (fn->params.size() != expr->elements.size()) {
+          Error(expr->loc, "function '" + callee + "' expects " + std::to_string(fn->params.size()) +
+                                " argument(s), got " + std::to_string(expr->elements.size()));
+        }
+        size_t n = std::min(fn->params.size(), expr->elements.size());
+        for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
+        for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
+        actual = fn->resolvedReturnType;
+        break;
+      }
+      if (genericFunctions.count(callee) && IsVisible(callee)) {
         Error(expr->loc, "generic function '" + callee + "' requires explicit type arguments, e.g. '" + callee +
                               "::<Type>(...)'");
-      } else {
-        Error(expr->loc, "call to undefined function '" + callee + "'" + VisibilityHint(callee));
+        for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+        actual = ResolvedType{};
+        break;
+      }
+      // Falls through to the general Handler-value call path below - not
+      // a known function name either, so it reports as an ordinary
+      // undefined identifier from there if it isn't some other kind of
+      // Handler-valued expression.
+    }
+
+    // General case: call any Handler-valued expression - a plain
+    // variable, an array element, ... anything that isn't a class method
+    // or a named top-level function (both handled above). Always an
+    // *indirect* call at the LLVM level (see Expr::isIndirectCall and
+    // Codegen's own Call case) - there's no symbol name to look up here,
+    // just a computed function-pointer value. This is what actually lets
+    // a reactive value's stored subscriber callbacks be invoked at all
+    // (see "Signals" in README.md) - a bare function name alone could
+    // never express "whichever handler happens to be in this slot".
+    ResolvedType calleeT = CheckExpr(expr->lhs.get(), nullptr);
+    if (calleeT.tag != TypeTag::Handler) {
+      if (calleeT.tag != TypeTag::Unknown) {
+        Error(expr->loc, "cannot call a value of type '" + calleeT.ToString() + "'");
       }
       for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
       actual = ResolvedType{};
       break;
     }
-    FunctionDecl *fn = it->second;
-    if (fn->params.size() != expr->elements.size()) {
-      Error(expr->loc, "function '" + callee + "' expects " + std::to_string(fn->params.size()) +
-                            " argument(s), got " + std::to_string(expr->elements.size()));
+    const std::vector<ResolvedType> &paramTypes = *calleeT.handlerParamTypes;
+    if (paramTypes.size() != expr->elements.size()) {
+      Error(expr->loc, "expected " + std::to_string(paramTypes.size()) + " argument(s), got " +
+                            std::to_string(expr->elements.size()));
     }
-    size_t n = std::min(fn->params.size(), expr->elements.size());
-    for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
+    size_t n = std::min(paramTypes.size(), expr->elements.size());
+    for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &paramTypes[i]);
     for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
-    actual = fn->resolvedReturnType;
+    expr->isIndirectCall = true;
+    actual = ResolvedType::Void();
     break;
   }
 

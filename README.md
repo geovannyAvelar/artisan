@@ -737,17 +737,24 @@ function onClick(): void {
 }
 ```
 
-Its initializer must be a literal number/boolean/string, not a call,
-arithmetic, an object/array literal, or another global - ART has no
-static-initialization-order mechanism to run arbitrary code before
-`setupApp`/`main`, and there'd be nowhere to put the result anyway for an
-array/interface global, whose value is a `malloc`'d heap allocation, not
-a compile-time constant. This also means a global can only be `number`/
-`boolean`/`string` - no `Node`, array, or interface globals - so a
-handler still can't stash a `Node` it found earlier in one directly; it
-calls `document.getElementById(...)` (or the ambient `document` itself)
-again instead (cheap - both are simple pointer lookups, not a real
-query), the same way it would reach the DOM at all in the first place.
+A global's type and initializer can be anything a local variable's can -
+a call, an object/array literal, another (earlier) global, a bare
+function reference, ... A bare number/boolean/string literal is still
+special-cased as a real compile-time `llvm::Constant` (`Codegen::
+GenGlobalDecl`); anything else is computed by running real code once, in
+declaration order, via a second LLVM module constructor
+(`Codegen::GenGlobalInit`) - the same static-initialization-before-`main`
+mechanism the garbage collector's own `GC_init` already uses, just
+extended to cover arbitrary global initializers too, always scheduled to
+run *after* `GC_init` (an initializer that allocates - an object/array
+literal - needs `GC_malloc` already safe to call). A later global can
+reference an earlier one (already stored by the time its own initializer
+runs) but not the reverse - ordinary top-to-bottom "declare before use"
+semantics, the same rule most languages with static initialization have,
+not specially enforced beyond that. This is what makes it possible to
+hold real, persistent app state at the top level - a `Node` a handler
+found earlier, a whole struct, a `Signal<T>` (see "Signals" below) -
+without threading it through every function that needs it.
 
 `numberToString(n: number): string` - a real built-in, not a
 `declare function` (it needs no C++ counterpart in a project's own code,
@@ -808,6 +815,119 @@ handed across the FFI boundary (e.g. an `ArtString*` passed into a
 `declare function`) is safe without any extra bookkeeping: `art_bridge.h`
 copies it into artisan's own (unrelated) memory before doing anything
 that could outlive the call.
+
+### Signals
+
+A `Signal<T>` is a reactive value: reading `.value` inside an `effect()`
+automatically subscribes that effect to it, and writing `.value`
+automatically re-runs every effect that ever read it - no manual "now go
+update the label" call anywhere. This isn't a compiler feature - it's an
+ordinary generic class, built entirely from what's already covered
+above (generics, `get`/`set` accessors, non-literal globals, and one
+more small piece: calling a Handler-*valued* expression, not just a bare
+function name - see below):
+
+```ts
+const MAX_SUBSCRIBERS: number = 16;
+function noopEffect(): void {}
+
+// Which effect is currently running, if any - ambient by necessity: any
+// signal, anywhere, needs to see it, not just whichever function happens
+// to have it in scope. Only possible now that a global can hold a
+// Handler value at all - see the top-level `let`/`const` note above.
+let currentEffect: () => void = noopEffect;
+
+export class Signal<T> {
+  raw: T;
+  subscribers: () => void[];
+  subscriberCount: number;
+
+  get value(): T {
+    if (currentEffect != noopEffect) { this.subscribe(currentEffect); }
+    return this.raw;
+  }
+  set value(v: T) {
+    this.raw = v;
+    this.notify();
+  }
+
+  function subscribe(fn: () => void): void {
+    let i: number = 0;
+    while (i < this.subscriberCount) {
+      if (this.subscribers[i] == fn) { return; } // already subscribed
+      i = i + 1;
+    }
+    if (this.subscriberCount < MAX_SUBSCRIBERS) {
+      this.subscribers[this.subscriberCount] = fn;
+      this.subscriberCount = this.subscriberCount + 1;
+    }
+  }
+
+  function notify(): void {
+    let i: number = 0;
+    while (i < this.subscriberCount) {
+      let fn: () => void = this.subscribers[i]; // an array element, not a
+      fn();                                      // named function - see below
+      i = i + 1;
+    }
+  }
+}
+
+export function makeSignal<T>(initial: T): Signal<T> {
+  return { raw: initial, subscriberCount: 0, subscribers: [
+    noopEffect, noopEffect, noopEffect, noopEffect, noopEffect, noopEffect,
+    noopEffect, noopEffect, noopEffect, noopEffect, noopEffect, noopEffect,
+    noopEffect, noopEffect, noopEffect, noopEffect
+  ] };
+}
+
+export function effect(fn: () => void): void {
+  let saved: () => void = currentEffect;
+  currentEffect = fn;
+  fn(); // runs once now, tracking whatever it reads along the way
+  currentEffect = saved; // restores correctly even if effects nest
+}
+```
+
+Used like this - note `onButtonClick` never touches the DOM at all:
+
+```ts
+let clickCount: Signal<number> = makeSignal::<number>(0);
+
+function updateLabel(): void {
+  let label: Node = document.getElementById("count");
+  if (!label.isNull()) { label.textContent = numberToString(clickCount.value); }
+}
+
+function onButtonClick(event: Event): void {
+  clickCount.value = clickCount.value + 1; // updateLabel re-runs on its own
+}
+
+function setupApp(): void {
+  effect(updateLabel); // binds the label to clickCount, once, for good
+  let button: Node = document.getElementById("increment-button");
+  if (!button.isNull()) { button.addEventListener("click", onButtonClick, false); }
+}
+```
+
+`this.subscribers[i]()` above is the one genuinely new piece: calling a
+Handler stored in a variable or array element, not a bare function name
+or a class method. A bare name alone could never express "whichever
+handler happens to be in this slot" - `notify()` doesn't know at compile
+time which functions will have subscribed. Codegen emits this as a real
+indirect call (through the computed function-pointer value, not a
+symbol lookup - see `Expr::isIndirectCall`) - full run-time cost of one
+call, same as any other, just resolved through a value instead of a
+name.
+
+Two deliberate limitations, both to keep this simple rather than because
+of some deeper wall: no `unsubscribe` (a binding lives for the app's
+whole lifetime, which is what a small desktop app almost always wants
+anyway), and each signal's subscriber list has a fixed capacity
+(`MAX_SUBSCRIBERS`) rather than growing without bound - ART has no
+runtime-sized array allocation yet (every array literal still spells out
+every element), so `makeSignal<T>` pre-fills a fixed-size placeholder
+array once, hidden from callers, instead.
 
 Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
 Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is

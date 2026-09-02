@@ -116,6 +116,13 @@ struct Expr {
 
   bool isLengthAccess = false; // Member: true when field is the built-in `.length` on an array/string
   bool isPostfix = false; // IncDec: `x++`/`x--` (evaluates to the OLD value) vs `++x`/`--x` (the NEW value)
+  // Call: true when `lhs` is a Handler-*valued* expression (a variable,
+  // array element, ...) rather than a named function or class method -
+  // Codegen evaluates `lhs` itself to get the callee (a computed
+  // function-pointer value) and emits an indirect call, instead of
+  // looking `resolvedCalleeName` up in its own function table. See
+  // Sema::CheckExpr's Call case.
+  bool isIndirectCall = false;
 
   // Call to a generic function, e.g. `identity::<number>(5)` - the
   // explicit turbofish type argument list (never inferred - see
