@@ -126,6 +126,25 @@ let zeros: number[] = makeArray::<number>(10, 0);
 the *same* object, the same well-known gotcha a real `Array(n).fill(obj)`
 has in JS.
 
+`cond ? then : else` - the conditional (ternary) operator - is a real
+expression, not a two-armed `if`/`else` in disguise: real branching plus
+an LLVM `phi` node selecting the result, so only the taken branch's side
+effects run (not an eagerly-evaluated `select`). Same precedence real
+TS/JS gives it: lower than `||`, higher than `=` (`a || b ? c : d` is
+`(a || b) ? c : d`; a bare ternary can't itself be an assignment
+target). Right-associative, so it chains without parens: `a ? b : c ?
+d : e` is `a ? b : (c ? d : e)`. No union types, so both branches must
+resolve to the exact same type (not just something wide enough to cover
+either, the way real TS/JS would widen to e.g. `number | string`) -
+checked against an expected type when one's available (a `let`'s own
+declared type, a function's return type, ...), otherwise inferred from
+the `then` branch and required of `else` too.
+
+```ts
+let max: number = a > b ? a : b;
+item.setStyle("color", wasSelected ? "" : "blue");
+```
+
 ### Functions
 
 ```ts

@@ -68,6 +68,7 @@ private:
 
   std::unique_ptr<Expr> ParseExpr();
   std::unique_ptr<Expr> ParseAssignment();
+  std::unique_ptr<Expr> ParseConditional();
   std::unique_ptr<Expr> ParseLogicalOr();
   std::unique_ptr<Expr> ParseLogicalAnd();
   std::unique_ptr<Expr> ParseEquality();

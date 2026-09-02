@@ -105,6 +105,12 @@ enum class ExprKind {
   // to statement position, the same way an ObjectLiteral already builds
   // a heap value through a sequence of instructions before yielding it.
   JsxElement,
+  // `cond ? thenExpr : elseExpr` - reuses Unary/IncDec's `operand` for
+  // `cond` and Binary/Assign's `lhs`/`rhs` for the two branches, rather
+  // than adding Conditional-specific fields. Both branches must resolve
+  // to the same type (see Sema::CheckExpr) - that shared type is this
+  // expression's own resolvedType.
+  Conditional,
 };
 
 struct Expr {
@@ -117,9 +123,9 @@ struct Expr {
   std::string name;                          // Identifier / Member (field name) / Call (callee name) / StringLiteral (decoded value) / JsxElement (tag name)
   std::string op;                            // Binary / Unary / IncDec ("++"/"--") / Assign
 
-  std::unique_ptr<Expr> lhs;                 // Binary lhs, Assign target, Index/Member object
-  std::unique_ptr<Expr> rhs;                 // Binary rhs, Assign value
-  std::unique_ptr<Expr> operand;             // Unary/IncDec target, Index's bracket expression
+  std::unique_ptr<Expr> lhs;                 // Binary lhs, Assign target, Index/Member object, Conditional then-branch
+  std::unique_ptr<Expr> rhs;                 // Binary rhs, Assign value, Conditional else-branch
+  std::unique_ptr<Expr> operand;             // Unary/IncDec target, Index's bracket expression, Conditional condition
 
   std::vector<std::unique_ptr<Expr>> elements; // Call args / ArrayLiteral elements / JsxElement children
   std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields; // ObjectLiteral / JsxElement attributes (name -> value)

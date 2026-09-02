@@ -1149,6 +1149,34 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     builder.CreateStore(toStore, lv.addr);
     return rhsVal;
   }
+
+  case ExprKind::Conditional: {
+    // Real branching + a PHI selecting the result, same shape the `&&`/
+    // `||` short-circuit codegen above already has - just for an
+    // arbitrary shared type (Sema already confirmed both branches agree)
+    // instead of always i1.
+    llvm::Value *condVal = GenExpr(expr->operand.get());
+    auto *thenBB = llvm::BasicBlock::Create(context, "cond.then", currentFunction);
+    auto *elseBB = llvm::BasicBlock::Create(context, "cond.else", currentFunction);
+    auto *mergeBB = llvm::BasicBlock::Create(context, "cond.end", currentFunction);
+    builder.CreateCondBr(condVal, thenBB, elseBB);
+
+    builder.SetInsertPoint(thenBB);
+    llvm::Value *thenVal = GenExpr(expr->lhs.get());
+    llvm::BasicBlock *thenEndBB = builder.GetInsertBlock();
+    builder.CreateBr(mergeBB);
+
+    builder.SetInsertPoint(elseBB);
+    llvm::Value *elseVal = GenExpr(expr->rhs.get());
+    llvm::BasicBlock *elseEndBB = builder.GetInsertBlock();
+    builder.CreateBr(mergeBB);
+
+    builder.SetInsertPoint(mergeBB);
+    llvm::PHINode *phi = builder.CreatePHI(MapType(expr->resolvedType), 2);
+    phi->addIncoming(thenVal, thenEndBB);
+    phi->addIncoming(elseVal, elseEndBB);
+    return phi;
+  }
   }
 
   throw std::runtime_error("codegen: unhandled expression kind");

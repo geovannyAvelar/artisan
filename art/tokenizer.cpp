@@ -44,6 +44,7 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::Colon: return "':'";
   case TokenKind::ColonColon: return "'::'";
   case TokenKind::Dot: return "'.'";
+  case TokenKind::Question: return "'?'";
   case TokenKind::Plus: return "'+'";
   case TokenKind::Minus: return "'-'";
   case TokenKind::Star: return "'*'";
@@ -226,6 +227,7 @@ Token Tokenizer::Next() {
     if (Current() == ':') { Advance(); return MakeToken(TokenKind::ColonColon, "::", loc); }
     return MakeToken(TokenKind::Colon, ":", loc);
   case '.': return MakeToken(TokenKind::Dot, ".", loc);
+  case '?': return MakeToken(TokenKind::Question, "?", loc);
   case '+':
     if (Current() == '+') { Advance(); return MakeToken(TokenKind::PlusPlus, "++", loc); }
     return MakeToken(TokenKind::Plus, "+", loc);

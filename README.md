@@ -939,8 +939,18 @@ get/set-*accessor* property specifically, which supports plain
 assignment but not increment/decrement, see "Getters and setters" above
 for why) - real TS's chaining rules apply here too (`x++.foo`/`x++()`
 aren't expressions; postfix always ends the expression it's attached
-to). No inheritance, real closures, `any`, or union types. See the doc
-comments in `art/*.h`/`art/*.cpp` for the exact grammar and
+to); and the conditional (ternary) operator, `cond ? then : else` - a
+real expression (real branching + an LLVM `phi` selecting the result,
+not an eagerly-evaluated `select`, so only the taken branch's side
+effects actually run), same precedence real TS/JS gives it (lower than
+`||`, higher than `=` - `a || b ? c : d` is `(a || b) ? c : d`;
+`a ? b : c = 5` is a parse error, same as real TS/JS). No union types,
+so - unlike real TS/JS, which would widen to `number | string` - both
+branches must resolve to the exact same type: checked against an
+`expected` type when one's available (e.g. a `let`'s own declared
+type), otherwise inferred from the `then` branch and required of
+`else` too. No inheritance, real closures, `any`, or union types. See
+the doc comments in `art/*.h`/`art/*.cpp` for the exact grammar and
 type-checking rules.
 
 Every array/object/string is a heap allocation, garbage-collected by the

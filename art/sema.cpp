@@ -1443,6 +1443,30 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     actual = targetT;
     break;
   }
+
+  case ExprKind::Conditional: {
+    ResolvedType boolType = ResolvedType::Boolean();
+    CheckExpr(expr->operand.get(), &boolType);
+    // No union types (see README.md's "What's not in ART") - both
+    // branches must resolve to the exact same type, not just something
+    // wide enough to cover either. With an expected type (e.g. a `let`'s
+    // own declared type), check both branches against it directly, the
+    // same way ArrayLiteral checks every element against an expected
+    // array's element type; with none, infer from the then-branch and
+    // check the else-branch against that, the same way ArrayLiteral
+    // infers its element type from the first element when there's
+    // nothing else to go on.
+    if (expected) {
+      CheckExpr(expr->lhs.get(), expected);
+      CheckExpr(expr->rhs.get(), expected);
+      actual = *expected;
+    } else {
+      ResolvedType thenT = CheckExpr(expr->lhs.get(), nullptr);
+      CheckExpr(expr->rhs.get(), &thenT);
+      actual = thenT;
+    }
+    break;
+  }
   }
 
   expr->resolvedType = actual;

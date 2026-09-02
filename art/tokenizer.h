@@ -49,6 +49,7 @@ enum class TokenKind {
   Colon,
   ColonColon,
   Dot,
+  Question,
 
   // Operators
   Plus,

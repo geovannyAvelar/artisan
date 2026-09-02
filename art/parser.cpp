@@ -547,7 +547,7 @@ std::unique_ptr<Stmt> Parser::ParseReturn() {
 std::unique_ptr<Expr> Parser::ParseExpr() { return ParseAssignment(); }
 
 std::unique_ptr<Expr> Parser::ParseAssignment() {
-  auto lhs = ParseLogicalOr();
+  auto lhs = ParseConditional();
   if (Check(TokenKind::Assign)) {
     SourceLoc loc = Cur().loc;
     pos++;
@@ -558,6 +558,29 @@ std::unique_ptr<Expr> Parser::ParseAssignment() {
     return e;
   }
   return lhs;
+}
+
+// `cond ? then : else` - the condition is a LogicalOr-level expression
+// (so `a || b ? c : d` parses as `(a || b) ? c : d`, matching real TS/JS
+// precedence - a bare ternary can't be the condition without parens);
+// each branch is parsed at ParseAssignment's own level, so both nested
+// ternaries and assignments inside a branch work, and `a ? b : c ? d : e`
+// is right-associative (`a ? b : (c ? d : e)`), same as real TS/JS.
+std::unique_ptr<Expr> Parser::ParseConditional() {
+  auto cond = ParseLogicalOr();
+  if (Check(TokenKind::Question)) {
+    SourceLoc loc = Cur().loc;
+    pos++;
+    auto thenExpr = ParseAssignment();
+    Expect(TokenKind::Colon, "to separate a conditional expression's branches ('cond ? then : else')");
+    auto elseExpr = ParseAssignment();
+    auto e = MakeExpr(ExprKind::Conditional, loc);
+    e->operand = std::move(cond);
+    e->lhs = std::move(thenExpr);
+    e->rhs = std::move(elseExpr);
+    return e;
+  }
+  return cond;
 }
 
 std::unique_ptr<Expr> Parser::ParseLogicalOr() {
