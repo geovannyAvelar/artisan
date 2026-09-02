@@ -131,6 +131,7 @@ private:
   // exist.
   void GenSetupAppBody(std::vector<std::unique_ptr<Stmt>> &stmts);
   void GenBuiltinNumberToString(); // defines the LLVM function backing Sema::SeedBuiltins' "numberToString"
+  void GenBuiltinStringToNumber(); // defines the LLVM function backing Sema::SeedBuiltins' "stringToNumber"
   // Defines one instantiation's LLVM function backing Sema::SeedBuiltins'
   // "makeArray" generic template - called once per distinct T actually
   // used (see Generate()'s own split of sema.Instantiations() into

@@ -334,6 +334,19 @@ void Sema::SeedBuiltins() {
   builtinNames.insert("numberToString");
   builtins.push_back(std::move(numberToString));
 
+  auto stringToNumber = std::make_unique<FunctionDecl>();
+  stringToNumber->name = "stringToNumber";
+  Param s;
+  s.name = "s";
+  s.resolvedType = ResolvedType::String();
+  stringToNumber->params.push_back(std::move(s));
+  stringToNumber->resolvedReturnType = ResolvedType::Number();
+  // No body - Codegen::GenBuiltinStringToNumber generates its LLVM
+  // definition directly, same as numberToString above.
+  functions["stringToNumber"] = stringToNumber.get();
+  builtinNames.insert("stringToNumber");
+  builtins.push_back(std::move(stringToNumber));
+
   // makeArray<T>(size: number, fill: T): T[] - allocates a real,
   // *runtime-sized* array (every array literal, `[a, b, c]`, still has
   // to spell out every element at compile time - this is the one way to

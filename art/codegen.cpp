@@ -269,6 +269,7 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
                                          false));
 
   GenBuiltinNumberToString();
+  GenBuiltinStringToNumber();
 
   for (auto &g : program.globals) GenGlobalDecl(g.get());
 
@@ -538,6 +539,46 @@ void Codegen::GenBuiltinNumberToString() {
   builder.CreateStore(len, builder.CreateStructGEP(GetArrayHeaderType(), header, 0));
   builder.CreateStore(buf, builder.CreateStructGEP(GetArrayHeaderType(), header, 1));
   builder.CreateRet(header);
+  currentFunction = nullptr;
+}
+
+// Backs Sema::SeedBuiltins' "stringToNumber" - defers to libc's `strtod`
+// for the actual parsing, same "trust libc over reimplementing a
+// well-known hard problem" call GenBuiltinNumberToString already makes
+// for the opposite direction. `s`'s data buffer is already
+// null-terminated (see ArtString's own doc comment in art_bridge.h, and
+// every other string codegen path here that relies on it), so it can be
+// handed to strtod directly with no copy. Parses a leading numeric
+// prefix - optional whitespace, sign, digits, decimal point, exponent -
+// the same lenient behavior real JS `parseFloat` has (`parseFloat(
+// "42px")` -> 42), not real JS `Number()`, which requires the whole
+// string to be numeric. strtod's own "no conversion could be performed"
+// case (nothing numeric at the start at all) isn't distinguished from a
+// genuine "0" - both return 0.0, the same "no exceptions, simple
+// default on failure" contract every other ART builtin already has (see
+// ArtChildAt's out-of-bounds note, or makeArray's aliasing one) rather
+// than needing a NaN/isNaN pair just for this one case.
+void Codegen::GenBuiltinStringToNumber() {
+  llvm::Type *doubleTy = llvm::Type::getDoubleTy(context);
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+
+  auto *fnTy = llvm::FunctionType::get(doubleTy, {ptrTy}, false);
+  auto *fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "art.stringToNumber", module.get());
+  llvmFunctions["stringToNumber"] = fn;
+  currentFunction = fn;
+
+  auto *entry = llvm::BasicBlock::Create(context, "entry", fn);
+  builder.SetInsertPoint(entry);
+  llvm::Argument *sArg = &*fn->arg_begin();
+  sArg->setName("s");
+
+  llvm::StructType *hdrTy = GetArrayHeaderType();
+  llvm::Value *dataPtr = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, sArg, 1));
+
+  llvm::FunctionCallee strtodFn =
+      module->getOrInsertFunction("strtod", llvm::FunctionType::get(doubleTy, {ptrTy, ptrTy}, false));
+  llvm::Value *result = builder.CreateCall(strtodFn, {dataPtr, llvm::Constant::getNullValue(ptrTy)});
+  builder.CreateRet(result);
   currentFunction = nullptr;
 }
 

@@ -831,10 +831,29 @@ JS's), `-0` prints as `"-0"` rather than `"0"`, and extremely large/small
 magnitudes may round or switch to scientific notation slightly
 differently.
 
+`stringToNumber(s: string): number` is the other direction - built the
+same way, another real built-in with no `declare function` needed,
+deferring to libc's `strtod` for the actual parsing. It reads a leading
+numeric prefix - optional whitespace, sign, digits, decimal point,
+exponent - the same lenient behavior real JS `parseFloat` has
+(`stringToNumber("42px")` -> `42`, not a failure), not real JS
+`Number()`, which requires the whole string to be numeric. A string
+with no numeric prefix at all (`stringToNumber("abc")`) returns `0`, not
+an error or `NaN` - ART has no exceptions and `number` has no
+`.isNull()`-style sentinel, so this keeps the same "no exceptions,
+simple default on failure" contract every other builtin already has,
+rather than needing a `NaN`/`isNaN` pair just for this one case. This is
+what reads a number back out of a text input's value or an attribute:
+
+```ts
+let input: Node = document.getElementById("quantity");
+let n: number = stringToNumber(input.textContent);
+```
+
 The language itself: `function`/`interface`/`let`/`const` (locals and
 top-level), `if`/`else`, `while`, C-style `for`, `for...of` over an array,
-`number` (a double, same as real TS) with the `numberToString` builtin
-above, `boolean`, `string` (with `+` concatenation, `==`/`!=`, `.length`,
+`number` (a double, same as real TS) with the `numberToString`/
+`stringToNumber` builtins above, `boolean`, `string` (with `+` concatenation, `==`/`!=`, `.length`,
 and `s[i]` indexing - immutable, no `s[i] = ...`), `T[]` arrays,
 structural interfaces (an object literal must match a declared
 `interface` exactly - no excess or missing fields), `class`/`declare

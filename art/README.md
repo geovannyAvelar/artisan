@@ -101,6 +101,14 @@ for (let x of xs) {
 }
 ```
 
+`numberToString(n: number): string`/`stringToNumber(s: string): number`
+are real builtins, not `declare function`s - available in any ART
+program, DOM or not. `stringToNumber` parses a leading numeric prefix,
+parseFloat-style (`stringToNumber("42px")` -> `42`); a string with no
+numeric prefix at all returns `0`, not an error - see
+[the main README](../README.md#using-art) for the full contract of
+each, including libc's `%.15g`/`strtod` edge cases.
+
 An array *literal* always spells out every element at compile time -
 `makeArray<T>(size: number, fill: T): T[]`, a builtin (like
 `numberToString`), is the way to allocate one whose length is only
