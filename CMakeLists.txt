@@ -98,7 +98,7 @@ set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
 set(ARTISAN_APP_GO_SOURCE "" CACHE STRING
     "Optional directory of a Go app (its own go.mod/main.go, see go/artisango) compiled and linked into the app")
 set(ARTISAN_APP_ART_SOURCE "" CACHE STRING
-    "Optional single .art file (see art/), compiled ahead of time with the ART compiler and linked into the app")
+    "Optional single .ts file (see art/), compiled ahead of time with the ART compiler and linked into the app")
 
 set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
@@ -193,15 +193,15 @@ else()
 endif()
 
 # ARTISAN_APP_ART_SOURCE is the ART counterpart to ARTISAN_APP_GO_SOURCE
-# above: a single .art file (mirroring ARTISAN_APP_JS_SOURCE's "one file
-# at the project root" convention, not Go's whole-module-directory one -
-# ART has no multi-file/import system yet) compiled ahead of time with
+# above: a single entry-point .ts file (mirroring ARTISAN_APP_JS_SOURCE's
+# "one file at the project root" convention, not Go's whole-module-
+# directory one - though it can still pull in other .ts files itself via
+# `import`, see art/module_resolver.cpp) compiled ahead of time with
 # the ART compiler (art/ - a separate CMake project, only pulled in here
 # when actually needed, since it requires LLVM) into a native object file
 # and linked straight into the artisan binary, same as Skia's/Go's own
-# prebuilt artifacts above. It must define `function setupApp(document:
-# Node): void` - see art_bridge.h for the `declare`-able DOM API it can
-# call, and README.md's "Using ART" section.
+# prebuilt artifacts above. See art_bridge.h for the `declare`-able DOM
+# API it can call, and README.md's "Using ART" section.
 set(GENERATED_ART_OBJECT "${CMAKE_BINARY_DIR}/generated_art_app.o")
 
 if(ARTISAN_APP_ART_SOURCE)
@@ -403,7 +403,7 @@ install(DIRECTORY include/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/include")
 install(DIRECTORY src/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/src")
 install(DIRECTORY go/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/go")
 # The ART compiler's own source (see art/CMakeLists.txt) - needed at
-# `artisan-cli build` time for any project with an app.art
+# `artisan-cli build` time for any project with an app.ts
 # (ARTISAN_APP_ART_SOURCE), the same reason src/ above is. `build`
 # excluded the same way third_party/skia's own `out` is below: whatever
 # the packaging machine happened to have configured/built there is
@@ -448,7 +448,7 @@ set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
 # artisan-cli's own runtime deps (it barely has any), but what makes the
 # projects it builds actually compile once this package is installed.
 # llvm-18-dev/libgc-dev are only ever needed for an ART project
-# (--lang art / app.art) - see art/CMakeLists.txt's own LLVM discovery
+# (--lang art / app.ts) - see art/CMakeLists.txt's own LLVM discovery
 # and this file's ARTISAN_GC_LIB - but Depends can't be conditional on
 # what a given project ends up using, so they're unconditional here the
 # same way libsdl2-dev etc. already are.

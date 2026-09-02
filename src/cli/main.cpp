@@ -14,10 +14,10 @@
 // for naming individual files by hand - always a project directory, so
 // there's exactly one way a project is laid out.
 //
-// `new` writes out a starting point for one native language - C++
-// (src/main.cpp, the default), with --lang go, Go (goapp/), or with
-// --lang art, ART (app.art, see art/) - a project uses exactly one of
-// these, never more than one (see DiscoverProject). Script (app.js) is
+// `new` writes out a starting point for one native language - ART
+// (app.ts, see art/, the default), with --lang cpp, C++ (src/main.cpp),
+// or with --lang go, Go (goapp/) - a project uses exactly one of these,
+// never more than one (see DiscoverProject). Script (app.js) is
 // orthogonal to that choice and can layer on any of them.
 //
 // `component` scaffolds a smaller, reusable pairing within an existing
@@ -75,8 +75,8 @@ void PrintBuildUsage() {
          "  <project-dir>/goapp/            a native Go app instead, if the\n"
          "        project uses that language - its own go.mod/main.go (see\n"
          "        go/artisango), compiled ahead of time, never combined\n"
-         "        with src/**/*.cpp or app.art in the same project.\n"
-         "  <project-dir>/app.art           a native ART app instead (see\n"
+         "        with src/**/*.cpp or app.ts in the same project.\n"
+         "  <project-dir>/app.ts            a native ART app instead (see\n"
          "        art/) - one file, compiled ahead of time, never combined\n"
          "        with src/**/*.cpp or goapp/ in the same project.\n"
          "  <project-dir>/app.js            optional embedded script -\n"
@@ -201,7 +201,7 @@ struct DiscoveredProject {
   std::vector<fs::path> cppPaths;
   fs::path jsPath;  // Empty if app.js doesn't exist.
   fs::path goPath;  // Empty if goapp/go.mod doesn't exist.
-  fs::path artPath; // Empty if app.art doesn't exist.
+  fs::path artPath; // Empty if app.ts doesn't exist.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
@@ -242,9 +242,10 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.goPath = fs::absolute(goPath);
   }
 
-  // An ART app is a single file, like app.js - not a directory/module the
-  // way a Go app is, since ART has no multi-file/import system yet.
-  fs::path artPath = projectDir / "app.art";
+  // An ART app's entry point is a single file - see ModuleResolver
+  // (art/module_resolver.cpp) for how it pulls in any other .ts files it
+  // imports from there.
+  fs::path artPath = projectDir / "app.ts";
   if (fs::exists(artPath)) {
     discovered.artPath = fs::absolute(artPath);
   }
@@ -259,7 +260,7 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
                         (!discovered.artPath.empty() ? 1 : 0);
   if (nativeLangCount > 1) {
     std::cerr << "artisan-cli: " << projectDir
-               << " has more than one of src/**/*.cpp, goapp/, and app.art "
+               << " has more than one of src/**/*.cpp, goapp/, and app.ts "
                   "- a project can only use one native language at a "
                   "time. Remove the ones you don't want.\n";
     std::exit(1);
@@ -349,14 +350,23 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 }
 
 void PrintNewUsage() {
-  std::cerr << "usage: artisan-cli new <project-dir> [--lang cpp|go|art]\n\n"
+  std::cerr << "usage: artisan-cli new <project-dir> [--lang art|cpp|go]\n\n"
                "Scaffolds a new artisan project at <project-dir>:\n"
                "  pages/index.html   starter markup - the page the app\n"
                "                     opens on; add more pages/*.html (or\n"
                "                     pages/some-folder/*.html for a nested\n"
                "                     route, Next.js-style) and link between\n"
                "                     them with <a href=\"...\">\n\n"
-               "  --lang cpp (default)\n"
+               "  --lang art (default)\n"
+               "    app.ts           an ART app (see art/) - a statically\n"
+               "                     typed, TypeScript-like language\n"
+               "                     compiled ahead of time with the ART\n"
+               "                     compiler. Top-level statements run\n"
+               "                     once per page load, and code reaches\n"
+               "                     the DOM through `declare function`s -\n"
+               "                     see include/art_bridge.h and\n"
+               "                     README.md's \"Using ART\" section.\n\n"
+               "  --lang cpp\n"
                "    src/main.cpp     native SetupApp(Node&) - see\n"
                "                     include/app.h. Add more src/*.cpp as\n"
                "                     the project grows - every one gets\n"
@@ -365,15 +375,6 @@ void PrintNewUsage() {
                "    goapp/           a Go app (go.mod/main.go) exporting\n"
                "                     ArtisanSetupApp - see go/artisango and\n"
                "                     README.md's \"Using Go\" section.\n\n"
-               "  --lang art\n"
-               "    app.art          an ART app (see art/) - a statically\n"
-               "                     typed, TypeScript-like language\n"
-               "                     compiled ahead of time with the ART\n"
-               "                     compiler. Defines `function setupApp\n"
-               "                     (document: Node): void` and calls\n"
-               "                     into the DOM through `declare\n"
-               "                     function`s - see include/art_bridge.h\n"
-               "                     and README.md's \"Using ART\" section.\n\n"
                "A project uses one native language, never more than one.\n"
                "Build it afterward with:\n"
                "  artisan-cli build <project-dir>\n";
@@ -845,7 +846,7 @@ int RunNew(int argc, char *argv[]) {
   }
 
   fs::path projectDir = argv[2];
-  std::string lang = "cpp";
+  std::string lang = "art";
 
   for (int i = 3; i < argc; ++i) {
     std::string arg = argv[i];
@@ -890,7 +891,7 @@ int RunNew(int argc, char *argv[]) {
     WriteFile(projectDir / "goapp" / "go.mod", GoModTemplate());
     WriteFile(projectDir / "goapp" / "main.go", kMainGoTemplate);
   } else if (lang == "art") {
-    WriteFile(projectDir / "app.art", kAppArtTemplate);
+    WriteFile(projectDir / "app.ts", kAppArtTemplate);
   } else {
     CreateDirectory(projectDir / "src");
     WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);

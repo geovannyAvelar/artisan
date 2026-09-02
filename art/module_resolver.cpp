@@ -21,7 +21,7 @@ void ModuleResolver::Error(SourceLoc loc, const std::string &file, const std::st
 std::string ModuleResolver::ResolveImportPath(const std::string &fromFile, const std::string &importPath,
                                                SourceLoc loc) {
   fs::path candidate = fs::path(fromFile).parent_path() / importPath;
-  if (candidate.extension() != ".art") candidate += ".art";
+  if (candidate.extension() != ".ts") candidate += ".ts";
 
   std::error_code ec;
   fs::path canonical = fs::canonical(candidate, ec);

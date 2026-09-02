@@ -31,7 +31,7 @@ struct Options {
 };
 
 void PrintUsage() {
-  std::cerr << "usage: art <input.art> [-o <output>] [--target <triple>] [--emit-llvm] [--emit-obj]\n";
+  std::cerr << "usage: art <input.ts> [-o <output>] [--target <triple>] [--emit-llvm] [--emit-obj]\n";
 }
 
 bool ParseArgs(int argc, char *argv[], Options &opts) {
@@ -128,7 +128,7 @@ int main(int argc, char *argv[]) {
   // path this always has - the ModuleResolver below (and the per-file
   // visibility enforcement it enables) is opt-in, triggered only by a
   // program actually using it, so nothing about compiling a plain,
-  // import-free .art file changes at all, error message formatting
+  // import-free .ts file changes at all, error message formatting
   // included (ModuleResolver's own diagnostics are prefixed with each
   // file's canonical path, not necessarily the same spelling `opts.
   // inputPath` used on the command line).

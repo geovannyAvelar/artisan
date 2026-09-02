@@ -3,9 +3,10 @@
 A framework for building native desktop apps from HTML-like markup. Markup
 is compiled ahead-of-time (by `artisanc`) into a widget tree baked straight
 into the binary, and rendered with Skia - no browser, no webview. App
-behavior can be plain C++ (`SetupApp(Node&)`), a compiled Go app, or an
-embedded JavaScript file - all three drive the same mutable DOM (`Node`)
-at runtime, and none of them know the others exist.
+behavior can be ART (a statically typed, TypeScript-like language compiled
+ahead of time via LLVM - the default), plain C++ (`SetupApp(Node&)`), a
+compiled Go app, or an embedded JavaScript file - all four drive the same
+mutable DOM (`Node`) at runtime, and none of them know the others exist.
 
 `artisan-cli` is the single command that ties the workflow together:
 scaffold a project, add components, and build it into one native binary.
@@ -42,32 +43,45 @@ path, for everything below.
 artisan-cli new my-app
 ```
 
-Scaffolds:
+`--lang art` is the default, so this scaffolds an ART project (see [Using
+ART](#using-art)):
 
 ```
 my-app/
   pages/index.html   # starter markup - the page the app opens on
+  app.ts              # ART app - native startup code, compiled ahead of time
+```
+
+Add more pages under `pages/` - nested folders become nested routes,
+Next.js-style (`pages/settings/profile.html` becomes the route
+`settings/profile`; a folder's own `index.html` is that folder's route).
+Link between pages from markup with `<a href="...">`.
+
+Pass `--lang cpp` to scaffold a C++ project instead:
+
+```bash
+artisan-cli new my-app --lang cpp
+```
+
+```
+my-app/
+  pages/index.html
   src/main.cpp        # SetupApp(Node&) - native startup code
   CMakeLists.txt      # builds this project directly, no artisan-cli needed
 ```
 
-A C++ project (not `--lang go`) also gets its own `CMakeLists.txt`, so
-`cmake -S my-app -B my-app/build && cmake --build my-app/build --target
-artisan` works on its own - no `artisan-cli` involved at build time. It
-discovers `pages/**/*.html`/`src/**/*.cpp`/`app.js` itself (same
+A C++ project also gets its own `CMakeLists.txt` (ART/Go projects don't),
+so `cmake -S my-app -B my-app/build && cmake --build my-app/build
+--target artisan` works on its own - no `artisan-cli` involved at build
+time. It discovers `pages/**/*.html`/`src/**/*.cpp`/`app.js` itself (same
 conventions as `artisan-cli build`, just re-implemented in CMake) and
 `add_subdirectory()`s this checkout to pull in the real build - so Skia
 still needs to be built there first (`./build_skia.sh`), same
 prerequisite either way. If this checkout moves, update the
 `ARTISAN_CHECKOUT_DIR` cache variable at the top of the generated file
 (same constraint `goapp/go.mod`'s `replace` line has for a Go project).
-
-Add more pages under `pages/` - nested folders become nested routes,
-Next.js-style (`pages/settings/profile.html` becomes the route
-`settings/profile`; a folder's own `index.html` is that folder's route).
-Link between pages from markup with `<a href="...">`. Add more `.cpp`
-files anywhere under `src/` and they're compiled in automatically - no
-need to list them anywhere.
+Add more `.cpp` files anywhere under `src/` and they're compiled in
+automatically - no need to list them anywhere.
 
 Pass `--lang go` to scaffold a Go project instead (see [Using
 Go](#using-go)):
@@ -84,9 +98,10 @@ my-app/
     main.go  # SetupApp(artisango.Node) - native startup code
 ```
 
-A project uses one native language, never both - `new` always scaffolds
-one or the other, and `artisan-cli build` refuses to build a project that
-somehow ends up with both `src/**/*.cpp` and `goapp/`.
+A project uses one native language, never more than one - `new` always
+scaffolds exactly one, and `artisan-cli build` refuses to build a project
+that somehow ends up with more than one of `app.ts`, `src/**/*.cpp`, and
+`goapp/`.
 
 ## Building a project
 
@@ -96,10 +111,11 @@ artisan-cli build my-app --run
 
 There's no mode for naming individual files by hand - it's always a project
 directory, and its files are discovered automatically: every
-`pages/**/*.html`, either every `src/**/*.cpp` *or* a Go app under `goapp/`
-(never both - see [Using Go](#using-go) below), and an optional `app.js` at
-the project root (embedded and run once at startup, alongside whichever
-native language the project uses). Flags:
+`pages/**/*.html`, and exactly one native language - an ART app
+(`app.ts`, see [Using ART](#using-art) below), every `src/**/*.cpp`, or a
+Go app under `goapp/` (see [Using Go](#using-go) below) - plus an
+optional `app.js` at the project root (embedded and run once at startup,
+alongside whichever native language the project uses). Flags:
 
 - `--build-dir <dir>` - where to configure/build (default `./build`)
 - `-o, --output <path>` - copy the built binary here
@@ -238,7 +254,7 @@ ART is a small, statically typed language of this repo's own design -
 TypeScript-like syntax with the dynamic parts removed (no `any`, no
 prototypes, no dynamic property access), compiled ahead of time to native
 machine code via LLVM (see `art/`) rather than interpreted. A project's
-`app.art` - one file at the project root by default, like `app.js`, but
+`app.ts` - one file at the project root by default, like `app.js`, but
 optionally the entry point into a real multi-file project via
 `import`/`export` (see "Modules" below) - is compiled by the standalone
 `art` compiler and linked straight into the binary, the same "runs
@@ -246,10 +262,10 @@ compiled, not interpreted" deal `ARTISAN_APP_CPP_SOURCES`/
 `ARTISAN_APP_GO_SOURCE` get.
 
 ```bash
-artisan-cli new my-app --lang art
+artisan-cli new my-app  # --lang art is the default
 ```
 
-scaffolds `app.art` with the DOM bridge below already `declare`d and
+scaffolds `app.ts` with the DOM bridge below already `declare`d and
 wrapped in `declare class Node`/`declare class Event` (see "Classes"
 below), plus an empty setup section. An ART app needs a `setupApp` -
 either an explicit function, or (the default the scaffold uses) just
@@ -305,7 +321,7 @@ subset of `include/node_c_api.h`, exposed as ART-callable `declare
 function`s (`include/art_bridge.h` has the exact signatures) wrapped into
 `Node`/`Event` methods and properties (see "Getters and setters" below)
 named/shaped to match a real browser's own DOM API as closely as
-possible - all copied into every scaffolded `app.art`:
+possible - all copied into every scaffolded `app.ts`:
 `document.getElementById(id)`, `.querySelector(selector)`, `.isNull()`
 (the only way to test a lookup for "no match" - ART has no null literal
 of its own to compare against), `.textContent` (get/set), `.getAttribute
@@ -350,7 +366,7 @@ function onItemClick(event: Event): void {
 `document` (see `kAmbientGlobals` in `art/sema.cpp`) isn't a real
 variable or a declared function of its own - it's pure sugar, rewritten
 at compile time into a call to the `declare function ArtDocument():
-Node;` every scaffolded `app.art` still declares (needed as the sugar's
+Node;` every scaffolded `app.ts` still declares (needed as the sugar's
 actual target, even though nothing calls it directly by name anymore).
 `ArtDocument()`/`document` returns the current page's root `Node`,
 whatever it is at the moment of the call - it exists specifically for a
@@ -550,23 +566,23 @@ functions" above.
 
 ### Modules (import/export)
 
-A single `.art` file is still a complete, self-contained program - nothing
+A single `.ts` file is still a complete, self-contained program - nothing
 below is required. But a project can also be split across multiple files
 and wired together with real `import`/`export`, TS-style:
 
 ```ts
-// math.art
+// math.ts
 export function add(a: number, b: number): number {
   return a + b;
 }
 
-function helper(): number { // not exported - private to math.art
+function helper(): number { // not exported - private to math.ts
   return 1;
 }
 ```
 
 ```ts
-// app.art
+// app.ts
 import { add } from "./math";
 
 function main(): number {
@@ -574,7 +590,7 @@ function main(): number {
 }
 ```
 
-`import`s are always relative (`./`/`../`, `.art` optional) and must come
+`import`s are always relative (`./`/`../`, `.ts` optional) and must come
 before any other top-level declaration in a file. `export` may prefix a
 `function`, `interface`, `declare function`, `declare type`, or top-level
 `let`/`const` - anything left unmarked is private to the file that
@@ -585,7 +601,7 @@ reachable from the entry point) must still be globally unique, the same
 as a single flat file today - `import` decides who's *allowed* to
 reference a name, not which of several same-named things they get.
 
-The entry point passed to `art` (or `app.art` itself, for
+The entry point passed to `art` (or `app.ts` itself, for
 `artisan-cli build`) only needs `import`s at all for this multi-file
 resolution to kick in - compiling a plain file with none is unchanged
 from before this existed, same error messages included. When imports are
@@ -598,8 +614,8 @@ with a hint pointing at the likely missing `import`, not a plain
 "undefined identifier". Generic functions/interfaces work across files
 too: a generic's own body/fields always resolve against the file that
 *declared* it, not whichever file happens to instantiate it - so a
-private helper `math.art` uses internally stays unreachable from
-`app.art` even through a generic function `app.art` calls into.
+private helper `math.ts` uses internally stays unreachable from
+`app.ts` even through a generic function `app.ts` calls into.
 
 ### Classes
 
@@ -1164,7 +1180,7 @@ just no longer attached to anything.
 Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
 Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is
 a git submodule, and unlike the rest of this framework's dependencies
-they're only ever required when `ARTISAN_APP_ART_SOURCE`/`app.art` is
+they're only ever required when `ARTISAN_APP_ART_SOURCE`/`app.ts` is
 actually configured: a C++/Go/JS-only project never pulls either in at
 all (see the root `CMakeLists.txt`'s conditional `add_subdirectory(art)`
 and `find_library(ARTISAN_GC_LIB ...)`).

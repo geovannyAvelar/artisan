@@ -289,7 +289,7 @@ struct InterfaceDecl {
 // `import { name, ... } from "path";` - always at the top of a file,
 // before any other declaration (see Parser::ParseProgram). `path` is
 // resolved relative to the importing file's own directory by
-// ModuleResolver, `.art` implied if not written; each `name` must be a
+// ModuleResolver, `.ts` implied if not written; each `name` must be a
 // top-level declaration in the target file marked `export`.
 struct ImportedName {
   std::string name;

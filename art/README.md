@@ -48,23 +48,23 @@ The easiest way to use ART is through `artisan-cli`, which never
 requires touching this directory directly:
 
 ```bash
-artisan-cli new my-app --lang art
+artisan-cli new my-app  # --lang art is the default
 artisan-cli build my-app --run
 ```
 
-That scaffolds `app.art` with the DOM bridge already `declare`d and
+That scaffolds `app.ts` with the DOM bridge already `declare`d and
 wrapped in ergonomic classes (see [The DOM bridge](#the-dom-bridge)
 below), plus an empty `setupApp`.
 
 To build the `art` compiler itself and use it standalone (e.g. to
-compile a `.art` file with no artisan app around it at all):
+compile a `.ts` file with no artisan app around it at all):
 
 ```bash
 cmake -S art -B art/build -GNinja
 cmake --build art/build
-art/build/art path/to/app.art -o app          # compiles + links a native binary
-art/build/art path/to/app.art --emit-obj -o app.o  # object file only
-art/build/art path/to/app.art --emit-llvm -o app.ll  # LLVM IR, for inspection
+art/build/art path/to/app.ts -o app          # compiles + links a native binary
+art/build/art path/to/app.ts --emit-obj -o app.o  # object file only
+art/build/art path/to/app.ts --emit-llvm -o app.ll  # LLVM IR, for inspection
 ```
 
 Needs LLVM 18 (`llvm-18-dev` or equivalent) to build, and the
@@ -72,7 +72,7 @@ Needs LLVM 18 (`llvm-18-dev` or equivalent) to build, and the
 link a standalone binary (every ART allocation goes through it - see
 [Memory management](#memory-management)). Neither is required to build
 artisan itself unless an ART app is actually configured
-(`ARTISAN_APP_ART_SOURCE`/`app.art`) - a C++/Go/JS-only project never
+(`ARTISAN_APP_ART_SOURCE`/`app.ts`) - a C++/Go/JS-only project never
 pulls either in.
 
 ## Language guide
@@ -235,15 +235,15 @@ can't be individually generic yet - only the class itself can.
 
 `export` in front of a function/interface/class/`declare` counterpart/
 top-level `let`/`const`; `import { a, b } from "./path";` at the top of
-a file (relative, `.art` implied). Access control only, not real
+a file (relative, `.ts` implied). Access control only, not real
 per-file namespacing - every top-level name across a whole project must
 still be globally unique.
 
 ```ts
-// math.art
+// math.ts
 export function add(a: number, b: number): number { return a + b; }
 
-// app.art
+// app.ts
 import { add } from "./math";
 function main(): number { return add(1, 2); }
 ```
@@ -526,11 +526,11 @@ level.
 ```bash
 cmake -S art -B art/build -GNinja
 cmake --build art/build
-art/build/art some_file.art -o out && ./out
+art/build/art some_file.ts -o out && ./out
 ```
 
 There's no dedicated test suite yet - correctness is verified by
-compiling and running real `.art` programs (and, for anything touching
+compiling and running real `.ts` programs (and, for anything touching
 the DOM bridge, a small standalone C++ harness linking the compiled
 object file directly against `dom_node.cpp`/`art_bridge.cpp` and firing
 real `Node::Click()`/`DispatchEvent()` calls) rather than unit-testing

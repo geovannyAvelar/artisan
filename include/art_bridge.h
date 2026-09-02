@@ -4,7 +4,7 @@
 
 // A small, hand-picked subset of node_c_api.h's DOM API, re-exposed under
 // ART-ABI-compatible signatures (see art/ - the ART compiler) for an
-// app.art file's `declare function` imports to bind to directly.
+// app.ts file's `declare function` imports to bind to directly.
 //
 // ART's opaque `Node` type is a plain `void*` (its own compiled code never
 // dereferences it, only ever passes it back into these functions) - the
