@@ -391,6 +391,76 @@ generic yet (see [Generics](#generics)). `T` can be `number`, `boolean`,
 or `string`; the bridge provides a real, separately compiled pair for
 each.
 
+## JSX (.tsx)
+
+A `.tsx` file (only - see below) can build a `Node` with an element
+literal instead of `document.createElement`/`.setAttribute`/
+`.appendChild` calls:
+
+```tsx
+function badge(text: string): Node {
+  return <span class="badge">{text}</span>;
+}
+```
+
+is exactly
+
+```ts
+function badge(text: string): Node {
+  let n: Node = document.createElement("span");
+  n.setAttribute("class", "badge");
+  n.appendChild(document.createTextNode(text));
+  return n;
+}
+```
+
+- **A real expression**, not restricted to statement position - usable
+  anywhere a `Node` is expected (a `let` initializer, a function's
+  `return`, another JSX element's own `{ ... }` child slot, ...), the
+  same way an object/array literal already builds a value through a
+  sequence of instructions before yielding it (see
+  `Codegen::GenExpr`'s own `JsxElement` case).
+- **Attributes** (`name="literal"` or `name={expr}`) are plain HTML
+  attribute names, not React's `className`/camelCase - `class`, not
+  `className`; `data-index`, not `dataIndex`. Every value must resolve
+  to `string` - no implicit stringification of a `number` (write
+  `numberToString(x)` yourself, same rule as everywhere else in ART).
+  `on<type>` (`onclick`, `onkeydown`, ...) is the one special case:
+  its value must be a `(event: Event) => void` handler instead, and it
+  desugars to `.addEventListener(type, handler, false)` - always
+  non-capturing, the same simplicity real JSX/React's `onClick={...}`
+  has (call `.addEventListener` yourself afterward for `capture: true`).
+- **Children** are nested JSX elements, or a `{ expr }` interpolation:
+  a `Node`-valued one is appended as-is, a `string`/`number` one becomes
+  a text node (`numberToString` first, for a number) - anything else
+  (a `boolean`, for instance) is a compile error, not a silent
+  stringify. There's deliberately no bare/unquoted text between tags
+  (`<div>Hello</div>` doesn't parse, `<div>{"Hello"}</div>` does):
+  ART's tokenizer lexes a whole file into one flat token stream up
+  front with no "raw text" mode to switch into mid-parse, so text
+  content has to arrive as an ordinary string expression instead.
+- **Attribute/tag names can be hyphenated** (`data-index`, `aria-label`,
+  even a hyphenated custom-element tag) and can collide with an ART
+  keyword (`class`, `for`, `type`, ...) - the parser reassembles
+  `identifier ('-' identifier)*` from the separate tokens the tokenizer
+  actually produces (there's no hyphenated-identifier token), and
+  accepts a keyword's own raw spelling anywhere a JSX name is expected.
+- **Self-closing** (`<br />`) and a required, exactly-matching closing
+  tag (`<div>...</div>`, never left implicit) are both supported; a
+  mismatched or missing closing tag is a compile error naming both tags.
+
+Why `.tsx` only, not JSX inline in any `.ts` file: a bare `<` is
+otherwise always the start of a `<`/`<=` comparison (there's no other
+legal expression it could begin), so enabling JSX parsing is genuinely
+unambiguous everywhere - but it's still gated on the file extension
+(`Parser::jsxEnabled`, set from the file's own path in main.cpp/
+module_resolver.cpp) rather than always on, so an ordinary `.ts` file's
+stray `<` keeps getting the exact same "expected an expression" error
+it always has, never a confusing JSX-flavored one. A relative `import`
+with no explicit extension tries `.ts` first, falling back to `.tsx`,
+so a `.tsx` component file can still be imported without spelling out
+which it is.
+
 ## Signals
 
 A `Signal<T>` is a reactive value: reading `.value` inside an `effect()`

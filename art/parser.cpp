@@ -4,7 +4,8 @@
 
 namespace ART {
 
-Parser::Parser(std::vector<Token> tokens) : tokens(std::move(tokens)) {}
+Parser::Parser(std::vector<Token> tokens, bool jsxEnabled)
+    : tokens(std::move(tokens)), jsxEnabled(jsxEnabled) {}
 
 const Token &Parser::Cur() const { return tokens[pos]; }
 
@@ -794,8 +795,124 @@ std::unique_ptr<Expr> Parser::ParsePrimary() {
   }
   if (Check(TokenKind::LBracket)) return ParseArrayLiteral();
   if (Check(TokenKind::LBrace)) return ParseObjectLiteral();
+  // A bare '<' can only reach here (the start of a brand-new primary
+  // expression) if it isn't a comparison operator - ParseRelational only
+  // ever sees '<' *between* two already-parsed operands, never at an
+  // expression's own start. So this is unambiguous, the same way `::<T>`
+  // being required (not plain `<T>`) at a generic call site is - see
+  // ParsePostfix's own comment on that. Gated on jsxEnabled (.tsx files
+  // only) so an ordinary .ts file's stray '<' still gets the same "expected
+  // an expression" error it always has, not a JSX parse attempt.
+  if (jsxEnabled && Check(TokenKind::Lt)) return ParseJsxElement();
 
   Fail("expected an expression, found " + std::string(TokenKindName(Cur().kind)), loc);
+}
+
+// True if the current token can start a JSX tag/attribute name segment -
+// an ordinary Identifier, or any keyword token (its raw lexeme is still
+// exactly the keyword spelling - Token::text holds that regardless of
+// kind). HTML attribute/tag names routinely collide with ART's own
+// keywords (`class`, `for`, `type`, ...), so JSX names can't be
+// restricted to real Identifier tokens the way everywhere else in the
+// grammar is.
+bool Parser::CheckJsxName() const {
+  return Check(TokenKind::Identifier) ||
+         (Cur().kind >= TokenKind::KwFunction && Cur().kind <= TokenKind::KwClass);
+}
+
+// A JSX tag or attribute name: one name segment (see CheckJsxName),
+// optionally followed by more, each preceded by '-' (`data-index`,
+// `aria-label`, a hyphenated custom-element tag like `my-component`) -
+// ART's tokenizer has no notion of a hyphenated identifier, so this
+// reassembles one from the separate Identifier/Minus/Identifier tokens
+// it actually produces.
+std::string Parser::ParseJsxName(const char *context) {
+  if (!CheckJsxName()) {
+    Fail("expected a JSX name " + std::string(context) + ", found " + std::string(TokenKindName(Cur().kind)),
+         Cur().loc);
+  }
+  std::string name = Cur().text;
+  pos++;
+  while (Check(TokenKind::Minus) &&
+         (PeekAt(1).kind == TokenKind::Identifier ||
+          (PeekAt(1).kind >= TokenKind::KwFunction && PeekAt(1).kind <= TokenKind::KwClass))) {
+    pos++; // '-'
+    name += "-";
+    name += Cur().text;
+    pos++;
+  }
+  return name;
+}
+
+// `<tag attr="literal" attr={expr} ...>child*</tag>` or the self-closing
+// `<tag .../>` - see ExprKind::JsxElement's own doc comment for the AST
+// shape. Deliberately no bare/unquoted text content between tags (e.g.
+// `<div>Hello</div>` doesn't parse) - only nested elements and `{ expr }`
+// interpolations - since ART's tokenizer lexes the whole file up front
+// into one flat token stream with no notion of a "raw text" mode; text
+// content is written `<div>{"Hello"}</div>` instead. Every attribute
+// value is required (no bare `<input disabled />`-style shorthand).
+std::unique_ptr<Expr> Parser::ParseJsxElement() {
+  SourceLoc loc = Cur().loc;
+  Expect(TokenKind::Lt, "to start a JSX element");
+  std::string tagName = ParseJsxName("as a JSX tag name");
+
+  auto e = MakeExpr(ExprKind::JsxElement, loc);
+  e->name = tagName;
+
+  while (CheckJsxName()) {
+    std::string attrName = ParseJsxName("as a JSX attribute name");
+    Expect(TokenKind::Assign, "after a JSX attribute name ('" + attrName + "')");
+    std::unique_ptr<Expr> value;
+    if (Check(TokenKind::StringLiteral)) {
+      value = MakeExpr(ExprKind::StringLiteral, Cur().loc);
+      value->name = Cur().text;
+      pos++;
+    } else {
+      value = ParseJsxBraceExpr("as a JSX attribute value");
+    }
+    e->fields.emplace_back(attrName, std::move(value));
+  }
+
+  if (Match(TokenKind::Slash)) {
+    Expect(TokenKind::Gt, "to close a self-closing JSX element ('/>')");
+    return e;
+  }
+  Expect(TokenKind::Gt, "to close a JSX element's opening tag ('<" + tagName + ">')");
+
+  while (!(Check(TokenKind::Lt) && PeekAt(1).kind == TokenKind::Slash)) {
+    if (Check(TokenKind::Lt)) {
+      e->elements.push_back(ParseJsxElement());
+    } else if (Check(TokenKind::LBrace)) {
+      e->elements.push_back(ParseJsxBraceExpr("as a JSX child"));
+    } else {
+      Fail("expected a nested JSX element or '{ ... }', found " + std::string(TokenKindName(Cur().kind)) +
+               " inside '<" + tagName + ">'",
+           Cur().loc);
+    }
+  }
+
+  SourceLoc closeLoc = Cur().loc;
+  Expect(TokenKind::Lt, "to start a JSX closing tag");
+  Expect(TokenKind::Slash, "after '<' to start a JSX closing tag");
+  std::string closeTag = ParseJsxName("as the JSX closing tag name");
+  if (closeTag != tagName) {
+    Fail("mismatched JSX closing tag - expected '</" + tagName + ">', got '</" + closeTag + ">'", closeLoc);
+  }
+  Expect(TokenKind::Gt, "to close a JSX closing tag ('</" + tagName + ">')");
+
+  return e;
+}
+
+// `{ expr }` - the one place JSX embeds an arbitrary ART expression (an
+// attribute value or a child), never going through ParsePrimary's own
+// '{' handling (ParseObjectLiteral's `{ field: value, ... }` shape) since
+// this is a completely different grammar sharing the same opening brace.
+std::unique_ptr<Expr> Parser::ParseJsxBraceExpr(const char *context) {
+  Expect(TokenKind::LBrace, context);
+  auto value = ParseExpr();
+  Expect(TokenKind::RBrace, "to close a JSX '{ ... }' expression");
+  return value;
 }
 
 std::unique_ptr<Expr> Parser::ParseArrayLiteral() {

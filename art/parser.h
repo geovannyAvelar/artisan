@@ -17,7 +17,12 @@ struct ParseError : std::runtime_error {
 
 class Parser {
 public:
-  explicit Parser(std::vector<Token> tokens);
+  // `jsxEnabled`: whether `<tag ...>...</tag>` is recognized as a JSX
+  // element literal (see ParseJsxElement) rather than always being a
+  // parse error - gated per-file on the .tsx extension (see main.cpp/
+  // module_resolver.cpp), not on by default, so an ordinary .ts file's
+  // `<`/`>` stay exclusively the comparison operators they always were.
+  explicit Parser(std::vector<Token> tokens, bool jsxEnabled = false);
 
   // Parses the whole token stream into a Program. On a syntax error,
   // returns an empty-ish Program and Diagnostics() carries the message -
@@ -29,6 +34,7 @@ public:
 private:
   std::vector<Token> tokens;
   size_t pos = 0;
+  bool jsxEnabled = false;
   std::vector<std::string> diagnostics;
 
   const Token &Cur() const;
@@ -73,6 +79,10 @@ private:
   std::unique_ptr<Expr> ParsePrimary();
   std::unique_ptr<Expr> ParseArrayLiteral();
   std::unique_ptr<Expr> ParseObjectLiteral();
+  std::unique_ptr<Expr> ParseJsxElement();
+  std::unique_ptr<Expr> ParseJsxBraceExpr(const char *context);
+  bool CheckJsxName() const;
+  std::string ParseJsxName(const char *context);
 };
 
 } // namespace ART

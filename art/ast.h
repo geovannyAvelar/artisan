@@ -95,6 +95,16 @@ enum class ExprKind {
   Index,
   Member,
   Assign,
+  // A .tsx-only element literal, e.g. `<li class="item">{label}</li>` -
+  // see Parser::ParseJsxElement. Reuses ObjectLiteral's `fields` for
+  // attributes (name -> value expression, same "name: value" pair shape)
+  // and Call/ArrayLiteral's `elements` for children (each either another
+  // JsxElement or a plain `{ expr }` interpolation) rather than adding
+  // JSX-specific fields - `name` is the tag itself. Always resolves to
+  // type Node (see Sema::CheckExpr) - a real expression, not restricted
+  // to statement position, the same way an ObjectLiteral already builds
+  // a heap value through a sequence of instructions before yielding it.
+  JsxElement,
 };
 
 struct Expr {
@@ -104,15 +114,15 @@ struct Expr {
 
   double numberValue = 0;                    // NumberLiteral
   bool boolValue = false;                    // BoolLiteral
-  std::string name;                          // Identifier / Member (field name) / Call (callee name) / StringLiteral (decoded value)
+  std::string name;                          // Identifier / Member (field name) / Call (callee name) / StringLiteral (decoded value) / JsxElement (tag name)
   std::string op;                            // Binary / Unary / IncDec ("++"/"--") / Assign
 
   std::unique_ptr<Expr> lhs;                 // Binary lhs, Assign target, Index/Member object
   std::unique_ptr<Expr> rhs;                 // Binary rhs, Assign value
   std::unique_ptr<Expr> operand;             // Unary/IncDec target, Index's bracket expression
 
-  std::vector<std::unique_ptr<Expr>> elements; // Call args / ArrayLiteral elements
-  std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields; // ObjectLiteral
+  std::vector<std::unique_ptr<Expr>> elements; // Call args / ArrayLiteral elements / JsxElement children
+  std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields; // ObjectLiteral / JsxElement attributes (name -> value)
 
   bool isLengthAccess = false; // Member: true when field is the built-in `.length` on an array/string
   bool isPostfix = false; // IncDec: `x++`/`x--` (evaluates to the OLD value) vs `++x`/`--x` (the NEW value)

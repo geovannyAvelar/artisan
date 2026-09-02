@@ -1050,6 +1050,59 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     return instancePtr;
   }
 
+  case ExprKind::JsxElement: {
+    // Desugars straight to ART's standard library's own raw DOM bridge
+    // functions (art/stdlib/art.ts) - Sema already confirmed all of these
+    // exist in the merged program (see its own JsxElement case). Multiple
+    // calls building up one value before yielding it, same shape
+    // ObjectLiteral above already has (allocate/build, then return one
+    // pointer) - this is a real expression, not restricted to statement
+    // position, even though it takes several IR instructions to produce.
+    llvm::Function *createElementFn = llvmFunctions.at("ArtCreateElement");
+    llvm::Function *setAttributeFn = llvmFunctions.at("ArtSetAttribute");
+    llvm::Function *appendChildFn = llvmFunctions.at("ArtAppendChild");
+    llvm::Function *addEventListenerFn = llvmFunctions.at("ArtAddEventListener");
+    llvm::Function *createTextNodeFn = llvmFunctions.at("ArtCreateTextNode");
+    llvm::Function *numberToStringFn = llvmFunctions.at("numberToString");
+
+    llvm::Value *nodeVal = builder.CreateCall(createElementFn, {GenStringLiteral(expr->name)});
+
+    for (auto &attr : expr->fields) {
+      bool isEventAttr = attr.first.size() > 2 && attr.first.rfind("on", 0) == 0;
+      llvm::Value *valueVal = GenExpr(attr.second.get());
+      if (isEventAttr) {
+        // "onclick" -> "click" - see Sema's own JsxElement case for the
+        // handler-type check this relies on. Always non-capturing (`false`)
+        // - the same simplicity real JSX/React's own onClick={...} has;
+        // .addEventListener itself is still there for anyone who needs
+        // capture=true.
+        std::string eventType = attr.first.substr(2);
+        llvm::Value *captureVal = llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), 0);
+        builder.CreateCall(addEventListenerFn, {nodeVal, GenStringLiteral(eventType), valueVal, captureVal});
+      } else {
+        builder.CreateCall(setAttributeFn, {nodeVal, GenStringLiteral(attr.first), valueVal});
+      }
+    }
+
+    for (auto &child : expr->elements) {
+      llvm::Value *childVal = GenExpr(child.get());
+      llvm::Value *childNodeVal;
+      if (child->resolvedType.tag == TypeTag::String) {
+        childNodeVal = builder.CreateCall(createTextNodeFn, {childVal});
+      } else if (child->resolvedType.tag == TypeTag::Number) {
+        llvm::Value *strVal = builder.CreateCall(numberToStringFn, {childVal});
+        childNodeVal = builder.CreateCall(createTextNodeFn, {strVal});
+      } else {
+        // Already a Node (a nested JsxElement, or any other Node-typed
+        // expression) - Sema already rejected anything else.
+        childNodeVal = childVal;
+      }
+      builder.CreateCall(appendChildFn, {nodeVal, childNodeVal});
+    }
+
+    return nodeVal;
+  }
+
   case ExprKind::Index: {
     if (expr->lhs->resolvedType.tag == TypeTag::String) {
       llvm::Value *strPtr = GenExpr(expr->lhs.get());

@@ -1302,6 +1302,63 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     break;
   }
 
+  case ExprKind::JsxElement: {
+    // Desugars to ART's standard library's own raw DOM bridge functions
+    // (ArtCreateElement/ArtSetAttribute/ArtAppendChild/ArtAddEventListener/
+    // ArtCreateTextNode - see art/stdlib/art.ts and Codegen's own
+    // JsxElement case) - looked up directly rather than through the
+    // normal functions/IsVisible path, the same "ambient, not import-
+    // gated" treatment the `document` sugar above already gets, since
+    // these are never written by name in the source that triggers them.
+    // They exist in the merged program as soon as anything in the
+    // project imports Node/Event from "art" - which JSX already implies,
+    // since its own result type (below) needs Node to be a real,
+    // resolvable type for the surrounding code (a `let`'s declared type,
+    // a function's return type, ...) to type-check at all.
+    static const char *kRequiredJsxFunctions[] = {"ArtCreateElement",   "ArtSetAttribute",  "ArtAppendChild",
+                                                   "ArtAddEventListener", "ArtCreateTextNode", "numberToString"};
+    bool stdlibAvailable = true;
+    for (const char *name : kRequiredJsxFunctions) {
+      if (!functions.count(name)) {
+        stdlibAvailable = false;
+        break;
+      }
+    }
+    if (!stdlibAvailable) {
+      Error(expr->loc, "JSX needs ART's standard library - add 'import { Node, Event } from \"art\";' to "
+                        "this file (or a file it transitively imports)");
+    } else {
+      // Every attribute value must resolve to `string`, matching real
+      // HTML attributes - no implicit stringification of e.g. a number,
+      // same "explicit, not automatic" conversion rule everywhere else in
+      // ART already has (write numberToString(x) yourself) - except an
+      // "on<type>" attribute (onclick, onkeydown, ...), which must be a
+      // `(event: Event) => void` handler instead, desugaring to
+      // .addEventListener(type, handler, false).
+      ResolvedType stringType = ResolvedType::String();
+      ResolvedType handlerType = ResolvedType::Handler({ResolvedType::Struct("Event")});
+      for (auto &attr : expr->fields) {
+        bool isEventAttr = attr.first.size() > 2 && attr.first.rfind("on", 0) == 0;
+        CheckExpr(attr.second.get(), isEventAttr ? &handlerType : &stringType);
+      }
+      // A child is either a nested JsxElement/other Node-typed expression
+      // (appended as-is) or a string/number `{ expr }` (auto-converted to
+      // a text node, via numberToString first for a number) - anything
+      // else (including boolean) is a compile error, not a silent
+      // stringify.
+      for (auto &child : expr->elements) {
+        ResolvedType childT = CheckExpr(child.get(), nullptr);
+        bool isNode = childT.tag == TypeTag::Struct && childT.structName == "Node";
+        if (childT.tag != TypeTag::String && childT.tag != TypeTag::Number && !isNode) {
+          Error(child->loc,
+                "a JSX child must be a string, number, or Node, found '" + childT.ToString() + "'");
+        }
+      }
+    }
+    actual = ResolvedType::Struct("Node");
+    break;
+  }
+
   case ExprKind::Index: {
     ResolvedType objT = CheckExpr(expr->lhs.get(), nullptr);
     ResolvedType idxT = CheckExpr(expr->operand.get(), nullptr);

@@ -31,7 +31,7 @@ struct Options {
 };
 
 void PrintUsage() {
-  std::cerr << "usage: art <input.ts> [-o <output>] [--target <triple>] [--emit-llvm] [--emit-obj]\n";
+  std::cerr << "usage: art <input.ts|.tsx> [-o <output>] [--target <triple>] [--emit-llvm] [--emit-obj]\n";
 }
 
 bool ParseArgs(int argc, char *argv[], Options &opts) {
@@ -117,7 +117,11 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  ART::Parser parser(std::move(tokens));
+  // JSX syntax is only recognized in a .tsx entry file - see Parser's own
+  // doc comment on jsxEnabled.
+  bool jsxEnabled = opts.inputPath.size() >= 4 &&
+                     opts.inputPath.compare(opts.inputPath.size() - 4, 4, ".tsx") == 0;
+  ART::Parser parser(std::move(tokens), jsxEnabled);
   ART::Program program = parser.ParseProgram();
   if (!parser.Diagnostics().empty()) {
     ReportDiagnostics(opts.inputPath, parser.Diagnostics());

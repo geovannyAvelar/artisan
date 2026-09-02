@@ -22,11 +22,11 @@ std::string ModuleResolver::ResolveImportPath(const std::string &fromFile, const
                                                SourceLoc loc) {
   bool isRelative = importPath.rfind("./", 0) == 0 || importPath.rfind("../", 0) == 0;
 
-  fs::path candidate;
+  fs::path base;
   if (isRelative) {
-    candidate = fs::path(fromFile).parent_path() / importPath;
+    base = fs::path(fromFile).parent_path() / importPath;
   } else if (!stdlibDir.empty()) {
-    candidate = fs::path(stdlibDir) / importPath;
+    base = fs::path(stdlibDir) / importPath;
   } else {
     Error(loc, fromFile,
           "cannot find imported file '" + importPath +
@@ -35,15 +35,31 @@ std::string ModuleResolver::ResolveImportPath(const std::string &fromFile, const
               importPath + "'?)");
     return "";
   }
-  if (candidate.extension() != ".ts") candidate += ".ts";
 
-  std::error_code ec;
-  fs::path canonical = fs::canonical(candidate, ec);
-  if (ec) {
-    Error(loc, fromFile, "cannot find imported file '" + importPath + "' (looked for " + candidate.string() + ")");
-    return "";
+  // An explicit .ts/.tsx extension is tried as-is; otherwise .ts is tried
+  // first (unchanged default), falling back to .tsx so a component file
+  // using JSX doesn't force every importer to spell out the extension.
+  std::vector<fs::path> candidates;
+  if (base.extension() == ".ts" || base.extension() == ".tsx") {
+    candidates.push_back(base);
+  } else {
+    fs::path withTs = base;
+    withTs += ".ts";
+    fs::path withTsx = base;
+    withTsx += ".tsx";
+    candidates.push_back(withTs);
+    candidates.push_back(withTsx);
   }
-  return canonical.string();
+
+  for (const fs::path &candidate : candidates) {
+    std::error_code ec;
+    fs::path canonical = fs::canonical(candidate, ec);
+    if (!ec) return canonical.string();
+  }
+  Error(loc, fromFile,
+        "cannot find imported file '" + importPath + "' (looked for " + candidates.front().string() +
+            (candidates.size() > 1 ? " or " + candidates.back().string() : "") + ")");
+  return "";
 }
 
 void ModuleResolver::Resolve(const std::string &canonicalPath) {
@@ -76,7 +92,11 @@ void ModuleResolver::Resolve(const std::string &canonicalPath) {
     return;
   }
 
-  Parser parser(std::move(tokens));
+  // JSX syntax is only recognized in a .tsx file - see Parser's own doc
+  // comment on jsxEnabled.
+  bool jsxEnabled =
+      canonicalPath.size() >= 4 && canonicalPath.compare(canonicalPath.size() - 4, 4, ".tsx") == 0;
+  Parser parser(std::move(tokens), jsxEnabled);
   Program program = parser.ParseProgram();
   if (!parser.Diagnostics().empty()) {
     for (const std::string &d : parser.Diagnostics()) diagnostics.push_back(canonicalPath + ":" + d);

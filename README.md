@@ -957,6 +957,35 @@ handed across the FFI boundary (e.g. an `ArtString*` passed into a
 copies it into artisan's own (unrelated) memory before doing anything
 that could outlive the call.
 
+### JSX (.tsx)
+
+A `.tsx` file (only - JSX isn't recognized in a plain `.ts` file) can
+build a `Node` with an element literal instead of `document.
+createElement`/`.setAttribute`/`.appendChild` calls - a real expression,
+usable anywhere a `Node` is expected, not restricted to statement
+position:
+
+```tsx
+function badge(text: string): Node {
+  return <span class="badge">{text}</span>;
+}
+```
+
+Attributes are plain HTML names (`class`, not React's `className`) and
+must resolve to `string` - no implicit stringification of a `number`,
+write `numberToString(x)` yourself. `on<type>` (`onclick`, `onkeydown`,
+...) is the one special case: its value must be a `(event: Event) =>
+void` handler, desugaring to `.addEventListener(type, handler, false)`.
+A child is a nested element or a `{ expr }` interpolation (`Node`
+appended as-is, `string`/`number` becomes a text node) - no bare
+unquoted text between tags (`<div>{"Hello"}</div>`, not `<div>Hello
+</div>`), since ART's tokenizer lexes the whole file up front with no
+"raw text" mode to switch into mid-parse. See
+[art/README.md's "JSX (.tsx)" section](art/README.md#jsx-tsx) for the
+full grammar, including hyphenated/keyword-colliding attribute names
+(`data-index`, `class`) and why `.tsx` specifically (not JSX inline in
+any `.ts` file).
+
 ### Signals
 
 A `Signal<T>` is a reactive value: reading `.value` inside an `effect()`

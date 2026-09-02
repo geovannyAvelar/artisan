@@ -77,8 +77,9 @@ void PrintBuildUsage() {
          "        go/artisango), compiled ahead of time, never combined\n"
          "        with src/**/*.cpp or app.ts in the same project.\n"
          "  <project-dir>/app.ts            a native ART app instead (see\n"
-         "        art/) - one file, compiled ahead of time, never combined\n"
-         "        with src/**/*.cpp or goapp/ in the same project.\n"
+         "        art/) - one file (app.tsx instead, to use JSX in the\n"
+         "        entry point itself), compiled ahead of time, never\n"
+         "        combined with src/**/*.cpp or goapp/ in the same project.\n"
          "  <project-dir>/app.js            optional embedded script -\n"
          "        orthogonal to the native-language choice above, works\n"
          "        with any of them.\n\n"
@@ -242,12 +243,24 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.goPath = fs::absolute(goPath);
   }
 
-  // An ART app's entry point is a single file - see ModuleResolver
-  // (art/module_resolver.cpp) for how it pulls in any other .ts files it
-  // imports from there.
-  fs::path artPath = projectDir / "app.ts";
-  if (fs::exists(artPath)) {
-    discovered.artPath = fs::absolute(artPath);
+  // An ART app's entry point is a single file, app.ts or app.tsx (the
+  // latter needed only to use JSX syntax in the entry point itself - see
+  // Parser::jsxEnabled) - see ModuleResolver (art/module_resolver.cpp)
+  // for how it pulls in any other .ts/.tsx files it imports from there.
+  fs::path artTsPath = projectDir / "app.ts";
+  fs::path artTsxPath = projectDir / "app.tsx";
+  bool hasArtTs = fs::exists(artTsPath);
+  bool hasArtTsx = fs::exists(artTsxPath);
+  if (hasArtTs && hasArtTsx) {
+    std::cerr << "artisan-cli: " << projectDir
+               << " has both app.ts and app.tsx - a project has exactly one entry point. Remove the one "
+                  "you don't want.\n";
+    std::exit(1);
+  }
+  if (hasArtTs) {
+    discovered.artPath = fs::absolute(artTsPath);
+  } else if (hasArtTsx) {
+    discovered.artPath = fs::absolute(artTsxPath);
   }
 
   // A project drives its DOM natively from exactly one language, never
