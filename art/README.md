@@ -112,6 +112,31 @@ numeric prefix at all returns `0`, not an error - see
 [the main README](../README.md#using-art) for the full contract of
 each, including libc's `%.15g`/`strtod` edge cases.
 
+Template literals (`` `text ${expr}` ``) are sugar for exactly that
+`+`/`numberToString` concatenation, not a distinct runtime feature - a
+real expression, resolving to `string`:
+
+```ts
+let name: string = "world";
+let greeting: string = `hello, ${name}!`; // "hello, world!"
+let n: number = 5;
+let msg: string = `n is ${n}`; // "n is 5" - numberToString, same as +
+```
+
+`${...}` accepts `string` or `number` only - the same "no implicit
+stringification beyond `number`" rule JSX's own `{ expr }` children
+already have (write your own conversion first for anything else, e.g.
+a `boolean` via `cond ? "true" : "false"`). An interpolation can be an
+arbitrarily complex expression, nested template literals and a
+brace-using one (an object literal, if the surrounding call site gives
+it a target type - e.g. a generic call's own argument) included: the
+tokenizer tracks brace nesting per open interpolation to find *its own*
+closing `}`, so an unrelated `{`/`}` pair inside one is never mistaken
+for it. The literal itself can span multiple lines, and `` \` ``/`` \$
+`` escape a literal backtick/`$` (so `` \${ `` doesn't start an
+interpolation), alongside the same `\n`/`\t`/`\r`/`\\` escapes a plain
+`"..."` string already has.
+
 An array *literal* always spells out every element at compile time -
 `makeArray<T>(size: number, fill: T): T[]`, a builtin (like
 `numberToString`), is the way to allocate one whose length is only

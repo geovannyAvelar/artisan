@@ -12,6 +12,8 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::Identifier: return "identifier";
   case TokenKind::NumberLiteral: return "number literal";
   case TokenKind::StringLiteral: return "string literal";
+  case TokenKind::TemplateStringMiddle: return "template literal text";
+  case TokenKind::TemplateStringTail: return "template literal text";
   case TokenKind::KwFunction: return "'function'";
   case TokenKind::KwLet: return "'let'";
   case TokenKind::KwConst: return "'const'";
@@ -192,6 +194,51 @@ Token Tokenizer::LexString(SourceLoc loc) {
   return MakeToken(TokenKind::StringLiteral, value, loc);
 }
 
+// Scans one literal-text chunk of a template literal, starting right
+// after the opening '`' or a just-closed `${...}` interpolation, up to
+// either the closing '`' (emits Tail) or an unescaped '${' (emits
+// Middle, having consumed both characters, and pushes a fresh 0 onto
+// templateBraceDepth_ for the interpolation it just opened). Same escape
+// set LexString has, plus '\`' and '\$' (so `` \` `` doesn't end the
+// literal early and `\${` doesn't start an interpolation) - and, unlike
+// LexString, a raw newline is just ordinary text, not an error: a
+// template literal is allowed to span multiple lines.
+Token Tokenizer::LexTemplateStringPart(SourceLoc loc) {
+  std::string value;
+  for (;;) {
+    if (AtEnd()) return MakeError("unterminated template literal", loc);
+    char c = Current();
+    if (c == '`') {
+      Advance();
+      return MakeToken(TokenKind::TemplateStringTail, value, loc);
+    }
+    if (c == '$' && Peek() == '{') {
+      Advance(); // '$'
+      Advance(); // '{'
+      templateBraceDepth_.push_back(0);
+      return MakeToken(TokenKind::TemplateStringMiddle, value, loc);
+    }
+    Advance();
+    if (c != '\\') {
+      value.push_back(c);
+      continue;
+    }
+    if (AtEnd()) return MakeError("unterminated template literal", loc);
+    char esc = Advance();
+    switch (esc) {
+    case 'n': value.push_back('\n'); break;
+    case 't': value.push_back('\t'); break;
+    case 'r': value.push_back('\r'); break;
+    case '0': value.push_back('\0'); break;
+    case '\\': value.push_back('\\'); break;
+    case '`': value.push_back('`'); break;
+    case '$': value.push_back('$'); break;
+    default:
+      return MakeError(std::string("unknown escape sequence '\\") + esc + "'", loc);
+    }
+  }
+}
+
 Token Tokenizer::LexIdentifierOrKeyword(SourceLoc loc) {
   size_t start = position;
   while (std::isalnum(static_cast<unsigned char>(Current())) || Current() == '_') Advance();
@@ -212,13 +259,35 @@ Token Tokenizer::Next() {
   if (std::isdigit(static_cast<unsigned char>(c))) return LexNumber(loc);
   if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') return LexIdentifierOrKeyword(loc);
   if (c == '"') return LexString(loc);
+  if (c == '`') {
+    Advance();
+    return LexTemplateStringPart(loc);
+  }
 
   Advance();
   switch (c) {
   case '(': return MakeToken(TokenKind::LParen, "(", loc);
   case ')': return MakeToken(TokenKind::RParen, ")", loc);
-  case '{': return MakeToken(TokenKind::LBrace, "{", loc);
-  case '}': return MakeToken(TokenKind::RBrace, "}", loc);
+  case '{':
+    // Every '{' seen while inside a `${...}` interpolation counts
+    // toward that interpolation's own nesting (see
+    // templateBraceDepth_'s doc comment) - still an ordinary LBrace
+    // token either way, only '}' needs special handling.
+    if (!templateBraceDepth_.empty()) templateBraceDepth_.back()++;
+    return MakeToken(TokenKind::LBrace, "{", loc);
+  case '}':
+    if (!templateBraceDepth_.empty()) {
+      if (templateBraceDepth_.back() > 0) {
+        templateBraceDepth_.back()--;
+        return MakeToken(TokenKind::RBrace, "}", loc);
+      }
+      // Back down to the interpolation's own starting depth - this is
+      // its closing brace, not an ordinary RBrace: resume template-text
+      // scanning right here instead of returning one.
+      templateBraceDepth_.pop_back();
+      return LexTemplateStringPart(loc);
+    }
+    return MakeToken(TokenKind::RBrace, "}", loc);
   case '[': return MakeToken(TokenKind::LBracket, "[", loc);
   case ']': return MakeToken(TokenKind::RBracket, "]", loc);
   case ',': return MakeToken(TokenKind::Comma, ",", loc);

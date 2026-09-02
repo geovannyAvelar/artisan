@@ -1478,6 +1478,26 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     }
     break;
   }
+
+  case ExprKind::TemplateLiteral: {
+    // Literal-text parts (even indices) are always real StringLiteral
+    // nodes already - checking them is trivial, but done uniformly with
+    // the interpolated ones (odd indices) for consistency. Each
+    // interpolated expression must resolve to `string` or `number` - a
+    // `number` gets stringified via `numberToString` in Codegen, same
+    // rule (and same reason: no universal to-string, no implicit
+    // conversion beyond that one documented case) JSX's own children
+    // already have.
+    for (size_t i = 0; i < expr->elements.size(); i++) {
+      ResolvedType partT = CheckExpr(expr->elements[i].get(), nullptr);
+      if (i % 2 == 1 && partT.tag != TypeTag::String && partT.tag != TypeTag::Number) {
+        Error(expr->elements[i]->loc, "a template literal's '${...}' must be a string or number, found '" +
+                                           partT.ToString() + "'");
+      }
+    }
+    actual = ResolvedType::String();
+    break;
+  }
   }
 
   expr->resolvedType = actual;

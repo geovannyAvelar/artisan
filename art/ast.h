@@ -119,6 +119,18 @@ enum class ExprKind {
   // to the same type (see Sema::CheckExpr) - that shared type is this
   // expression's own resolvedType.
   Conditional,
+  // `` `text ${expr} more` `` - see Parser::ParseTemplateLiteral and
+  // Tokenizer's TemplateStringMiddle/Tail tokens. Reuses ArrayLiteral's
+  // own `elements` for an alternating, always-odd-length sequence of
+  // literal-text StringLiteral parts and interpolated expressions -
+  // `part[0], expr[1], part[2], expr[3], ..., part[2n]` for n
+  // interpolations (`n == 0` is legal: a template with none is just one
+  // element, its whole literal text). Each interpolated expression must
+  // resolve to `string` or `number` (a `number` is stringified via
+  // `numberToString`, same as everywhere else in ART - no implicit
+  // conversion for anything else, matching JSX's own child-type rule).
+  // Always resolves to `string`.
+  TemplateLiteral,
 };
 
 struct Expr {
@@ -135,7 +147,7 @@ struct Expr {
   std::unique_ptr<Expr> rhs;                 // Binary rhs, Assign value, Conditional else-branch
   std::unique_ptr<Expr> operand;             // Unary/IncDec target, Index's bracket expression, Conditional condition
 
-  std::vector<std::unique_ptr<Expr>> elements; // Call args / ArrayLiteral elements / JsxElement children
+  std::vector<std::unique_ptr<Expr>> elements; // Call args / ArrayLiteral elements / JsxElement children / TemplateLiteral parts
   std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields; // ObjectLiteral / JsxElement attributes (name -> value)
 
   bool isLengthAccess = false; // Member: true when field is the built-in `.length` on an array/string

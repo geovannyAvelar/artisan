@@ -912,6 +912,27 @@ let input: Node = document.getElementById("quantity");
 let n: number = stringToNumber(input.textContent);
 ```
 
+Template literals (`` `text ${expr}` ``) are sugar for exactly that
+`+`/`numberToString` concatenation, not a distinct runtime feature - a
+real expression, resolving to `string`:
+
+```ts
+let name: string = "world";
+let greeting: string = `hello, ${name}!`; // "hello, world!"
+let n: number = 5;
+let msg: string = `n is ${n}`; // "n is 5" - numberToString, same as +
+```
+
+`${...}` accepts `string` or `number` only, same "no implicit
+stringification beyond `number`" rule JSX's own `{ expr }` children
+already have. An interpolation can be an arbitrarily complex
+expression - nested template literals included - and the literal
+itself can span multiple lines; `` \` ``/`` \$ `` escape a literal
+backtick/`$`, alongside the usual `\n`/`\t`/`\r`/`\\`. See
+[art/README.md's "Types" section](art/README.md#types) for how the
+tokenizer tracks brace nesting so an unrelated `{`/`}` pair inside an
+interpolation is never mistaken for its own closing brace.
+
 The language itself: `function`/`interface`/`let`/`const` (locals and
 top-level), `if`/`else`, `while`, C-style `for`, `for...of` over an array,
 `number` (a double, same as real TS) with the `numberToString`/

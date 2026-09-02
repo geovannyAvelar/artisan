@@ -13,6 +13,20 @@ enum class TokenKind {
   Identifier,
   NumberLiteral,
   StringLiteral,
+  // A template literal's own literal-text chunks (backtick-quoted,
+  // `${expr}` interpolation) - see Tokenizer::LexTemplateStringPart and
+  // Parser::ParseTemplateLiteral. Middle: this chunk is followed by
+  // `${` (more to come, already consumed - normal tokenizing resumes
+  // right after it for the interpolated expression). Tail: this chunk
+  // closes the literal (the closing '`' is already consumed) - a
+  // template with zero interpolations is just one Tail token, nothing
+  // else. There's no separate token for the '}' that closes an
+  // interpolation back into template text: the lexer consumes it itself
+  // when it's tracked the brace nesting back down to the interpolation's
+  // own starting depth (see Tokenizer::templateBraceDepth_) and
+  // immediately resumes template-text scanning in its place.
+  TemplateStringMiddle,
+  TemplateStringTail,
 
   // Keywords
   KwFunction,
@@ -101,6 +115,18 @@ private:
   int line = 1;
   int col = 1;
 
+  // One entry per currently-open `${...}` template interpolation (see
+  // TemplateStringMiddle/Tail's own doc comment), tracking how many
+  // un-matched '{' have been seen inside *that* interpolation so far -
+  // starts at 0 right after '${', incremented by every '{' Next() sees
+  // while this is non-empty (still returned as an ordinary LBrace token;
+  // only what closes the interpolation itself is special) and
+  // decremented by '}'. When a '}' would decrement the top entry below
+  // zero, that's instead the interpolation's own closing brace: this
+  // entry is popped and Next() resumes template-text scanning right
+  // there instead of returning an RBrace token.
+  std::vector<int> templateBraceDepth_;
+
   bool AtEnd() const;
   char Current() const;
   char Advance();
@@ -112,6 +138,7 @@ private:
   Token LexNumber(SourceLoc loc);
   Token LexIdentifierOrKeyword(SourceLoc loc);
   Token LexString(SourceLoc loc);
+  Token LexTemplateStringPart(SourceLoc loc);
 };
 
 } // namespace ART

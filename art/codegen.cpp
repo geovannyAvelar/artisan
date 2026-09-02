@@ -1309,6 +1309,25 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     phi->addIncoming(elseVal, elseEndBB);
     return phi;
   }
+
+  case ExprKind::TemplateLiteral: {
+    // A left-to-right fold of GenStringConcat calls - the same '+' on
+    // strings already lowers to (see the Binary case above) - stringifying
+    // a `number` interpolation via numberToString first (Sema already
+    // confirmed every interpolated part is a string or number).
+    llvm::Function *numberToStringFn = llvmFunctions.at("numberToString");
+    llvm::Value *result = GenExpr(expr->elements[0].get());
+    for (size_t i = 1; i < expr->elements.size(); i += 2) {
+      Expr *interp = expr->elements[i].get();
+      llvm::Value *interpVal = GenExpr(interp);
+      llvm::Value *interpStr = interp->resolvedType.tag == TypeTag::Number
+                                    ? builder.CreateCall(numberToStringFn, {interpVal})
+                                    : interpVal;
+      result = GenStringConcat(result, interpStr);
+      result = GenStringConcat(result, GenExpr(expr->elements[i + 1].get()));
+    }
+    return result;
+  }
   }
 
   throw std::runtime_error("codegen: unhandled expression kind");

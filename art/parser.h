@@ -82,6 +82,7 @@ private:
   std::unique_ptr<Expr> ParseObjectLiteral();
   std::unique_ptr<Expr> ParseJsxElement();
   std::unique_ptr<Expr> ParseJsxBraceExpr(const char *context);
+  std::unique_ptr<Expr> ParseTemplateLiteral();
   bool CheckJsxName() const;
   std::string ParseJsxName(const char *context);
 };

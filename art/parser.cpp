@@ -795,6 +795,7 @@ std::unique_ptr<Expr> Parser::ParsePrimary() {
     pos++;
     return e;
   }
+  if (Check(TokenKind::TemplateStringMiddle) || Check(TokenKind::TemplateStringTail)) return ParseTemplateLiteral();
   if (Match(TokenKind::KwTrue)) {
     auto e = MakeExpr(ExprKind::BoolLiteral, loc);
     e->boolValue = true;
@@ -953,6 +954,30 @@ std::unique_ptr<Expr> Parser::ParseJsxBraceExpr(const char *context) {
   auto value = ParseExpr();
   Expect(TokenKind::RBrace, "to close a JSX '{ ... }' expression");
   return value;
+}
+
+// `` `text ${expr} more` `` - see ExprKind::TemplateLiteral's own doc
+// comment for the resulting AST shape. The lexer has already split this
+// into TemplateStringMiddle/Tail tokens with ordinary tokens for each
+// `${...}` interpolation spliced between them (see Tokenizer's own
+// templateBraceDepth_ doc comment) - no explicit closing '}' to consume
+// per interpolation here, the lexer already ate it and resumed
+// template-text scanning in its place, so ParseExpr() alone is enough:
+// every token that isn't part of a valid expression continuation
+// (Middle/Tail included) makes it stop on its own.
+std::unique_ptr<Expr> Parser::ParseTemplateLiteral() {
+  SourceLoc loc = Cur().loc;
+  auto e = MakeExpr(ExprKind::TemplateLiteral, loc);
+  for (;;) {
+    bool isTail = Check(TokenKind::TemplateStringTail);
+    auto part = MakeExpr(ExprKind::StringLiteral, Cur().loc);
+    part->name = Cur().text;
+    pos++;
+    e->elements.push_back(std::move(part));
+    if (isTail) break;
+    e->elements.push_back(ParseExpr());
+  }
+  return e;
 }
 
 std::unique_ptr<Expr> Parser::ParseArrayLiteral() {
