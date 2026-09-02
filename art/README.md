@@ -52,12 +52,14 @@ artisan-cli new my-app  # --lang art is the default
 artisan-cli build my-app --run
 ```
 
-That scaffolds a single `app.ts`: a clean `import { Node, Event, ... }
-from "art";` plus an empty `setupApp`, which is where your own code
-goes. The DOM bridge itself (`declare`d and wrapped in ergonomic classes
-- see [The DOM bridge](#the-dom-bridge) below) is ART's own standard
-library ([`stdlib/art.ts`](stdlib/art.ts)), not something copied into
-your project.
+That scaffolds a single `app.tsx`: a clean `import { Node, Event } from
+"art";` plus a small JSX-driven counter, which is where your own code
+goes (`.tsx` rather than plain `.ts` so it can use JSX - see [JSX
+(.tsx)](#jsx-tsx) below - and `pages/index.html` is deliberately just a
+bare mount point as a result). The DOM bridge itself (`declare`d and
+wrapped in ergonomic classes - see [The DOM bridge](#the-dom-bridge)
+below) is ART's own standard library ([`stdlib/art.ts`](stdlib/art.ts)),
+not something copied into your project.
 
 To build the `art` compiler itself and use it standalone (e.g. to
 compile a `.ts` file with no artisan app around it at all):
@@ -75,8 +77,8 @@ Needs LLVM 18 (`llvm-18-dev` or equivalent) to build, and the
 link a standalone binary (every ART allocation goes through it - see
 [Memory management](#memory-management)). Neither is required to build
 artisan itself unless an ART app is actually configured
-(`ARTISAN_APP_ART_SOURCE`/`app.ts`) - a C++/Go/JS-only project never
-pulls either in.
+(`ARTISAN_APP_ART_SOURCE`/`app.ts`/`app.tsx`) - a C++/Go/JS-only project
+never pulls either in.
 
 ## Language guide
 

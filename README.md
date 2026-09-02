@@ -48,13 +48,18 @@ ART](#using-art)):
 
 ```
 my-app/
-  pages/index.html   # starter markup - the page the app opens on
-  app.ts              # ART app - your own startup code goes here
+  pages/index.html   # a bare mount point (<div id="root">) - see app.tsx
+  app.tsx            # ART app - your own startup code goes here
 ```
 
-`app.ts` starts with `import { Node, Event, ... } from "art";` - the DOM
+`app.tsx` starts with `import { Node, Event } from "art";` - the DOM
 bridge (Node/Event, `document`, ...) is ART's standard library, not
-something copied into your project (see "Using ART" below).
+something copied into your project (see "Using ART" below). It's `.tsx`
+rather than plain `.ts` so the UI itself can be built with JSX
+(`<div>...</div>`, a real expression compiling straight to
+`document.createElement`/`.appendChild` calls) right in the entry point -
+`pages/index.html` is deliberately just a mount point, the same way a
+bundler-based React app's own `index.html` usually is too.
 
 Add more pages under `pages/` - nested folders become nested routes,
 Next.js-style (`pages/settings/profile.html` becomes the route
@@ -104,8 +109,8 @@ my-app/
 
 A project uses one native language, never more than one - `new` always
 scaffolds exactly one, and `artisan-cli build` refuses to build a project
-that somehow ends up with more than one of `app.ts`, `src/**/*.cpp`, and
-`goapp/`.
+that somehow ends up with more than one of `app.ts`/`app.tsx`,
+`src/**/*.cpp`, and `goapp/`.
 
 ## Building a project
 
@@ -116,7 +121,7 @@ artisan-cli build my-app --run
 There's no mode for naming individual files by hand - it's always a project
 directory, and its files are discovered automatically: every
 `pages/**/*.html`, and exactly one native language - an ART app
-(`app.ts`, see [Using ART](#using-art) below), every `src/**/*.cpp`, or a
+(`app.tsx`, see [Using ART](#using-art) below), every `src/**/*.cpp`, or a
 Go app under `goapp/` (see [Using Go](#using-go) below) - plus an
 optional `app.js` at the project root (embedded and run once at startup,
 alongside whichever native language the project uses). Flags:
@@ -258,23 +263,26 @@ ART is a small, statically typed language of this repo's own design -
 TypeScript-like syntax with the dynamic parts removed (no `any`, no
 prototypes, no dynamic property access), compiled ahead of time to native
 machine code via LLVM (see `art/`) rather than interpreted. A project's
-`app.ts` - one file at the project root by default, like `app.js`, but
-optionally the entry point into a real multi-file project via
-`import`/`export` (see "Modules" below) - is compiled by the standalone
-`art` compiler and linked straight into the binary, the same "runs
-compiled, not interpreted" deal `ARTISAN_APP_CPP_SOURCES`/
-`ARTISAN_APP_GO_SOURCE` get.
+`app.ts`/`app.tsx` - one file at the project root by default, like
+`app.js`, but optionally the entry point into a real multi-file project
+via `import`/`export` (see "Modules" below) - is compiled by the
+standalone `art` compiler and linked straight into the binary, the same
+"runs compiled, not interpreted" deal `ARTISAN_APP_CPP_SOURCES`/
+`ARTISAN_APP_GO_SOURCE` get. The scaffold specifically writes `app.tsx`
+(`.tsx`, not `.ts`), so the entry point can use JSX to build its own UI
+directly - see "JSX (.tsx)" below.
 
 ```bash
 artisan-cli new my-app  # --lang art is the default
 ```
 
-scaffolds a single `app.ts`: a clean `import { Node, Event, ... } from
+scaffolds a single `app.tsx`: a clean `import { Node, Event } from
 "art";` (the DOM bridge below, already `declare`d and wrapped in
 `declare class Node`/`declare class Event` - see "Classes" below - but
 part of ART's own standard library, not copied into your project) plus
-an empty setup section, which is where your own code goes. An ART app
-needs a `setupApp` - either an explicit function, or (the default the
+a small JSX-driven counter that mounts into `pages/index.html`'s bare
+`<div id="root">`, which is where your own code goes. An ART app needs
+a `setupApp` - either an explicit function, or (the default the
 scaffold uses) just bare top-level statements, which the compiler
 collects into one for you:
 
@@ -620,7 +628,7 @@ reachable from the entry point) must still be globally unique, the same
 as a single flat file today - `import` decides who's *allowed* to
 reference a name, not which of several same-named things they get.
 
-The entry point passed to `art` (or `app.ts` itself, for
+The entry point passed to `art` (or `app.ts`/`app.tsx` itself, for
 `artisan-cli build`) only needs `import`s at all for this multi-file
 resolution to kick in - compiling a plain file with none is unchanged
 from before this existed, same error messages included. When imports are
@@ -1310,7 +1318,8 @@ just no longer attached to anything.
 Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
 Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is
 a git submodule, and unlike the rest of this framework's dependencies
-they're only ever required when `ARTISAN_APP_ART_SOURCE`/`app.ts` is
+they're only ever required when `ARTISAN_APP_ART_SOURCE`/`app.ts`/
+`app.tsx` is
 actually configured: a C++/Go/JS-only project never pulls either in at
 all (see the root `CMakeLists.txt`'s conditional `add_subdirectory(art)`
 and `find_library(ARTISAN_GC_LIB ...)`).

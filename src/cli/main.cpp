@@ -15,7 +15,9 @@
 // there's exactly one way a project is laid out.
 //
 // `new` writes out a starting point for one native language - ART
-// (app.ts, see art/, the default), with --lang cpp, C++ (src/main.cpp),
+// (app.tsx, see art/, the default - .tsx rather than plain .ts so the
+// scaffold's own UI can be written as JSX, matching its otherwise-bare
+// pages/index.html mount point), with --lang cpp, C++ (src/main.cpp),
 // or with --lang go, Go (goapp/) - a project uses exactly one of these,
 // never more than one (see DiscoverProject). Script (app.js) is
 // orthogonal to that choice and can layer on any of them.
@@ -75,10 +77,10 @@ void PrintBuildUsage() {
          "  <project-dir>/goapp/            a native Go app instead, if the\n"
          "        project uses that language - its own go.mod/main.go (see\n"
          "        go/artisango), compiled ahead of time, never combined\n"
-         "        with src/**/*.cpp or app.ts in the same project.\n"
-         "  <project-dir>/app.ts            a native ART app instead (see\n"
-         "        art/) - one file (app.tsx instead, to use JSX in the\n"
-         "        entry point itself), compiled ahead of time, never\n"
+         "        with src/**/*.cpp or app.ts/app.tsx in the same project.\n"
+         "  <project-dir>/app.tsx           a native ART app instead (see\n"
+         "        art/) - one file (app.ts instead, if you don't need JSX\n"
+         "        in the entry point itself), compiled ahead of time, never\n"
          "        combined with src/**/*.cpp or goapp/ in the same project.\n"
          "  <project-dir>/app.js            optional embedded script -\n"
          "        orthogonal to the native-language choice above, works\n"
@@ -202,7 +204,7 @@ struct DiscoveredProject {
   std::vector<fs::path> cppPaths;
   fs::path jsPath;  // Empty if app.js doesn't exist.
   fs::path goPath;  // Empty if goapp/go.mod doesn't exist.
-  fs::path artPath; // Empty if app.ts doesn't exist.
+  fs::path artPath; // Empty if neither app.ts nor app.tsx exists.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
@@ -273,7 +275,7 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
                         (!discovered.artPath.empty() ? 1 : 0);
   if (nativeLangCount > 1) {
     std::cerr << "artisan-cli: " << projectDir
-               << " has more than one of src/**/*.cpp, goapp/, and app.ts "
+               << " has more than one of src/**/*.cpp, goapp/, and app.ts/app.tsx "
                   "- a project can only use one native language at a "
                   "time. Remove the ones you don't want.\n";
     std::exit(1);
@@ -371,14 +373,17 @@ void PrintNewUsage() {
                "                     route, Next.js-style) and link between\n"
                "                     them with <a href=\"...\">\n\n"
                "  --lang art (default)\n"
-               "    app.ts           an ART app (see art/) - a statically\n"
+               "    app.tsx          an ART app (see art/) - a statically\n"
                "                     typed, TypeScript-like language\n"
                "                     compiled ahead of time with the ART\n"
-               "                     compiler. Top-level statements run\n"
-               "                     once per page load, and code reaches\n"
-               "                     the DOM through `declare function`s -\n"
-               "                     see include/art_bridge.h and\n"
-               "                     README.md's \"Using ART\" section.\n\n"
+               "                     compiler, with JSX (<div>...</div>)\n"
+               "                     for building UI. Top-level statements\n"
+               "                     run once per page load, and code\n"
+               "                     reaches the DOM through the ambient\n"
+               "                     `document` - see README.md's \"Using\n"
+               "                     ART\" section. pages/index.html is\n"
+               "                     just a bare mount point here; the\n"
+               "                     real UI is built in app.tsx.\n\n"
                "  --lang cpp\n"
                "    src/main.cpp     native SetupApp(Node&) - see\n"
                "                     include/app.h. Add more src/*.cpp as\n"
@@ -414,6 +419,24 @@ constexpr const char *kIndexHtmlTemplate = R"html(<!doctype html>
 </html>
 )html";
 
+// An ART project's own index.html, deliberately minimal: `--lang art`
+// (the default) builds its actual UI in app.tsx via JSX at runtime, the
+// same way a bundler-based React app's own index.html is normally just
+// a mount point too - the interesting markup lives in code, not here.
+// Still real HTML artisanc compiles ahead of time like any other page
+// (DiscoverPages requires at least one), just about as bare as one can
+// be while still giving app.tsx an id to find and build into.
+constexpr const char *kIndexHtmlTemplateArt = R"html(<!doctype html>
+<html>
+  <head>
+    <title>My artisan app</title>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+)html";
+
 // SetupApp(Node&) is the native counterpart to a script's top-level code
 // (see include/js_engine.h) - plain compiled C++ against the same Node
 // API, run once when the app starts. include/app.h has the full picture;
@@ -444,8 +467,11 @@ void SetupApp(Node &document) {
 // `function setupApp(): void` into ArtisanSetupApp.
 constexpr const char *kAppArtTemplate = R"art(// Your app's own ART code goes here - see art/stdlib/art.ts for the DOM
 // bridge (Node/Event) this imports from ART's standard library, and
-// README.md's "Using ART" section for the language itself.
-import { Node, Event, ArtEventDetail } from "art";
+// README.md's "Using ART" section for the language itself, including
+// "JSX (.tsx)" for the <tag>...</tag> element-literal syntax below - a
+// real expression, not a template: <div>...</div> compiles straight to
+// document.createElement/.setAttribute/.appendChild calls.
+import { Node, Event } from "art";
 
 // A top-level `let`/`const` is state that survives across calls - e.g. a
 // click handler's own counter. Its initializer must be a literal number/
@@ -455,43 +481,15 @@ let clickCount: number = 0;
 
 // Every node.addEventListener handler - click included, since there's no
 // separate zero-argument "onclick"-style listener kind - takes the Event
-// itself as its one parameter (unused here, but still required by the
-// (event: Event) => void shape addEventListener expects). It gets no
-// Node of its own (unlike setupApp), so it reaches the DOM through the
-// ambient `document` instead, e.g.:
-//
-//   let label: Node = document.getElementById("my-label");
-//   if (!label.isNull()) {
-//     ...
-//   }
-//
-// Pass a handler's bare name (not a call) to addEventListener, e.g.
-// `input.addEventListener("keydown", onKeyDown, false)`.
+// itself as its one parameter. It gets no Node of its own (unlike
+// setupApp), so it reaches the DOM through the ambient `document`
+// instead, e.g. `document.getElementById(id)`.
 function onButtonClick(event: Event): void {
   clickCount++;
-  // Your click-time code goes here, e.g. showing the new count:
-  //
-  //   let label: Node = document.getElementById("my-label");
-  //   if (!label.isNull()) {
-  //     label.textContent = numberToString(clickCount) + " clicks";
-  //   }
-}
-
-function onKeyDown(event: Event): void {
-  // Your key-press code goes here, e.g. (add ArtDispatchEvent to the
-  // `import` above to use it):
-  //
-  //   if (event.key == "Enter") {
-  //     event.preventDefault();
-  //     ArtDispatchEvent::<string>(document, "form-submitted", true, true, "ok");
-  //   }
-}
-
-// Your own event's detail only round-trips through ArtEventDetail<T>
-// correctly in a listener on an event ART itself dispatched, with the
-// same T the dispatch used (see ArtDispatchEvent's doc comment above).
-function onFormSubmitted(event: Event): void {
-  let payload: string = ArtEventDetail::<string>(event); // "ok", from the dispatch above
+  let label: Node = document.getElementById("count-label");
+  if (!label.isNull()) {
+    label.textContent = `Clicked ${numberToString(clickCount)} times`;
+  }
 }
 
 // Your native startup code goes here - no `function setupApp(): void`
@@ -512,12 +510,20 @@ function onFormSubmitted(event: Event): void {
 // fresh every time this code runs, exactly like everywhere else `{ }`
 // already means that in ART.
 //
-//   {
-//     let button: Node = document.getElementById("my-button");
-//     if (!button.isNull()) {
-//       button.addEventListener("click", onButtonClick, false);
-//     }
-//   }
+// pages/index.html is deliberately just a mount point (a bare <div
+// id="root">) - the actual UI is built here, in code, the same way a
+// bundler-based React app's own index.html usually just has one too.
+{
+  let root: Node = document.getElementById("root");
+  if (!root.isNull()) {
+    root.appendChild(
+      <div>
+        <p id="count-label">{"Clicked 0 times"}</p>
+        <button onclick={onButtonClick}>{"Click me"}</button>
+      </div>
+    );
+  }
+}
 )art";
 
 // go.mod's replace directive needs an absolute path to go/artisango - the
@@ -720,14 +726,14 @@ int RunNew(int argc, char *argv[]) {
   }
 
   CreateDirectory(projectDir / "pages");
-  WriteFile(projectDir / "pages" / "index.html", kIndexHtmlTemplate);
+  WriteFile(projectDir / "pages" / "index.html", lang == "art" ? kIndexHtmlTemplateArt : kIndexHtmlTemplate);
 
   if (lang == "go") {
     CreateDirectory(projectDir / "goapp");
     WriteFile(projectDir / "goapp" / "go.mod", GoModTemplate());
     WriteFile(projectDir / "goapp" / "main.go", kMainGoTemplate);
   } else if (lang == "art") {
-    WriteFile(projectDir / "app.ts", kAppArtTemplate);
+    WriteFile(projectDir / "app.tsx", kAppArtTemplate);
   } else {
     CreateDirectory(projectDir / "src");
     WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
