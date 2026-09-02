@@ -1360,7 +1360,13 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         }
       }
     }
-    actual = ResolvedType::Struct("Node");
+    // A fragment (`<>...</>` - see ExprKind::JsxElement's own doc
+    // comment) has no wrapping element, so it's `Node[]` - an ordered
+    // group of its children - rather than `Node`. `expr->fields` is
+    // always empty for one (the parser never lets a fragment have
+    // attributes), so the attribute loop above is already a no-op there.
+    bool isFragment = expr->name.empty();
+    actual = isFragment ? ResolvedType::ArrayOf(ResolvedType::Struct("Node")) : ResolvedType::Struct("Node");
     break;
   }
 

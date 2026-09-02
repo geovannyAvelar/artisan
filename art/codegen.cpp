@@ -1051,6 +1051,101 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
   }
 
   case ExprKind::JsxElement: {
+    if (expr->name.empty()) {
+      // A fragment, `<>...</>` (see ExprKind::JsxElement's own doc
+      // comment) - builds a real Node[] (same header shape ArrayLiteral
+      // above does: {i64 length, ptr data}) out of its children instead
+      // of a wrapping element, so its length is only known at runtime
+      // whenever any child is itself a `Node[]` (spread) - unlike
+      // ArrayLiteral, which always knows its element count at compile
+      // time. Two passes: first total up the final length (a compile-
+      // time constant per plain child, plus a runtime `.length` per
+      // spread one), allocate exactly that much, then fill it in source
+      // order. Every child is evaluated exactly once, before either pass
+      // - never twice just to size the array and then fill it - in case
+      // it has a side effect (e.g. a function call).
+      llvm::Function *createTextNodeFn = llvmFunctions.at("ArtCreateTextNode");
+      llvm::Function *numberToStringFn = llvmFunctions.at("numberToString");
+      llvm::StructType *hdrTy = GetArrayHeaderType();
+      llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+      llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+
+      struct FragChild {
+        llvm::Value *val;
+        Expr *expr;
+      };
+      std::vector<FragChild> children;
+      children.reserve(expr->elements.size());
+      for (auto &child : expr->elements) children.push_back({GenExpr(child.get()), child.get()});
+
+      llvm::Value *totalCount = llvm::ConstantInt::get(i64Ty, 0);
+      for (auto &c : children) {
+        if (c.expr->resolvedType.tag == TypeTag::Array) {
+          llvm::Value *len = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, c.val, 0));
+          totalCount = builder.CreateAdd(totalCount, len);
+        } else {
+          totalCount = builder.CreateAdd(totalCount, llvm::ConstantInt::get(i64Ty, 1));
+        }
+      }
+
+      llvm::Value *dataPtr = GenHeapAlloc(builder.CreateMul(totalCount, llvm::ConstantInt::get(i64Ty, 8)));
+      llvm::AllocaInst *writeIdxAlloca = CreateEntryAlloca(currentFunction, i64Ty, "fragment.widx");
+      builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), writeIdxAlloca);
+
+      for (auto &c : children) {
+        if (c.expr->resolvedType.tag == TypeTag::Array) {
+          // Spread: copy every element of this Node[] child in, via a
+          // real runtime loop - same shape the element path's own
+          // Node[]-child spread has (see below), just writing into this
+          // fragment's own output array instead of ArtAppendChild-ing
+          // into a parent.
+          llvm::Value *len = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, c.val, 0));
+          llvm::Value *srcData = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, c.val, 1));
+
+          llvm::AllocaInst *srcIdxAlloca = CreateEntryAlloca(currentFunction, i64Ty, "fragment.spread.idx");
+          builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), srcIdxAlloca);
+
+          auto *condBB = llvm::BasicBlock::Create(context, "fragment.spread.cond", currentFunction);
+          auto *bodyBB = llvm::BasicBlock::Create(context, "fragment.spread.body", currentFunction);
+          auto *endBB = llvm::BasicBlock::Create(context, "fragment.spread.end", currentFunction);
+
+          builder.CreateBr(condBB);
+          builder.SetInsertPoint(condBB);
+          llvm::Value *srcIdx = builder.CreateLoad(i64Ty, srcIdxAlloca);
+          builder.CreateCondBr(builder.CreateICmpSLT(srcIdx, len), bodyBB, endBB);
+
+          builder.SetInsertPoint(bodyBB);
+          llvm::Value *srcElemPtr = builder.CreateGEP(ptrTy, srcData, {srcIdx});
+          llvm::Value *elemVal = builder.CreateLoad(ptrTy, srcElemPtr);
+          llvm::Value *writeIdx = builder.CreateLoad(i64Ty, writeIdxAlloca);
+          builder.CreateStore(elemVal, builder.CreateGEP(ptrTy, dataPtr, {writeIdx}));
+          builder.CreateStore(builder.CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1)), writeIdxAlloca);
+          builder.CreateStore(builder.CreateAdd(srcIdx, llvm::ConstantInt::get(i64Ty, 1)), srcIdxAlloca);
+          builder.CreateBr(condBB);
+
+          builder.SetInsertPoint(endBB);
+        } else {
+          llvm::Value *nodeVal;
+          if (c.expr->resolvedType.tag == TypeTag::String) {
+            nodeVal = builder.CreateCall(createTextNodeFn, {c.val});
+          } else if (c.expr->resolvedType.tag == TypeTag::Number) {
+            llvm::Value *strVal = builder.CreateCall(numberToStringFn, {c.val});
+            nodeVal = builder.CreateCall(createTextNodeFn, {strVal});
+          } else {
+            nodeVal = c.val; // already a Node
+          }
+          llvm::Value *writeIdx = builder.CreateLoad(i64Ty, writeIdxAlloca);
+          builder.CreateStore(nodeVal, builder.CreateGEP(ptrTy, dataPtr, {writeIdx}));
+          builder.CreateStore(builder.CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1)), writeIdxAlloca);
+        }
+      }
+
+      llvm::Value *headerPtr = GenHeapAlloc(16);
+      builder.CreateStore(totalCount, builder.CreateStructGEP(hdrTy, headerPtr, 0));
+      builder.CreateStore(dataPtr, builder.CreateStructGEP(hdrTy, headerPtr, 1));
+      return headerPtr;
+    }
+
     // Desugars straight to ART's standard library's own raw DOM bridge
     // functions (art/stdlib/art.ts) - Sema already confirmed all of these
     // exist in the merged program (see its own JsxElement case). Multiple

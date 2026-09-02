@@ -875,33 +875,46 @@ std::string Parser::ParseJsxName(const char *context) {
 // into one flat token stream with no notion of a "raw text" mode; text
 // content is written `<div>{"Hello"}</div>` instead. Every attribute
 // value is required (no bare `<input disabled />`-style shorthand).
+//
+// Also parses a *fragment*, `<>child*</>` - no tag name, no attributes,
+// no self-close - when the token right after '<' is '>' rather than a
+// name. `e->name` stays empty (a real tag name is never empty) as the
+// AST-level marker Sema/Codegen key off of: see ExprKind::JsxElement's
+// own doc comment for why a fragment resolves to `Node[]` rather than
+// `Node`.
 std::unique_ptr<Expr> Parser::ParseJsxElement() {
   SourceLoc loc = Cur().loc;
   Expect(TokenKind::Lt, "to start a JSX element");
-  std::string tagName = ParseJsxName("as a JSX tag name");
 
+  bool isFragment = Check(TokenKind::Gt);
   auto e = MakeExpr(ExprKind::JsxElement, loc);
-  e->name = tagName;
+  std::string tagName; // stays empty for a fragment
 
-  while (CheckJsxName()) {
-    std::string attrName = ParseJsxName("as a JSX attribute name");
-    Expect(TokenKind::Assign, "after a JSX attribute name ('" + attrName + "')");
-    std::unique_ptr<Expr> value;
-    if (Check(TokenKind::StringLiteral)) {
-      value = MakeExpr(ExprKind::StringLiteral, Cur().loc);
-      value->name = Cur().text;
-      pos++;
-    } else {
-      value = ParseJsxBraceExpr("as a JSX attribute value");
+  if (!isFragment) {
+    tagName = ParseJsxName("as a JSX tag name");
+    e->name = tagName;
+
+    while (CheckJsxName()) {
+      std::string attrName = ParseJsxName("as a JSX attribute name");
+      Expect(TokenKind::Assign, "after a JSX attribute name ('" + attrName + "')");
+      std::unique_ptr<Expr> value;
+      if (Check(TokenKind::StringLiteral)) {
+        value = MakeExpr(ExprKind::StringLiteral, Cur().loc);
+        value->name = Cur().text;
+        pos++;
+      } else {
+        value = ParseJsxBraceExpr("as a JSX attribute value");
+      }
+      e->fields.emplace_back(attrName, std::move(value));
     }
-    e->fields.emplace_back(attrName, std::move(value));
-  }
 
-  if (Match(TokenKind::Slash)) {
-    Expect(TokenKind::Gt, "to close a self-closing JSX element ('/>')");
-    return e;
+    if (Match(TokenKind::Slash)) {
+      Expect(TokenKind::Gt, "to close a self-closing JSX element ('/>')");
+      return e;
+    }
   }
-  Expect(TokenKind::Gt, "to close a JSX element's opening tag ('<" + tagName + ">')");
+  Expect(TokenKind::Gt, isFragment ? "to open a JSX fragment ('<>')"
+                                    : "to close a JSX element's opening tag ('<" + tagName + ">')");
 
   while (!(Check(TokenKind::Lt) && PeekAt(1).kind == TokenKind::Slash)) {
     if (Check(TokenKind::Lt)) {
@@ -910,7 +923,7 @@ std::unique_ptr<Expr> Parser::ParseJsxElement() {
       e->elements.push_back(ParseJsxBraceExpr("as a JSX child"));
     } else {
       Fail("expected a nested JSX element or '{ ... }', found " + std::string(TokenKindName(Cur().kind)) +
-               " inside '<" + tagName + ">'",
+               " inside '<" + (isFragment ? "" : tagName) + ">'",
            Cur().loc);
     }
   }
@@ -918,11 +931,15 @@ std::unique_ptr<Expr> Parser::ParseJsxElement() {
   SourceLoc closeLoc = Cur().loc;
   Expect(TokenKind::Lt, "to start a JSX closing tag");
   Expect(TokenKind::Slash, "after '<' to start a JSX closing tag");
-  std::string closeTag = ParseJsxName("as the JSX closing tag name");
-  if (closeTag != tagName) {
-    Fail("mismatched JSX closing tag - expected '</" + tagName + ">', got '</" + closeTag + ">'", closeLoc);
+  if (isFragment) {
+    Expect(TokenKind::Gt, "to close a JSX fragment ('</>')");
+  } else {
+    std::string closeTag = ParseJsxName("as the JSX closing tag name");
+    if (closeTag != tagName) {
+      Fail("mismatched JSX closing tag - expected '</" + tagName + ">', got '</" + closeTag + ">'", closeLoc);
+    }
+    Expect(TokenKind::Gt, "to close a JSX closing tag ('</" + tagName + ">')");
   }
-  Expect(TokenKind::Gt, "to close a JSX closing tag ('</" + tagName + ">')");
 
   return e;
 }

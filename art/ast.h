@@ -100,10 +100,18 @@ enum class ExprKind {
   // attributes (name -> value expression, same "name: value" pair shape)
   // and Call/ArrayLiteral's `elements` for children (each either another
   // JsxElement or a plain `{ expr }` interpolation) rather than adding
-  // JSX-specific fields - `name` is the tag itself. Always resolves to
-  // type Node (see Sema::CheckExpr) - a real expression, not restricted
-  // to statement position, the same way an ObjectLiteral already builds
-  // a heap value through a sequence of instructions before yielding it.
+  // JSX-specific fields - `name` is the tag itself. Resolves to type Node
+  // (see Sema::CheckExpr) - a real expression, not restricted to
+  // statement position, the same way an ObjectLiteral already builds a
+  // heap value through a sequence of instructions before yielding it.
+  //
+  // A *fragment*, `<>child*</>`, is the same node with `name` left empty
+  // (a real tag never is) - no element gets created and no attributes are
+  // legal, and it resolves to `Node[]` instead of `Node`: an ordered
+  // group of its children with no wrapping element of its own, letting a
+  // helper function return several sibling nodes (or a variable-length
+  // list built from a `Node[]` child, spread the same as anywhere else -
+  // see Codegen's own JsxElement case) without an unwanted wrapper tag.
   JsxElement,
   // `cond ? thenExpr : elseExpr` - reuses Unary/IncDec's `operand` for
   // `cond` and Binary/Assign's `lhs`/`rhs` for the two branches, rather

@@ -485,6 +485,32 @@ function badge(text: string): Node {
 - **Self-closing** (`<br />`) and a required, exactly-matching closing
   tag (`<div>...</div>`, never left implicit) are both supported; a
   mismatched or missing closing tag is a compile error naming both tags.
+- **Fragments** (`<>...</>`) have no tag name, no attributes, and no
+  wrapping element - just its children, resolving to `Node[]` instead
+  of `Node`, so a helper can return several sibling nodes without an
+  unwanted wrapper tag. Nesting one inside another element's own
+  children spreads it there for free, the same as any other `Node[]`
+  child (see above) - a fragment is just a `Node[]`-producing
+  expression, nothing more special than that.
+
+  ```tsx
+  function headerAndFooter(): Node[] {
+    return <>
+      <li class="header">{"header"}</li>
+      <li class="footer">{"footer"}</li>
+    </>;
+  }
+
+  function renderList(labels: string[]): Node {
+    let items: Node[] = makeArray::<Node>(labels.length, <li></li>);
+    let i: number = 0;
+    while (i < labels.length) {
+      items[i] = <li>{labels[i]}</li>;
+      i = i + 1;
+    }
+    return <ul>{headerAndFooter()}{items}</ul>; // both spread, in order
+  }
+  ```
 
 Why `.tsx` only, not JSX inline in any `.ts` file: a bare `<` is
 otherwise always the start of a `<`/`<=` comparison (there's no other

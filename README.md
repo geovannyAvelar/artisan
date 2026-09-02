@@ -992,11 +992,24 @@ appended as-is, `string`/`number` becomes a text node, `Node[]` is
 loop, the way a dynamically-sized list of children gets into JSX at
 all) - no bare unquoted text between tags (`<div>{"Hello"}</div>`, not
 `<div>Hello</div>`), since ART's tokenizer lexes the whole file up
-front with no "raw text" mode to switch into mid-parse. See
-[art/README.md's "JSX (.tsx)" section](art/README.md#jsx-tsx) for the
-full grammar, including hyphenated/keyword-colliding attribute names
-(`data-index`, `class`) and why `.tsx` specifically (not JSX inline in
-any `.ts` file).
+front with no "raw text" mode to switch into mid-parse.
+
+A fragment, `<>...</>`, has no tag and no wrapping element - just its
+children, resolving to `Node[]` instead of `Node`, so a helper can
+return several sibling nodes without an unwanted wrapper tag (and, like
+any other `Node[]`, spreads for free when nested inside another
+element's own children):
+
+```tsx
+function headerAndFooter(): Node[] {
+  return <><li>{"header"}</li><li>{"footer"}</li></>;
+}
+```
+
+See [art/README.md's "JSX (.tsx)" section](art/README.md#jsx-tsx) for
+the full grammar, including hyphenated/keyword-colliding attribute
+names (`data-index`, `class`) and why `.tsx` specifically (not JSX
+inline in any `.ts` file).
 
 ### Signals
 
