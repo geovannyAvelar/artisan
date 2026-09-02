@@ -228,4 +228,32 @@ bool ArtEventMetaKey(void *event);
 ArtString *ArtEventKey(void *event);
 ArtString *ArtEventCode(void *event);
 
+// setTimeout/setInterval/requestAnimationFrame - see TimerQueue/
+// AnimationFrameQueue (timer_queue.h/animation_frame_queue.h), scheduled
+// into via art_bridge_context.h's SetArtTimerContext (main.cpp calls it
+// once per navigate(), same place SetArtDocumentContext already is). A
+// no-op returning 0 - an id no real timer/frame ever has, both queues'
+// ids start at 1 - if called before a page is ready to schedule into,
+// same tolerance ArtDocument()/ArtIsNull already has for "no document
+// yet"; this should never actually happen from within a real ART
+// program's own top-level code or a handler. ArtClearTimer cancels
+// either a setTimeout or a setInterval id - the same single entry point
+// real clearTimeout/clearInterval each are.
+//
+// Every id here is `double`, not `int`, despite TimerQueue/
+// AnimationFrameQueue using plain `int` internally: ART's `number` type
+// is always a C ABI `double` (see art/codegen.cpp's MapType), so a
+// `declare function` returning/taking `number` needs an actual `double`
+// on this side of the boundary too, or the mismatched calling
+// convention (an integer register vs. an XMM one) hands back/reads
+// garbage - caught by a real ArtClearTimer(id) call silently failing to
+// cancel anything, id truncation/precision loss aside (never a real
+// concern here: every id fits exactly in a double already).
+using ArtAnimationFrameHandler = void (*)(double); // "(timestamp: number) => void"
+double ArtSetTimeout(ArtHandler callback, double delayMs);
+double ArtSetInterval(ArtHandler callback, double delayMs);
+void ArtClearTimer(double id);
+double ArtRequestAnimationFrame(ArtAnimationFrameHandler callback);
+void ArtCancelAnimationFrame(double id);
+
 } // extern "C"

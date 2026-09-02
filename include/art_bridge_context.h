@@ -12,11 +12,22 @@
 namespace artisan {
 
 class Node;
+class TimerQueue;
+class AnimationFrameQueue;
 
 // nullptr while no document is live (between main.cpp's `document.reset()`
 // and the next page finishing its build) - ArtDocument() returns that
 // through unchanged, exactly the "no match" nullptr ArtIsNull already
 // exists to test for.
 void SetArtDocumentContext(Node *document);
+
+// What ArtSetTimeout/ArtSetInterval/ArtRequestAnimationFrame (art_bridge.h)
+// schedule into - a separate pair of globals from node_c_api_bridge.h's
+// SetGoTimerContext (even though main.cpp's timerQueue/animationFrameQueue
+// instances are the very same ones handed to both), mirroring
+// SetArtDocumentContext's own "ART gets its own wiring, not routed through
+// another binding's" precedent. Called once per navigate(), same place
+// SetArtDocumentContext/SetGoTimerContext already are.
+void SetArtTimerContext(TimerQueue &timers, AnimationFrameQueue &animationFrames);
 
 } // namespace artisan

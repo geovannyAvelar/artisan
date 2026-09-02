@@ -454,6 +454,7 @@ int main(int argc, char *argv[]) {
     timerQueue = TimerQueue{};
     animationFrameQueue = AnimationFrameQueue{};
     artisan::SetGoTimerContext(timerQueue, animationFrameQueue);
+    artisan::SetArtTimerContext(timerQueue, animationFrameQueue);
     artisan::SetupApp(*document);
     ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue,

@@ -4,17 +4,29 @@
 #include <cstring>
 #include <string>
 
+#include <SDL2/SDL.h>
+
 #ifdef ARTISAN_HAS_ART_GC
 #include <gc.h>
 #endif
 
+#include "animation_frame_queue.h"
 #include "art_bridge_context.h"
 #include "dom_node.h"
 #include "node_c_api.h"
+#include "timer_queue.h"
 
 namespace {
 
 artisan::Node *g_currentDocument = nullptr;
+
+// What ArtSetTimeout/ArtSetInterval/ArtRequestAnimationFrame schedule
+// into - set by SetArtTimerContext (art_bridge_context.h) before
+// setupApp/any handler can possibly run. nullptr (the pre-navigate()
+// default) makes those functions safe, id-0-returning no-ops, the same
+// tolerance g_currentDocument above already has.
+artisan::TimerQueue *g_timerQueue = nullptr;
+artisan::AnimationFrameQueue *g_animationFrames = nullptr;
 
 // A heap allocation ART code will end up holding a pointer to needs to
 // come from the exact same managed heap ART's own codegen allocates
@@ -89,6 +101,11 @@ private:
 namespace artisan {
 
 void SetArtDocumentContext(Node *document) { g_currentDocument = document; }
+
+void SetArtTimerContext(TimerQueue &timers, AnimationFrameQueue &animationFrames) {
+  g_timerQueue = &timers;
+  g_animationFrames = &animationFrames;
+}
 
 } // namespace artisan
 
@@ -281,5 +298,30 @@ bool ArtEventMetaKey(void *event) { return static_cast<artisan::Event *>(event)-
 ArtString *ArtEventKey(void *event) { return MakeArtString(static_cast<artisan::Event *>(event)->key.c_str()); }
 
 ArtString *ArtEventCode(void *event) { return MakeArtString(static_cast<artisan::Event *>(event)->code.c_str()); }
+
+double ArtSetTimeout(ArtHandler callback, double delayMs) {
+  if (g_timerQueue == nullptr) return 0;
+  return static_cast<double>(g_timerQueue->Schedule(
+      callback, SDL_GetTicks(), delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/false));
+}
+
+double ArtSetInterval(ArtHandler callback, double delayMs) {
+  if (g_timerQueue == nullptr) return 0;
+  return static_cast<double>(g_timerQueue->Schedule(
+      callback, SDL_GetTicks(), delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/true));
+}
+
+void ArtClearTimer(double id) {
+  if (g_timerQueue != nullptr) g_timerQueue->Cancel(static_cast<int>(id));
+}
+
+double ArtRequestAnimationFrame(ArtAnimationFrameHandler callback) {
+  if (g_animationFrames == nullptr) return 0;
+  return static_cast<double>(g_animationFrames->Schedule(callback));
+}
+
+void ArtCancelAnimationFrame(double id) {
+  if (g_animationFrames != nullptr) g_animationFrames->Cancel(static_cast<int>(id));
+}
 
 } // extern "C"

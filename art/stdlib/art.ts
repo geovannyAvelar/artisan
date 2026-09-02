@@ -200,3 +200,53 @@ export declare class Event {
   get key(): string { return ArtEventKey(this); }
   get code(): string { return ArtEventCode(this); }
 }
+
+// setTimeout/setInterval/requestAnimationFrame - plain global functions
+// (like a real browser's), not Node methods, since there's no natural
+// receiver for a timer. `import { setTimeout, ... } from "art";` to use
+// them - unlike `Node`/`Event`, these are ordinary functions the caller
+// writes by name, so (like ArtDispatchEvent<T>/ArtEventDetail<T> above)
+// they need a real `export`, not the ambient-sugar treatment `document`
+// gets.
+declare function ArtSetTimeout(callback: () => void, delayMs: number): number;
+declare function ArtSetInterval(callback: () => void, delayMs: number): number;
+declare function ArtClearTimer(id: number): void;
+declare function ArtRequestAnimationFrame(callback: (timestamp: number) => void): number;
+declare function ArtCancelAnimationFrame(id: number): void;
+
+// Runs `callback` once, after at least `delayMs` (clamped to >= 0) -
+// returns an id `clearTimeout` can later cancel with, same as real
+// `setTimeout`. A no-op, id-0-returning call before a page is ready to
+// schedule into (see ArtSetTimeout's own doc comment in art_bridge.h) -
+// never actually observable from a real ART program's own code.
+export function setTimeout(callback: () => void, delayMs: number): number {
+  return ArtSetTimeout(callback, delayMs);
+}
+
+// Runs `callback` roughly every `delayMs`, until cancelled - reschedules
+// from the moment it actually fired, not the moment it was originally
+// due, so a late-running frame can't trigger a catch-up burst all at
+// once. Returns an id `clearInterval` can cancel with.
+export function setInterval(callback: () => void, delayMs: number): number {
+  return ArtSetInterval(callback, delayMs);
+}
+
+// Cancels a setTimeout/setInterval id - the same single entry point
+// real clearTimeout/clearInterval each are. A safe no-op if `id` doesn't
+// name a still-pending timer (already fired once, or already cancelled).
+export function clearTimeout(id: number): void { ArtClearTimer(id); }
+export function clearInterval(id: number): void { ArtClearTimer(id); }
+
+// Runs `callback` once, with the current timestamp, just before the
+// next repaint - matching real `requestAnimationFrame`, not a fixed
+// delay. Calling this again from inside `callback` (the normal way to
+// drive a continuous animation) schedules for the *next* repaint, never
+// re-runs within the same one. Returns an id `cancelAnimationFrame` can
+// cancel with.
+export function requestAnimationFrame(callback: (timestamp: number) => void): number {
+  return ArtRequestAnimationFrame(callback);
+}
+
+// Cancels a still-pending requestAnimationFrame id - a safe no-op if
+// it already fired or was already cancelled.
+export function cancelAnimationFrame(id: number): void { ArtCancelAnimationFrame(id); }

@@ -967,6 +967,41 @@ handed across the FFI boundary (e.g. an `ArtString*` passed into a
 copies it into artisan's own (unrelated) memory before doing anything
 that could outlive the call.
 
+### Timers
+
+`setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`/
+`requestAnimationFrame`/`cancelAnimationFrame` - plain global functions
+(`import { setTimeout, ... } from "art";`), matching real JS, not `Node`
+methods - there's no natural receiver for a timer:
+
+```ts
+import { Node, setInterval, clearInterval } from "art";
+
+let seconds: number = 0;
+
+function onTick(): void {
+  seconds = seconds + 1;
+  let label: Node = document.getElementById("timer");
+  if (!label.isNull()) { label.textContent = numberToString(seconds); }
+}
+
+{
+  setInterval(onTick, 1000);
+}
+```
+
+`setTimeout` runs once after at least `delayMs`; `setInterval` reschedules
+from when it actually fired, not when it was originally due, so a
+late-running frame can't trigger a catch-up burst. Both return an id
+either `clearTimeout` or `clearInterval` can cancel with - the same
+single entry point real `clearTimeout`/`clearInterval` each are.
+`requestAnimationFrame` runs once with the current timestamp just before
+the next repaint (not a fixed delay); calling it again from inside its
+own callback - the normal way to animate - schedules for the *next*
+repaint. See [art/README.md's "Timers" section](art/README.md#timers)
+for the full contract of each, including a real int/`double` ABI bug
+this shipped with initially and how it was caught.
+
 ### JSX (.tsx)
 
 A `.tsx` file (only - JSX isn't recognized in a plain `.ts` file) can

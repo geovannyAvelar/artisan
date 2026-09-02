@@ -410,6 +410,64 @@ generic yet (see [Generics](#generics)). `T` can be `number`, `boolean`,
 or `string`; the bridge provides a real, separately compiled pair for
 each.
 
+## Timers
+
+`setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`/
+`requestAnimationFrame`/`cancelAnimationFrame` - plain global functions
+(`import { setTimeout, ... } from "art";`), not `Node` methods, matching
+real JS/a browser: there's no natural receiver for a timer the way there
+is for DOM mutation.
+
+```ts
+import { Node, setTimeout, clearInterval, setInterval } from "art";
+
+let seconds: number = 0;
+let intervalId: number = 0;
+
+function onTick(): void {
+  seconds = seconds + 1;
+  let label: Node = document.getElementById("timer");
+  if (!label.isNull()) { label.textContent = numberToString(seconds); }
+}
+
+function stopAfter10s(): void {
+  clearInterval(intervalId);
+}
+
+{
+  intervalId = setInterval(onTick, 1000);
+  setTimeout(stopAfter10s, 10000);
+}
+```
+
+`setTimeout(callback: () => void, delayMs: number): number` runs
+`callback` once, after at least `delayMs`; `setInterval` runs it
+repeatedly, rescheduling from the moment it actually fired (not the
+moment it was originally due, so a late-running frame can't trigger a
+catch-up burst). Both return an id `clearTimeout`/`clearInterval` can
+cancel with - either cancels either kind, the same single entry point
+real `clearTimeout`/`clearInterval` each are underneath.
+`requestAnimationFrame(callback: (timestamp: number) => void): number`
+runs `callback` once with the current timestamp just before the next
+repaint (not a fixed delay); calling it again from inside `callback` -
+the normal way to drive a continuous animation - schedules for the
+*next* repaint, never re-runs within the current one.
+`cancelAnimationFrame` cancels a still-pending id.
+
+Every id here is a real `double` on the C++ side of the bridge
+(`art_bridge.h`), not the `int` `TimerQueue`/`AnimationFrameQueue` use
+internally - ART's `number` is always a C ABI `double` (see
+`art/codegen.cpp`'s `MapType`), so a `declare function` returning or
+taking `number` needs an actual `double` at the boundary, or the
+mismatched calling convention (an integer register vs. an XMM one)
+hands back or reads garbage. This is exactly the bug a first pass at
+this feature shipped with: `setTimeout`/`setInterval` appeared to work
+in casual testing (firing doesn't depend on the id being read back
+correctly), but `clearTimeout`/`clearInterval` silently canceled
+nothing, since the id they received was garbage - only caught by
+scheduling a timer, clearing it immediately, and then actually
+advancing the clock far enough to prove it never fired.
+
 ## JSX (.tsx)
 
 A `.tsx` file (only - see below) can build a `Node` with an element
