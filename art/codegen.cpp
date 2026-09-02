@@ -1086,6 +1086,43 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
 
     for (auto &child : expr->elements) {
       llvm::Value *childVal = GenExpr(child.get());
+
+      if (child->resolvedType.tag == TypeTag::Array) {
+        // A `Node[]` child - spread: append each element in its own
+        // right, a real runtime loop (the array's length is only known
+        // at runtime) - same shape StmtKind::ForOf's own codegen already
+        // has, just calling ArtAppendChild instead of storing into a
+        // loop variable.
+        llvm::StructType *hdrTy = GetArrayHeaderType();
+        llvm::Type *i64Ty = llvm::Type::getInt64Ty(context);
+        llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+        llvm::Value *length = builder.CreateLoad(i64Ty, builder.CreateStructGEP(hdrTy, childVal, 0));
+        llvm::Value *dataPtr = builder.CreateLoad(ptrTy, builder.CreateStructGEP(hdrTy, childVal, 1));
+
+        llvm::AllocaInst *idxAlloca = CreateEntryAlloca(currentFunction, i64Ty, "jsx.spread.idx");
+        builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), idxAlloca);
+
+        auto *condBB = llvm::BasicBlock::Create(context, "jsx.spread.cond", currentFunction);
+        auto *bodyBB = llvm::BasicBlock::Create(context, "jsx.spread.body", currentFunction);
+        auto *endBB = llvm::BasicBlock::Create(context, "jsx.spread.end", currentFunction);
+
+        builder.CreateBr(condBB);
+        builder.SetInsertPoint(condBB);
+        llvm::Value *idx = builder.CreateLoad(i64Ty, idxAlloca);
+        builder.CreateCondBr(builder.CreateICmpSLT(idx, length), bodyBB, endBB);
+
+        builder.SetInsertPoint(bodyBB);
+        llvm::Value *elemPtr = builder.CreateGEP(ptrTy, dataPtr, {idx});
+        llvm::Value *elemVal = builder.CreateLoad(ptrTy, elemPtr);
+        builder.CreateCall(appendChildFn, {nodeVal, elemVal});
+        llvm::Value *nextIdx = builder.CreateAdd(idx, llvm::ConstantInt::get(i64Ty, 1));
+        builder.CreateStore(nextIdx, idxAlloca);
+        builder.CreateBr(condBB);
+
+        builder.SetInsertPoint(endBB);
+        continue;
+      }
+
       llvm::Value *childNodeVal;
       if (child->resolvedType.tag == TypeTag::String) {
         childNodeVal = builder.CreateCall(createTextNodeFn, {childVal});

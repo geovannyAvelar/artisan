@@ -987,10 +987,12 @@ write `numberToString(x)` yourself. `on<type>` (`onclick`, `onkeydown`,
 ...) is the one special case: its value must be a `(event: Event) =>
 void` handler, desugaring to `.addEventListener(type, handler, false)`.
 A child is a nested element or a `{ expr }` interpolation (`Node`
-appended as-is, `string`/`number` becomes a text node) - no bare
-unquoted text between tags (`<div>{"Hello"}</div>`, not `<div>Hello
-</div>`), since ART's tokenizer lexes the whole file up front with no
-"raw text" mode to switch into mid-parse. See
+appended as-is, `string`/`number` becomes a text node, `Node[]` is
+*spread* - each element appended in its own right via a real runtime
+loop, the way a dynamically-sized list of children gets into JSX at
+all) - no bare unquoted text between tags (`<div>{"Hello"}</div>`, not
+`<div>Hello</div>`), since ART's tokenizer lexes the whole file up
+front with no "raw text" mode to switch into mid-parse. See
 [art/README.md's "JSX (.tsx)" section](art/README.md#jsx-tsx) for the
 full grammar, including hyphenated/keyword-colliding attribute names
 (`data-index`, `class`) and why `.tsx` specifically (not JSX inline in

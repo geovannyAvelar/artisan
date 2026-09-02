@@ -451,13 +451,31 @@ function badge(text: string): Node {
   has (call `.addEventListener` yourself afterward for `capture: true`).
 - **Children** are nested JSX elements, or a `{ expr }` interpolation:
   a `Node`-valued one is appended as-is, a `string`/`number` one becomes
-  a text node (`numberToString` first, for a number) - anything else
-  (a `boolean`, for instance) is a compile error, not a silent
-  stringify. There's deliberately no bare/unquoted text between tags
-  (`<div>Hello</div>` doesn't parse, `<div>{"Hello"}</div>` does):
-  ART's tokenizer lexes a whole file into one flat token stream up
-  front with no "raw text" mode to switch into mid-parse, so text
-  content has to arrive as an ordinary string expression instead.
+  a text node (`numberToString` first, for a number), and a `Node[]`
+  one is *spread* - each element appended in its own right, via a real
+  runtime loop (the array's length is only known at runtime, same shape
+  a `for...of` loop's own codegen already has) - the way a dynamically-
+  sized list of children gets into JSX at all, since a fixed `{a}{b}`
+  list can only ever hold however many children the source literally
+  spells out. Anything else (a `boolean`, or a `T[]` of some other T)
+  is a compile error, not a silent stringify. There's deliberately no
+  bare/unquoted text between tags (`<div>Hello</div>` doesn't parse,
+  `<div>{"Hello"}</div>` does): ART's tokenizer lexes a whole file into
+  one flat token stream up front with no "raw text" mode to switch into
+  mid-parse, so text content has to arrive as an ordinary string
+  expression instead.
+
+  ```tsx
+  function renderList(labels: string[]): Node {
+    let items: Node[] = makeArray::<Node>(labels.length, <li></li>);
+    let i: number = 0;
+    while (i < labels.length) {
+      items[i] = <li data-index={numberToString(i)}>{labels[i]}</li>;
+      i = i + 1;
+    }
+    return <ul>{items}</ul>; // spread - however many labels there are
+  }
+  ```
 - **Attribute/tag names can be hyphenated** (`data-index`, `aria-label`,
   even a hyphenated custom-element tag) and can collide with an ART
   keyword (`class`, `for`, `type`, ...) - the parser reassembles

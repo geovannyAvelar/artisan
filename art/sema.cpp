@@ -1341,17 +1341,22 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         bool isEventAttr = attr.first.size() > 2 && attr.first.rfind("on", 0) == 0;
         CheckExpr(attr.second.get(), isEventAttr ? &handlerType : &stringType);
       }
-      // A child is either a nested JsxElement/other Node-typed expression
-      // (appended as-is) or a string/number `{ expr }` (auto-converted to
-      // a text node, via numberToString first for a number) - anything
-      // else (including boolean) is a compile error, not a silent
-      // stringify.
+      // A child is a nested JsxElement/other Node-typed expression
+      // (appended as-is), a string/number `{ expr }` (auto-converted to
+      // a text node, via numberToString first for a number), or a
+      // `Node[]` (spread - each element appended in its own right, for a
+      // dynamically-sized list of children a fixed `{a}{b}{c}` list can't
+      // express - see Codegen's own JsxElement case for the runtime loop
+      // this compiles to). Anything else (including boolean, or a `T[]`
+      // of some other T) is a compile error, not a silent stringify.
       for (auto &child : expr->elements) {
         ResolvedType childT = CheckExpr(child.get(), nullptr);
         bool isNode = childT.tag == TypeTag::Struct && childT.structName == "Node";
-        if (childT.tag != TypeTag::String && childT.tag != TypeTag::Number && !isNode) {
+        bool isNodeArray = childT.tag == TypeTag::Array && childT.elementType->tag == TypeTag::Struct &&
+                            childT.elementType->structName == "Node";
+        if (childT.tag != TypeTag::String && childT.tag != TypeTag::Number && !isNode && !isNodeArray) {
           Error(child->loc,
-                "a JSX child must be a string, number, or Node, found '" + childT.ToString() + "'");
+                "a JSX child must be a string, number, Node, or Node[], found '" + childT.ToString() + "'");
         }
       }
     }
