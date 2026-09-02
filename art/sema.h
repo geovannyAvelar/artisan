@@ -164,9 +164,29 @@ private:
   ResolvedType CheckExpr(Expr *expr, const ResolvedType *expected);
 
   // Resolves and validates an assignment/increment target (Identifier not
-  // declared const, an array element, or a struct field - never a string
-  // character, which is immutable). Used by both Assign and IncDec.
+  // declared const, an array element, a struct field, or a setter-backed
+  // property - never a string character, which is immutable, and never a
+  // getter-only property, which is read-only). Used by both Assign and
+  // IncDec - IncDec additionally rejects a setter-backed property itself
+  // right after calling this (see its own case in CheckExpr): there's no
+  // way to support `obj.prop++` on one without also reading it back
+  // through a getter first, which GenLValue's plain address-of model
+  // can't express, so it's a deliberate, documented gap rather than a
+  // half-built increment-only path.
   ResolvedType CheckLValueTarget(Expr *target, SourceLoc opLoc);
+
+  // A class's field/getter/setter/plain-method namespace is shared - see
+  // Check()'s own class-registration pass for the duplicate/ambiguity
+  // rules these back. `name` is always the property's own bare,
+  // unqualified name (see MangleGetter/MangleSetter/MangleMethod for how
+  // it becomes the actual `functions`-map key once qualified).
+  static const InterfaceField *FindField(const InterfaceDecl *iface, const std::string &name);
+  FunctionDecl *FindGetter(InterfaceDecl *iface, const std::string &name);
+  FunctionDecl *FindSetter(InterfaceDecl *iface, const std::string &name);
+  FunctionDecl *FindPlainMethod(InterfaceDecl *iface, const std::string &name);
+  static std::string MangleGetter(const std::string &className, const std::string &propName);
+  static std::string MangleSetter(const std::string &className, const std::string &propName);
+  static std::string MangleMethod(const std::string &className, const std::string &propName);
 
   bool AlwaysReturns(Stmt *stmt);
 };

@@ -124,6 +124,15 @@ struct Expr {
   // the plain callee name (non-generic) or the mangled per-instantiation
   // name Codegen should actually invoke (generic) - see
   // Sema::MangleInstantiation.
+  //
+  // Reused for one other case: on a Member whose property is backed by a
+  // `set` accessor (see FunctionDecl::isSetter) and that Member is the
+  // target of an Assign, this holds the setter's own mangled name -
+  // Codegen's Assign case checks it to decide between a plain store and
+  // a setter call (see its own comment). Empty/unused for every other
+  // Member (a Member backed by a `get` accessor is rewritten into a Call
+  // in place instead - see Sema::CheckExpr's Member case - so it never
+  // needs this).
   std::vector<std::unique_ptr<TypeNode>> typeArgs;
   std::string resolvedCalleeName;
 };
@@ -205,6 +214,23 @@ struct FunctionDecl {
   // matching the language's original single-file-only behavior exactly.
   std::string sourceFile;
   bool isExported = false;
+
+  // Only ever true for a class method (InterfaceDecl::methods) parsed
+  // from `get name(): T { ... }`/`set name(value: T): void { ... }`
+  // (see Parser::ParseAccessor) - mutually exclusive, both false for an
+  // ordinary method or any top-level function. Accessed as a property,
+  // never with call syntax: `obj.name`/`obj.name = value` rather than
+  // `obj.name()` - see Sema::CheckExpr's Member/Assign handling for how
+  // that's actually wired (a getter is rewritten in place into an
+  // ordinary zero-arg Call; a setter-backed Assign keeps its own Assign
+  // shape but calls through Expr::resolvedCalleeName instead of storing
+  // to a field - see that field's own doc comment). Qualified with a
+  // "$get$"/"$set$" infix (see Sema::Check) rather than plain method's
+  // "$", so a getter and setter sharing the same property name - a
+  // read/write pair - never collide as two identically-named top-level
+  // functions once qualified.
+  bool isGetter = false;
+  bool isSetter = false;
 };
 
 // A deep copy of a Stmt/Expr subtree - used to give each concrete

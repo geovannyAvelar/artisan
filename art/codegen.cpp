@@ -847,6 +847,19 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
   }
 
   case ExprKind::Assign: {
+    // A setter-backed property (see Expr::resolvedCalleeName's own doc
+    // comment and Sema::CheckLValueTarget) has no real field/memory
+    // address at all - assigning to it calls the setter instead of
+    // doing a plain store, still yielding the assigned value itself
+    // (rhsVal) as this expression's own value, same as a plain store
+    // below does.
+    if (expr->lhs->kind == ExprKind::Member && !expr->lhs->resolvedCalleeName.empty()) {
+      llvm::Value *rhsVal = GenExpr(expr->rhs.get());
+      llvm::Value *receiverVal = GenExpr(expr->lhs->lhs.get());
+      llvm::Function *setter = llvmFunctions.at(expr->lhs->resolvedCalleeName);
+      builder.CreateCall(setter, {receiverVal, rhsVal});
+      return rhsVal;
+    }
     llvm::Value *rhsVal = GenExpr(expr->rhs.get());
     LValue lv = GenLValue(expr->lhs.get());
     llvm::Value *toStore = rhsVal;

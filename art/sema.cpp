@@ -163,6 +163,45 @@ std::string Sema::MangleInstantiation(const std::string &name, const std::vector
   return out;
 }
 
+// See these four's own doc comments in sema.h. A "$get$"/"$set$" infix
+// keeps a getter and setter sharing the same property name from
+// colliding once qualified into the flat `functions` map both plain
+// methods and accessors are registered into - see Check()'s own
+// class-registration pass.
+std::string Sema::MangleGetter(const std::string &className, const std::string &propName) {
+  return className + "$get$" + propName;
+}
+std::string Sema::MangleSetter(const std::string &className, const std::string &propName) {
+  return className + "$set$" + propName;
+}
+std::string Sema::MangleMethod(const std::string &className, const std::string &propName) {
+  return className + "$" + propName;
+}
+
+const InterfaceField *Sema::FindField(const InterfaceDecl *iface, const std::string &name) {
+  for (auto &f : iface->fields)
+    if (f.name == name) return &f;
+  return nullptr;
+}
+FunctionDecl *Sema::FindGetter(InterfaceDecl *iface, const std::string &name) {
+  std::string mangled = MangleGetter(iface->name, name);
+  for (auto &m : iface->methods)
+    if (m->name == mangled) return m.get();
+  return nullptr;
+}
+FunctionDecl *Sema::FindSetter(InterfaceDecl *iface, const std::string &name) {
+  std::string mangled = MangleSetter(iface->name, name);
+  for (auto &m : iface->methods)
+    if (m->name == mangled) return m.get();
+  return nullptr;
+}
+FunctionDecl *Sema::FindPlainMethod(InterfaceDecl *iface, const std::string &name) {
+  std::string mangled = MangleMethod(iface->name, name);
+  for (auto &m : iface->methods)
+    if (m->name == mangled) return m.get();
+  return nullptr;
+}
+
 void Sema::PushScope() { scopes.emplace_back(); }
 void Sema::PopScope() { scopes.pop_back(); }
 
@@ -263,22 +302,62 @@ bool Sema::Check(Program &program,
   }
   currentFile.clear();
 
-  // Every class's methods are qualified ("ClassName$methodName") and
-  // handed off to the exact same registration/body-checking machinery as
-  // any other top-level function below - see InterfaceDecl::methods' own
-  // doc comment for why a method is just call-site sugar over a plain,
-  // qualified function rather than a distinct codegen concept. Done only
-  // once every class/interface name above is registered, since a
-  // method's own signature/body may reference any of them (including its
-  // own class, or one declared later in the same file).
+  // Every class's methods/accessors are qualified ("ClassName$methodName"/
+  // "ClassName$get$propName"/"ClassName$set$propName" - see
+  // MangleMethod/MangleGetter/MangleSetter) and handed off to the exact
+  // same registration/body-checking machinery as any other top-level
+  // function below - see InterfaceDecl::methods' own doc comment for why
+  // a method/accessor is just call-site sugar over a plain, qualified
+  // function rather than a distinct codegen concept. Done only once
+  // every class/interface name above is registered, since a method's own
+  // signature/body may reference any of them (including its own class,
+  // or one declared later in the same file).
+  //
+  // A class's field/getter/setter/plain-method namespace is shared -
+  // `obj.name` can only ever mean one thing - so a getter and a setter
+  // may share a name (together they form one read/write property, the
+  // only legal kind of duplicate here) but nothing else may collide with
+  // an already-used name: two getters, two setters, two plain methods, a
+  // getter/setter alongside a plain method, or any of those alongside an
+  // already-declared field.
   for (auto &iface : program.interfaces) {
-    std::unordered_set<std::string> seenMethods;
+    std::unordered_set<std::string> fieldNames;
+    for (auto &f : iface->fields) fieldNames.insert(f.name);
+    std::unordered_set<std::string> seenGetters, seenSetters, seenPlainMethods;
+
     for (auto &method : iface->methods) {
-      if (!seenMethods.insert(method->name).second) {
-        Error(method->loc, "duplicate method '" + method->name + "' in class '" + iface->name + "'");
+      const std::string &propName = method->name; // still unqualified here
+      bool clashesWithField = fieldNames.count(propName) != 0;
+      if (method->isGetter) {
+        if (clashesWithField) {
+          Error(method->loc, "'" + propName + "' is already a field of '" + iface->name + "' - it can't also be a getter");
+        } else if (seenPlainMethods.count(propName)) {
+          Error(method->loc, "'" + propName + "' is already a method of '" + iface->name + "' - it can't also be a getter");
+        } else if (!seenGetters.insert(propName).second) {
+          Error(method->loc, "duplicate getter '" + propName + "' in class '" + iface->name + "'");
+        }
+      } else if (method->isSetter) {
+        if (clashesWithField) {
+          Error(method->loc, "'" + propName + "' is already a field of '" + iface->name + "' - it can't also be a setter");
+        } else if (seenPlainMethods.count(propName)) {
+          Error(method->loc, "'" + propName + "' is already a method of '" + iface->name + "' - it can't also be a setter");
+        } else if (!seenSetters.insert(propName).second) {
+          Error(method->loc, "duplicate setter '" + propName + "' in class '" + iface->name + "'");
+        }
+      } else {
+        if (clashesWithField) {
+          Error(method->loc, "'" + propName + "' is already a field of '" + iface->name + "' - it can't also be a method");
+        } else if (seenGetters.count(propName) || seenSetters.count(propName)) {
+          Error(method->loc, "'" + propName + "' is already a property (get/set) of '" + iface->name +
+                                  "' - it can't also be a method");
+        } else if (!seenPlainMethods.insert(propName).second) {
+          Error(method->loc, "duplicate method '" + propName + "' in class '" + iface->name + "'");
+        }
       }
       method->sourceFile = iface->sourceFile;
-      method->name = iface->name + "$" + method->name;
+      method->name = method->isGetter    ? MangleGetter(iface->name, propName)
+                      : method->isSetter ? MangleSetter(iface->name, propName)
+                                          : MangleMethod(iface->name, propName);
     }
   }
 
@@ -614,15 +693,63 @@ ResolvedType Sema::CheckLValueTarget(Expr *target, SourceLoc opLoc) {
     return t;
   }
 
-  if (target->kind == ExprKind::Index || target->kind == ExprKind::Member) {
+  if (target->kind == ExprKind::Index) {
     ResolvedType t = CheckExpr(target, nullptr);
-    if (target->kind == ExprKind::Member && target->isLengthAccess) {
-      Error(opLoc, "cannot assign to '.length' - it is read-only");
-    }
-    if (target->kind == ExprKind::Index && target->lhs->resolvedType.tag == TypeTag::String) {
+    if (target->lhs->resolvedType.tag == TypeTag::String) {
       Error(opLoc, "strings are immutable - cannot assign to a character");
     }
     return t;
+  }
+
+  if (target->kind == ExprKind::Member) {
+    // Deliberately not just CheckExpr(target, nullptr) - unlike a plain
+    // read, an lvalue target can't let CheckExpr's own Member case
+    // rewrite a getter-backed property into a Call in place (there's
+    // nothing sensible to assign a call's result into), and a
+    // setter-backed property needs a completely different resolution
+    // (see FindSetter below) that read-only field/getter access never
+    // needs at all.
+    ResolvedType objT = CheckExpr(target->lhs.get(), nullptr);
+    if (objT.tag == TypeTag::Array || objT.tag == TypeTag::String) {
+      if (target->name == "length") {
+        target->isLengthAccess = true;
+        Error(opLoc, "cannot assign to '.length' - it is read-only");
+      } else {
+        Error(opLoc, "cannot access member '" + target->name + "' on type '" + objT.ToString() + "'");
+      }
+      target->resolvedType = ResolvedType::Number();
+      return target->resolvedType;
+    }
+    if (objT.tag == TypeTag::Struct) {
+      InterfaceDecl *iface = interfaces.at(objT.structName);
+      if (const InterfaceField *field = FindField(iface, target->name)) {
+        target->resolvedType = field->resolvedType;
+        return field->resolvedType;
+      }
+      if (FunctionDecl *setter = FindSetter(iface, target->name)) {
+        // Codegen's Assign case checks this to call the setter instead
+        // of doing a plain field store - see Expr::resolvedCalleeName's
+        // own doc comment. setter->params[1] is the value parameter
+        // (params[0] is the implicit `this`).
+        target->resolvedCalleeName = setter->name;
+        target->resolvedType = setter->params[1].resolvedType;
+        return target->resolvedType;
+      }
+      std::string hint;
+      if (FindGetter(iface, target->name)) {
+        hint = " - it's a read-only property (it has a getter but no setter)";
+      } else if (FindPlainMethod(iface, target->name)) {
+        hint = " - it's a method, and can only be used with call syntax ('(...)')";
+      }
+      Error(opLoc, "interface '" + iface->name + "' has no field '" + target->name + "'" + hint);
+      target->resolvedType = ResolvedType{};
+      return target->resolvedType;
+    }
+    if (objT.tag != TypeTag::Unknown) {
+      Error(opLoc, "cannot access member '" + target->name + "' on type '" + objT.ToString() + "'");
+    }
+    target->resolvedType = ResolvedType{};
+    return target->resolvedType;
   }
 
   Error(opLoc, "invalid assignment target");
@@ -795,15 +922,15 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         break;
       }
       InterfaceDecl *iface = interfaces.at(objT.structName);
-      FunctionDecl *method = nullptr;
-      for (auto &m : iface->methods)
-        if (m->name == iface->name + "$" + memberExpr->name) { method = m.get(); break; }
+      FunctionDecl *method = FindPlainMethod(iface, memberExpr->name);
       if (!method) {
-        bool hasField = false;
-        for (auto &f : iface->fields)
-          if (f.name == memberExpr->name) { hasField = true; break; }
-        Error(expr->loc, "'" + iface->name + "' has no method '" + memberExpr->name + "'" +
-                              (hasField ? " (it's a field, not callable)" : ""));
+        std::string hint;
+        if (FindField(iface, memberExpr->name)) {
+          hint = " (it's a field, not callable)";
+        } else if (FindGetter(iface, memberExpr->name) || FindSetter(iface, memberExpr->name)) {
+          hint = " (it's a property - access it without '()', e.g. '." + memberExpr->name + "')";
+        }
+        Error(expr->loc, "'" + iface->name + "' has no method '" + memberExpr->name + "'" + hint);
         for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
         actual = ResolvedType{};
         break;
@@ -940,18 +1067,30 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       actual = ResolvedType::Number();
     } else if (objT.tag == TypeTag::Struct) {
       InterfaceDecl *iface = interfaces.at(objT.structName);
-      const InterfaceField *field = nullptr;
-      for (auto &candidate : iface->fields)
-        if (candidate.name == expr->name) { field = &candidate; break; }
-      if (!field) {
-        bool isMethod = false;
-        for (auto &m : iface->methods)
-          if (m->name == iface->name + "$" + expr->name) { isMethod = true; break; }
-        Error(expr->loc, "interface '" + iface->name + "' has no field '" + expr->name + "'" +
-                              (isMethod ? " - it's a method, and can only be used with call syntax ('(...)')" : ""));
-        actual = ResolvedType{};
-      } else {
+      const InterfaceField *field = FindField(iface, expr->name);
+      if (field) {
         actual = field->resolvedType;
+      } else if (FunctionDecl *getter = FindGetter(iface, expr->name)) {
+        // `obj.prop` where `prop` is a `get` accessor - pure call-site
+        // sugar, rewritten in place into an ordinary zero-arg call with
+        // the receiver spliced in as the actual first argument, the
+        // exact same trick the ambient `document` identifier and a
+        // plain method call already use (see CheckExpr's Call case and
+        // Sema::kAmbientGlobals) - Codegen never needs to know this Call
+        // started life as a Member at all.
+        expr->kind = ExprKind::Call;
+        expr->resolvedCalleeName = getter->name;
+        expr->elements.insert(expr->elements.begin(), std::move(expr->lhs));
+        actual = getter->resolvedReturnType;
+      } else {
+        std::string hint;
+        if (FindPlainMethod(iface, expr->name)) {
+          hint = " - it's a method, and can only be used with call syntax ('(...)')";
+        } else if (FindSetter(iface, expr->name)) {
+          hint = " - it's a write-only property (it has a setter but no getter)";
+        }
+        Error(expr->loc, "interface '" + iface->name + "' has no field '" + expr->name + "'" + hint);
+        actual = ResolvedType{};
       }
     } else if (objT.tag == TypeTag::Unknown) {
       actual = ResolvedType{};
@@ -964,6 +1103,16 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
 
   case ExprKind::IncDec: {
     ResolvedType targetT = CheckLValueTarget(expr->operand.get(), expr->loc);
+    // A setter-backed property (unlike a plain field) has no real memory
+    // address for GenLValue to increment in place - doing this properly
+    // would mean reading through its getter, adding one, then writing
+    // back through its setter, a distinct codegen path this doesn't
+    // build (see CheckLValueTarget's own doc comment) - rejected here,
+    // deliberately, rather than silently miscompiling.
+    if (expr->operand->kind == ExprKind::Member && !expr->operand->resolvedCalleeName.empty()) {
+      Error(expr->loc, "cannot use '" + expr->op + "' on '" + expr->operand->name +
+                            "' - a setter-backed property doesn't support increment/decrement");
+    }
     if (targetT.tag != TypeTag::Unknown && targetT.tag != TypeTag::Number) {
       Error(expr->loc, "operator '" + expr->op + "' requires a number, found '" + targetT.ToString() + "'");
     }

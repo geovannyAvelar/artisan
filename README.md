@@ -263,7 +263,7 @@ function setupApp(): void {
   let button: Node = document.getElementById("my-button");
   if (!button.isNull()) {
     button.addEventListener("click", onButtonClick, false);
-    button.setTextContent("Ready");
+    button.textContent = "Ready";
   }
 }
 ```
@@ -278,14 +278,14 @@ underneath - see "Classes" below) - a plain handle ART code passes around
 but never constructs or looks inside; the DOM API itself is a curated
 subset of `include/node_c_api.h`, exposed as ART-callable `declare
 function`s (`include/art_bridge.h` has the exact signatures) wrapped into
-`Node`/`Event` methods named/shaped to match a real browser's own DOM API
-as closely as ART's lack of getter/property syntax allows - all copied
-into every scaffolded `app.art`: `document.getElementById(id)`,
-`.querySelector(selector)`, `.isNull()` (the only way to test a lookup
-for "no match" - ART has no null literal of its own to compare against),
-`.getTextContent()`/`.setTextContent(text)`, `.getAttribute(name)`/
-`.hasAttribute(name)`/`.setAttribute(name, value)`, `.childCount()`/
-`.childAt(index)`.
+`Node`/`Event` methods and properties (see "Getters and setters" below)
+named/shaped to match a real browser's own DOM API as closely as
+possible - all copied into every scaffolded `app.art`:
+`document.getElementById(id)`, `.querySelector(selector)`, `.isNull()`
+(the only way to test a lookup for "no match" - ART has no null literal
+of its own to compare against), `.textContent` (get/set), `.getAttribute
+(name)`/`.hasAttribute(name)`/`.setAttribute(name, value)`,
+`.childCount()`/`.childAt(index)`.
 
 `document` (see `kAmbientGlobals` in `art/sema.cpp`) isn't a real
 variable or a declared function of its own - it's pure sugar, rewritten
@@ -331,22 +331,24 @@ function pointer - contrast Go's `ArtisanNodeAddEventListener`, which has
 to carry a `uintptr_t` handle through a Go-side registry (`cgo.Handle`)
 instead, since a Go closure can't produce a raw callable address like
 this. `Event` is another opaque foreign type, read through its own
-methods: `.eventType()` (named that, not `.type()` - `type` is a
-reserved word, used by `declare type`), `.target()` (a `Node`),
-`ArtEventDetail<T>` (a free function, not a method - see
-`ArtDispatchEvent<T>` below for why), `.bubbles()`/`.cancelable()`,
-`.preventDefault()`/`.defaultPrevented()`,
-`.stopPropagation()`/`.stopImmediatePropagation()` (the latter also
-implies the former - stopping "immediately" means neither any remaining
-listener at the current node nor any further ancestor gets a turn, so
-e.g. a second `addEventListener` on the *same* node/type never runs, not
-just an ancestor's - same as real DOM), and the MouseEvent/KeyboardEvent
-data (`.clientX()`/`.clientY()`,
-`.ctrlKey()`/`.shiftKey()`/`.altKey()`/`.metaKey()`, `.key()`/`.code()`).
-Neither stop method has a corresponding getter (no
-`.propagationStopped()`/`.immediatePropagationStopped()`) - matching real
-DOM's own API, which doesn't expose "was propagation already stopped"
-back to script either, only the action.
+properties: `.eventType` (named that, not `.type` - `type` is a
+reserved word, used by `declare type`), `.target` (a `Node`),
+`ArtEventDetail<T>` (a free function, not a property - see
+`ArtDispatchEvent<T>` below for why), `.bubbles`/`.cancelable`, and the
+MouseEvent/KeyboardEvent data (`.clientX`/`.clientY`,
+`.ctrlKey`/`.shiftKey`/`.altKey`/`.metaKey`, `.key`/`.code`) - all
+read-only (get-only) properties, same as a real browser's own Event.
+`.preventDefault()`/`.defaultPrevented` (the latter *is* a get-only
+property - it's data, not an action), and
+`.stopPropagation()`/`.stopImmediatePropagation()` stay ordinary methods
+(the latter two also imply the former - stopping "immediately" means
+neither any remaining listener at the current node nor any further
+ancestor gets a turn, so e.g. a second `addEventListener` on the *same*
+node/type never runs, not just an ancestor's - same as real DOM). Real
+DOM has no corresponding getter for either stop method (no
+`.propagationStopped`/`.immediatePropagationStopped`) - ART's doesn't
+either, for the same reason: script was never meant to be able to ask
+"was propagation already stopped", only to cause it.
 
 `node.removeEventListener(eventType, handler, capture)` removes every
 listener matching all three exactly - a mismatched call (wrong handler,
@@ -605,9 +607,68 @@ several bridge calls, ...). The underlying `Art*` functions keep their
 own names and still work as plain free functions too - the class is
 purely an additional, optional way to call them.
 
-A method name can't be a reserved word - `event.type()` doesn't parse
-(`type` is `declare type`'s keyword), which is why the scaffold's `Event`
-class calls it `eventType()` instead.
+A property (accessor method) name can't be a reserved word either -
+`get type(): string { ... }` doesn't parse any more than `function
+type()` would (`type` is `declare type`'s keyword), which is why the
+scaffold's `Event` class calls it `eventType` instead.
+
+#### Getters and setters
+
+`get`/`set` add real property syntax on top of a plain method - `get
+name(): T { ... }`/`set name(value: T): void { ... }` inside a class
+body, accessed as `obj.name`/`obj.name = value` (never `obj.name(...)`
+- calling one like a plain method is a compile error, same as trying to
+read a plain method without calling it is):
+
+```ts
+class Box {
+  raw: number;
+
+  get value(): number { return this.raw * 2; }
+  set value(v: number) { this.raw = v / 2; }
+}
+
+function main(): number {
+  let b: Box = { raw: 5 };
+  let doubled: number = b.value; // 10 - calls the getter
+  b.value = 100;                 // calls the setter - b.raw becomes 50
+  return b.value;                // 100
+}
+```
+
+Exactly like a plain method, this is pure call-site sugar with no
+runtime cost or dynamic dispatch: `obj.name` compiles straight into a
+call to the getter with `obj` as its receiver, and `obj.name = value`
+into a call to the setter - Codegen never generates a real memory
+address for either. `get`/`set` are contextual, not reserved words -
+recognized only in this specific position (`get`/`set`, another
+identifier, then `(`), so a class can still have an ordinary field or
+method actually named `get`/`set` elsewhere, and the words stay usable
+as identifiers everywhere else in the language too (unlike `type`
+above).
+
+A class's fields, plain methods, and get/set-accessed properties all
+share one namespace - `obj.name` can only ever mean one thing. A getter
+and setter may share a name (together forming one read/write property,
+the only legal kind of duplicate here); anything else colliding with an
+already-used name - two getters, a getter and a plain method, a getter
+and a field, ... - is a compile error. A getter with no matching setter
+is a read-only property (assigning to it is an error); a setter with no
+matching getter is write-only (reading it is an error, the same
+declared-but-inaccessible shape a private import has - see "Modules"
+above). Neither `obj.prop++`/`obj.prop--` is supported on a get/set
+property (only on a plain field, array element, or variable) - doing
+that properly would mean reading through the getter, adding one, then
+writing back through the setter, a distinct codegen path this doesn't
+build; it's rejected with a clear error rather than silently
+miscompiling. A property can't be generic yet, same as a plain method.
+
+`declare class` accessors work the same way, and are exactly how the
+scaffold exposes DOM properties that are naturally properties in a real
+browser too - `node.textContent` (get/set) and `event.key`/`.target`/
+`.clientX`/... (get-only) - while `getElementById`/`setAttribute`/
+`addEventListener`/... stay ordinary methods, matching how those are
+methods in a real browser as well.
 
 A top-level `let`/`const` is a handler's actual memory across calls -
 `clicks`/`enabled`/etc. below keep their value between one `onClick` and
@@ -658,23 +719,27 @@ above, `boolean`, `string` (with `+` concatenation, `==`/`!=`, `.length`,
 and `s[i]` indexing - immutable, no `s[i] = ...`), `T[]` arrays,
 structural interfaces (an object literal must match a declared
 `interface` exactly - no excess or missing fields), `class`/`declare
-class` (methods on top of an interface/opaque type - see "Classes"
-above; no inheritance or dynamic dispatch), the parameterized handler
-type described above (`(p0: T0, p1: T1, ...) => void`, structural like
-everything else - parameter names are decorative, only the types and
-their order are checked), and generics - both functions and interfaces/
-`declare type` (`function`/`declare function`/`interface`/`declare type`,
-monomorphized, explicit instantiation only: `::<T>` at a function call
-site, plain `<T>` at a type reference - see "Generic functions"/"Generic
-interfaces" above for why those differ; classes/methods can't be generic
-yet); both prefix (`++x`/`--x`, evaluates to the new value) and postfix
-(`x++`/`x--`, evaluates to the old value) forms of increment/decrement,
-on the same targets assignment already allows (a plain variable, an
-array element, or a struct field) - real TS's chaining rules apply here
-too (`x++.foo`/`x++()` aren't expressions; postfix always ends the
-expression it's attached to). No inheritance, real closures, `any`, or
-union types. See the doc comments in `art/*.h`/`art/*.cpp` for the exact
-grammar and type-checking rules.
+class` (methods and `get`/`set` accessor properties on top of an
+interface/opaque type - see "Classes" above; no inheritance or dynamic
+dispatch), the parameterized handler type described above (`(p0: T0,
+p1: T1, ...) => void`, structural like everything else - parameter names
+are decorative, only the types and their order are checked), and
+generics - both functions and interfaces/`declare type` (`function`/
+`declare function`/`interface`/`declare type`, monomorphized, explicit
+instantiation only: `::<T>` at a function call site, plain `<T>` at a
+type reference - see "Generic functions"/"Generic interfaces" above for
+why those differ; classes/methods/accessors can't be generic yet); both
+prefix (`++x`/`--x`, evaluates to the new value) and postfix (`x++`/
+`x--`, evaluates to the old value) forms of increment/decrement, on the
+same targets assignment already allows (a plain variable, an array
+element, a struct field, or a setter-backed property - except a
+get/set-*accessor* property specifically, which supports plain
+assignment but not increment/decrement, see "Getters and setters" above
+for why) - real TS's chaining rules apply here too (`x++.foo`/`x++()`
+aren't expressions; postfix always ends the expression it's attached
+to). No inheritance, real closures, `any`, or union types. See the doc
+comments in `art/*.h`/`art/*.cpp` for the exact grammar and
+type-checking rules.
 
 Every array/object/string is a heap allocation, garbage-collected by the
 [Boehm-Demers-Weiser collector](https://www.hboehm.info/gc/) (`libgc`) -

@@ -486,18 +486,20 @@ declare function ArtEventKey(event: Event): string;
 declare function ArtEventCode(event: Event): string;
 
 // A DOM handle - opaque (no accessible fields, same as `declare type`),
-// but its methods are real ART code, each a thin wrapper over the
-// matching Art* function above. `node.getElementById(id)` compiles to
-// exactly `ArtFindById(node, id)` - no runtime cost, just nicer to
-// read/write, and named/shaped to match a real browser's own DOM API as
-// closely as ART's lack of getter/property syntax allows (methods
-// everywhere a browser would use a plain property - `event.key()`
-// instead of `event.key`, etc.).
+// but its methods/properties are real ART code, each a thin wrapper over
+// the matching Art* function above. `node.getElementById(id)` compiles
+// to exactly `ArtFindById(node, id)` - no runtime cost, just nicer to
+// read/write, and named/shaped to match a real browser's own DOM API:
+// `get`/`set` accessors (see README.md's "Classes" section) wherever a
+// browser would use a plain property (`node.textContent`, not
+// `node.getTextContent()`), ordinary methods everywhere a browser has an
+// actual method (`getElementById`, `setAttribute`, `addEventListener`,
+// ...).
 declare class Node {
   function getElementById(id: string): Node { return ArtFindById(this, id); }
   function isNull(): boolean { return ArtIsNull(this); }
-  function getTextContent(): string { return ArtGetTextContent(this); }
-  function setTextContent(text: string): void { ArtSetTextContent(this, text); }
+  get textContent(): string { return ArtGetTextContent(this); }
+  set textContent(text: string) { ArtSetTextContent(this, text); }
   function getAttribute(name: string): string { return ArtGetAttribute(this, name); }
   function hasAttribute(name: string): boolean { return ArtHasAttribute(this, name); }
   function setAttribute(name: string, value: string): void { ArtSetAttribute(this, name, value); }
@@ -523,24 +525,29 @@ declare class Node {
 }
 
 declare class Event {
-  // Named eventType(), not type() - 'type' is a reserved word (used by
-  // 'declare type').
-  function eventType(): string { return ArtEventType(this); }
-  function target(): Node { return ArtEventTarget(this); }
-  function bubbles(): boolean { return ArtEventBubbles(this); }
-  function cancelable(): boolean { return ArtEventCancelable(this); }
+  // Named eventType, not type - 'type' is a reserved word (used by
+  // 'declare type'), so even as a property it can't be spelled the way a
+  // real browser's own Event.type is.
+  get eventType(): string { return ArtEventType(this); }
+  get target(): Node { return ArtEventTarget(this); }
+  get bubbles(): boolean { return ArtEventBubbles(this); }
+  get cancelable(): boolean { return ArtEventCancelable(this); }
+  // preventDefault/stopPropagation/stopImmediatePropagation stay ordinary
+  // methods, not properties - they're actions, matching how a real
+  // browser's own Event has them too (only its read-only data is
+  // exposed as properties).
   function preventDefault(): void { ArtEventPreventDefault(this); }
-  function defaultPrevented(): boolean { return ArtEventDefaultPrevented(this); }
+  get defaultPrevented(): boolean { return ArtEventDefaultPrevented(this); }
   function stopPropagation(): void { ArtEventStopPropagation(this); }
   function stopImmediatePropagation(): void { ArtEventStopImmediatePropagation(this); }
-  function clientX(): number { return ArtEventClientX(this); }
-  function clientY(): number { return ArtEventClientY(this); }
-  function ctrlKey(): boolean { return ArtEventCtrlKey(this); }
-  function shiftKey(): boolean { return ArtEventShiftKey(this); }
-  function altKey(): boolean { return ArtEventAltKey(this); }
-  function metaKey(): boolean { return ArtEventMetaKey(this); }
-  function key(): string { return ArtEventKey(this); }
-  function code(): string { return ArtEventCode(this); }
+  get clientX(): number { return ArtEventClientX(this); }
+  get clientY(): number { return ArtEventClientY(this); }
+  get ctrlKey(): boolean { return ArtEventCtrlKey(this); }
+  get shiftKey(): boolean { return ArtEventShiftKey(this); }
+  get altKey(): boolean { return ArtEventAltKey(this); }
+  get metaKey(): boolean { return ArtEventMetaKey(this); }
+  get key(): string { return ArtEventKey(this); }
+  get code(): string { return ArtEventCode(this); }
 }
 
 // A top-level `let`/`const` is state that survives across calls - e.g. a
@@ -569,14 +576,14 @@ function onButtonClick(event: Event): void {
   //
   //   let label: Node = document.getElementById("my-label");
   //   if (!label.isNull()) {
-  //     label.setTextContent(numberToString(clickCount) + " clicks");
+  //     label.textContent = numberToString(clickCount) + " clicks";
   //   }
 }
 
 function onKeyDown(event: Event): void {
   // Your key-press code goes here, e.g.:
   //
-  //   if (event.key() == "Enter") {
+  //   if (event.key == "Enter") {
   //     event.preventDefault();
   //     ArtDispatchEvent::<string>(document, "form-submitted", true, true, "ok");
   //   }

@@ -152,43 +152,98 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
   return decl;
 }
 
+// The implicit receiver - every method (plain or accessor) gets exactly
+// this as its real first parameter, invisible in source (`obj.method
+// (args)`/`obj.prop`/`obj.prop = v` never supply it explicitly - see
+// Sema::CheckExpr's Call/Member/Assign handling, which splices the
+// receiver expression in as the actual first argument). Always the
+// class's own type: ART methods have no virtual dispatch to otherwise
+// justify a different receiver type.
+void Parser::InjectImplicitThis(FunctionDecl *method, const std::string &className) {
+  Param self;
+  self.name = "this";
+  self.loc = method->loc;
+  auto selfType = std::make_unique<TypeNode>();
+  selfType->kind = TypeSyntaxKind::Named;
+  selfType->loc = method->loc;
+  selfType->name = className;
+  self.type = std::move(selfType);
+  method->params.insert(method->params.begin(), std::move(self));
+}
+
+// Parses `get name(): T { body }` or `set name(value: T): void { body }` -
+// see FunctionDecl::isGetter/isSetter's own doc comment for how these
+// differ from a plain method at every later stage. `get`/`set` are
+// contextual, not reserved words - ParseClassBody only recognizes them
+// by lookahead ("identifier 'get'/'set', identifier, '('"), so they stay
+// ordinary, usable identifiers everywhere else in the language (unlike
+// `type`, which had to become fully reserved for `declare type` - see
+// README.md's "Classes" section for that tradeoff, still relevant here:
+// a property can't be named `type` either, for the same reason).
+std::unique_ptr<FunctionDecl> Parser::ParseAccessor(InterfaceDecl *decl, bool isGetter) {
+  auto method = std::make_unique<FunctionDecl>();
+  method->loc = Cur().loc;
+  pos++; // consume the contextual 'get'/'set' identifier
+  method->name = Expect(TokenKind::Identifier, "as the property name").text;
+  Expect(TokenKind::LParen, "to start the parameter list");
+  if (isGetter) {
+    Expect(TokenKind::RParen, "to close a getter's parameter list - it takes none");
+    Expect(TokenKind::Colon, "after a getter's parameter list - its return type is required");
+    method->returnType = ParseType();
+  } else {
+    Param value;
+    value.loc = Cur().loc;
+    value.name = Expect(TokenKind::Identifier, "as the setter's value parameter name").text;
+    Expect(TokenKind::Colon, "after the setter's parameter name");
+    value.type = ParseType();
+    method->params.push_back(std::move(value));
+    Expect(TokenKind::RParen, "to close the setter's parameter list - it takes exactly one");
+    // A setter is always void - same as real TS, where a setter's own
+    // return type (if written at all) must be 'void'/'any'; ART just
+    // never lets you write one, there's nothing to say.
+    auto voidType = std::make_unique<TypeNode>();
+    voidType->kind = TypeSyntaxKind::Void;
+    voidType->loc = Cur().loc;
+    method->returnType = std::move(voidType);
+  }
+  method->body = ParseBlock();
+  method->isGetter = isGetter;
+  method->isSetter = !isGetter;
+  InjectImplicitThis(method.get(), decl->name);
+  return method;
+}
+
 // Shared by `class` and `declare class` - see InterfaceDecl::methods' own
 // doc comment for why both reuse the same InterfaceDecl node. A `declare
-// class` (isOpaque) may only contain methods, same restriction `declare
-// type` already has on fields (it's a foreign handle - there's nothing
-// here to lay out a struct for); a plain `class` may freely interleave
-// field and method declarations.
+// class` (isOpaque) may only contain methods/accessors, same restriction
+// `declare type` already has on fields (it's a foreign handle - there's
+// nothing here to lay out a struct for); a plain `class` may freely
+// interleave field, method, and accessor declarations.
 void Parser::ParseClassBody(InterfaceDecl *decl, bool isOpaque) {
   Expect(TokenKind::LBrace, "to open the class body");
   while (!Check(TokenKind::RBrace)) {
-    if (Check(TokenKind::KwFunction)) {
+    bool isGetter = Check(TokenKind::Identifier) && Cur().text == "get" &&
+                     PeekAt(1).kind == TokenKind::Identifier && PeekAt(2).kind == TokenKind::LParen;
+    bool isSetter = !isGetter && Check(TokenKind::Identifier) && Cur().text == "set" &&
+                     PeekAt(1).kind == TokenKind::Identifier && PeekAt(2).kind == TokenKind::LParen;
+    if (isGetter || isSetter) {
+      decl->methods.push_back(ParseAccessor(decl, isGetter));
+    } else if (Check(TokenKind::KwFunction)) {
       auto method = ParseFunction();
       if (!method->typeParams.empty()) {
         Fail("a class method can't be generic yet", method->loc);
       }
-      // The implicit receiver - every method gets exactly this as its
-      // real first parameter, invisible in source (`obj.method(args)`
-      // never supplies it explicitly - see Sema::CheckExpr's Call case,
-      // which splices the receiver expression in as the actual first
-      // argument). Always the class's own type: ART methods have no
-      // virtual dispatch to otherwise justify a different receiver type.
-      Param self;
-      self.name = "this";
-      self.loc = method->loc;
-      auto selfType = std::make_unique<TypeNode>();
-      selfType->kind = TypeSyntaxKind::Named;
-      selfType->loc = method->loc;
-      selfType->name = decl->name;
-      self.type = std::move(selfType);
-      method->params.insert(method->params.begin(), std::move(self));
+      InjectImplicitThis(method.get(), decl->name);
       decl->methods.push_back(std::move(method));
     } else if (isOpaque) {
-      Fail("'declare class' can only contain methods - it has no accessible fields, same as 'declare type'",
+      Fail("'declare class' can only contain methods/accessors - it has no accessible fields, same as "
+           "'declare type'",
            Cur().loc);
     } else {
       InterfaceField field;
       field.loc = Cur().loc;
-      field.name = Expect(TokenKind::Identifier, "as a field name, or 'function' to start a method").text;
+      field.name =
+          Expect(TokenKind::Identifier, "as a field name, or 'function'/'get'/'set' to start a method").text;
       Expect(TokenKind::Colon, "after field name");
       field.type = ParseType();
       if (Check(TokenKind::Semicolon) || Check(TokenKind::Comma)) pos++;
