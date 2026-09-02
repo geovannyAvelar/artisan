@@ -922,6 +922,26 @@ export class Signal<T> {
     this.subscriberCount = this.subscriberCount + 1;
   }
 
+  // Removes `fn` if present - a safe no-op otherwise, same convention
+  // Node.removeEventListener already has. Shifts every later subscriber
+  // down by one to close the gap.
+  function unsubscribe(fn: () => void): void {
+    let i: number = 0;
+    while (i < this.subscriberCount) {
+      if (this.subscribers[i] == fn) {
+        let j: number = i;
+        while (j < this.subscriberCount - 1) {
+          this.subscribers[j] = this.subscribers[j + 1];
+          j = j + 1;
+        }
+        this.subscriberCount = this.subscriberCount - 1;
+        this.subscribers[this.subscriberCount] = noopEffect;
+        return;
+      }
+      i = i + 1;
+    }
+  }
+
   // A real growable vector, not a fixed cap: reallocates via
   // `makeArray<T>` (see "Runtime-sized arrays" below) and copies the
   // existing subscribers over, doubling capacity each time.
@@ -990,10 +1010,6 @@ symbol lookup - see `Expr::isIndirectCall`) - full run-time cost of one
 call, same as any other, just resolved through a value instead of a
 name.
 
-One deliberate limitation, to keep this simple rather than because of
-some deeper wall: no `unsubscribe` - a binding lives for the app's whole
-lifetime, which is what a small desktop app almost always wants anyway.
-
 ### Runtime-sized arrays
 
 `makeArray<T>(size: number, fill: T): T[]` is a builtin - like
@@ -1015,6 +1031,90 @@ the *same* object, not independent copies (the same well-known gotcha a
 real `Array(n).fill(obj)` has in JS). `size` must be `>= 0`; a negative
 value is undefined, the same "not a runtime-checked contract" deal
 `ArtChildAt`'s own out-of-bounds access already has.
+
+### List rendering
+
+A `Signal<T[]>` plus a "clear and rebuild" effect is the whole pattern
+for keeping a DOM list in sync with data - no diffing/reconciliation
+needed, since ART's no-closures constraint rules out per-item handlers
+anyway. One listener on the *container*, using event delegation, handles
+clicks on any item, present or future:
+
+```ts
+function appendNumber(arr: number[], v: number): number[] {
+  let n: number = arr.length;
+  let result: number[] = makeArray::<number>(n + 1, 0);
+  let i: number = 0;
+  while (i < n) { result[i] = arr[i]; i = i + 1; }
+  result[n] = v;
+  return result;
+}
+
+function removeAt(arr: number[], index: number): number[] {
+  let n: number = arr.length;
+  let result: number[] = makeArray::<number>(n - 1, 0);
+  let i: number = 0;
+  let j: number = 0;
+  while (i < n) {
+    if (i != index) { result[j] = arr[i]; j = j + 1; }
+    i = i + 1;
+  }
+  return result;
+}
+
+let items: Signal<number[]> = makeSignal::<number[]>(makeArray::<number>(0, 0));
+let nextId: number = 1;
+
+function renderList(): void {
+  let container: Node = document.getElementById("item-list");
+  if (container.isNull()) { return; }
+  while (container.childCount() > 0) { container.childAt(0).remove(); } // clear
+  let xs: number[] = items.value; // subscribes renderList to items
+  let i: number = 0;
+  while (i < xs.length) { // rebuild
+    let li: Node = document.createElement("li");
+    li.textContent = numberToString(xs[i]);
+    li.setAttribute("data-index", numberToString(i)); // identifies which item this is
+    container.appendChild(li);
+    i = i + 1;
+  }
+}
+
+// One listener on the container, not one per <li> - it catches clicks
+// bubbling up from whichever item was clicked, present or future.
+function onItemClick(event: Event): void {
+  let target: Node = event.target;
+  let xs: number[] = items.value;
+  let i: number = 0;
+  while (i < xs.length) {
+    if (target.getAttribute("data-index") == numberToString(i)) {
+      items.value = removeAt(xs, i); // re-runs renderList on its own
+      return;
+    }
+    i = i + 1;
+  }
+}
+
+function onAddClick(event: Event): void {
+  items.value = appendNumber(items.value, nextId);
+  nextId = nextId + 1;
+}
+
+{
+  effect(renderList);
+  let list: Node = document.getElementById("item-list");
+  if (!list.isNull()) { list.addEventListener("click", onItemClick, false); }
+  let addButton: Node = document.getElementById("add-button");
+  if (!addButton.isNull()) { addButton.addEventListener("click", onAddClick, false); }
+}
+```
+
+Removing the very node a click is bubbling through (`renderList`'s clear
+step tears down the whole subtree, including the `<li>` that was just
+clicked) is safe: `.remove()` only detaches a node from its parent, it
+never frees it mid-dispatch (see `ArtisanNodeRemove`), so the ongoing
+capturing/bubbling walk keeps working off pointers that are still valid,
+just no longer attached to anything.
 
 Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
 Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is

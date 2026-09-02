@@ -349,13 +349,13 @@ each.
 
 A `Signal<T>` is a reactive value: reading `.value` inside an `effect()`
 automatically subscribes that effect to it, and writing `.value`
-automatically re-runs every effect that ever read it. This isn't a
-compiler feature - it's an ordinary generic class, built entirely from
-generics, `get`/`set` accessors, non-literal globals, indirect calls,
-and runtime-sized arrays (a signal's own subscriber list genuinely
-grows, via `makeArray<T>` - see [Types](#types) above) - see
-[What's not in ART](#whats-not-in-art) for the one honest limitation
-this trades away to stay simple: no `unsubscribe`.
+automatically re-runs every effect that ever read it - `.unsubscribe(fn)`
+removes one later, a safe no-op if `fn` was never subscribed (or already
+removed). This isn't a compiler feature - it's an ordinary generic
+class, built entirely from generics, `get`/`set` accessors, non-literal
+globals, indirect calls, and runtime-sized arrays (a signal's own
+subscriber list genuinely grows, via `makeArray<T>` - see
+[Types](#types) above).
 
 ```ts
 let clickCount: Signal<number> = makeSignal::<number>(0);
@@ -380,6 +380,53 @@ function setupApp(): void {
 [the main README's "Signals" section](../README.md#signals) for the
 full `Signal`/`makeSignal`/`effect` source, ready to copy into a
 project as its own module.
+
+### List rendering
+
+A `Signal<T[]>` plus a "clear and rebuild" effect keeps a DOM list in
+sync with data with no diffing needed - and since there are no closures,
+each rendered item can't carry its own bound handler, so one listener on
+the *container* uses event delegation instead, resolving `event.target`
+back to the item that was clicked via a `data-index` attribute:
+
+```ts
+function renderList(): void {
+  let container: Node = document.getElementById("item-list");
+  if (container.isNull()) { return; }
+  while (container.childCount() > 0) { container.childAt(0).remove(); } // clear
+  let xs: number[] = items.value; // subscribes renderList to items
+  let i: number = 0;
+  while (i < xs.length) { // rebuild
+    let li: Node = document.createElement("li");
+    li.textContent = numberToString(xs[i]);
+    li.setAttribute("data-index", numberToString(i));
+    container.appendChild(li);
+    i = i + 1;
+  }
+}
+
+function onItemClick(event: Event): void {
+  let target: Node = event.target;
+  let xs: number[] = items.value;
+  let i: number = 0;
+  while (i < xs.length) {
+    if (target.getAttribute("data-index") == numberToString(i)) {
+      items.value = removeAt(xs, i); // re-runs renderList on its own
+      return;
+    }
+    i = i + 1;
+  }
+}
+```
+
+Removing the very node a click is bubbling through (the clear step tears
+down the whole subtree, including whichever `<li>` was just clicked) is
+safe: `.remove()` only detaches a node from its parent, it never frees
+it mid-dispatch, so the ongoing bubbling walk keeps working off pointers
+that are still valid, just no longer attached to anything. See
+[the main README's "List rendering" section](../README.md#list-rendering)
+for the full worked example, including `appendNumber`/`removeAt` and the
+wiring to an "add" button.
 
 ## Memory management
 
