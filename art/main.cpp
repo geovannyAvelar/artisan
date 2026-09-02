@@ -135,7 +135,16 @@ int main(int argc, char *argv[]) {
   const std::unordered_map<std::string, std::unordered_set<std::string>> *visibility = nullptr;
   std::unordered_map<std::string, std::unordered_set<std::string>> visibilityStorage;
   if (!program.imports.empty()) {
+    // ARTISAN_ART_STDLIB_DIR (art/CMakeLists.txt) is CMAKE_CURRENT_SOURCE_DIR
+    // for wherever art/ itself lives on disk - correct whether this is a
+    // standalone build (art/build) or embedded via add_subdirectory from
+    // the root CMakeLists.txt, dev checkout or packaged install alike,
+    // since art/stdlib installs alongside art/ itself either way.
+#ifdef ARTISAN_ART_STDLIB_DIR
+    ART::ModuleResolver resolver(ARTISAN_ART_STDLIB_DIR);
+#else
     ART::ModuleResolver resolver;
+#endif
     program = resolver.ResolveAndMerge(opts.inputPath);
     if (!resolver.Diagnostics().empty()) {
       for (const std::string &d : resolver.Diagnostics()) std::cerr << d << "\n";

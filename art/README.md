@@ -52,9 +52,12 @@ artisan-cli new my-app  # --lang art is the default
 artisan-cli build my-app --run
 ```
 
-That scaffolds `app.ts` with the DOM bridge already `declare`d and
-wrapped in ergonomic classes (see [The DOM bridge](#the-dom-bridge)
-below), plus an empty `setupApp`.
+That scaffolds a single `app.ts`: a clean `import { Node, Event, ... }
+from "art";` plus an empty `setupApp`, which is where your own code
+goes. The DOM bridge itself (`declare`d and wrapped in ergonomic classes
+- see [The DOM bridge](#the-dom-bridge) below) is ART's own standard
+library ([`stdlib/art.ts`](stdlib/art.ts)), not something copied into
+your project.
 
 To build the `art` compiler itself and use it standalone (e.g. to
 compile a `.ts` file with no artisan app around it at all):
@@ -234,8 +237,11 @@ can't be individually generic yet - only the class itself can.
 ### Modules
 
 `export` in front of a function/interface/class/`declare` counterpart/
-top-level `let`/`const`; `import { a, b } from "./path";` at the top of
-a file (relative, `.ts` implied). Access control only, not real
+top-level `let`/`const`; `import { a, b } from "path";` at the top of a
+file (`.ts` implied). `path` is either relative (`./`/`../`) - resolved
+against the importing file's own directory - or bare - resolved against
+ART's standard library instead (see [The DOM bridge](#the-dom-bridge)'s
+`import { Node, Event } from "art";`). Access control only, not real
 per-file namespacing - every top-level name across a whole project must
 still be globally unique.
 
@@ -322,7 +328,14 @@ match a real browser's own DOM API as closely as possible: `get`/`set`
 accessors wherever a browser would use a plain property
 (`node.textContent`, `event.key`), ordinary methods everywhere a
 browser has an actual method (`getElementById`, `setAttribute`,
-`addEventListener`, `createElement`, `appendChild`, ...).
+`addEventListener`, `createElement`, `appendChild`, ...). All of this -
+the raw `declare function`s and both classes - lives in ART's own
+standard library ([`stdlib/art.ts`](stdlib/art.ts)), not any one
+project: `import { Node, Event } from "art";` pulls it in from anywhere
+(a bare, non-relative import path - see [Modules](#modules) - resolves
+against this directory, baked into the `art` binary at its own build
+time). `export`ed from there: `Node`/`Event`, and the two generic
+functions below for a project that uses custom events.
 
 ```ts
 function setupApp(): void {
@@ -340,7 +353,10 @@ rewritten in place at compile time, and a project that declares its own
 `document` shadows the sugar entirely, the same precedence a real local
 always has over anything ambient. It exists specifically so a handler -
 which gets no `Node` parameter of its own, unlike `setupApp` - has a
-path to the DOM at all.
+path to the DOM at all. Unlike `Node`/`Event`, `ArtDocument` needs no
+`export`/`import` to keep working across files - the sugar's rewritten
+call skips Sema's usual per-file visibility check entirely, since an
+ambient identifier gated behind an import wouldn't really be ambient.
 
 `.isNull()` is the only way to test a lookup for "no match" - ART has no
 null literal of its own to compare against. `ArtIsNull`/`.isNull()`

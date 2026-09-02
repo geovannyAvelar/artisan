@@ -1018,8 +1018,7 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
                             "('" + expr->name + "::<Type>(...)')");
       actual = ResolvedType{};
     } else if (auto ambient = kAmbientGlobals.find(expr->name);
-               ambient != kAmbientGlobals.end() && functions.count(ambient->second) &&
-               IsVisible(ambient->second)) {
+               ambient != kAmbientGlobals.end() && functions.count(ambient->second)) {
       // `document` (see kAmbientGlobals) isn't a real variable or a
       // declared function of its own - it's pure sugar for a call to its
       // backing zero-arg function (ArtDocument), rewritten in place right
@@ -1031,6 +1030,17 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       // used as a value) has already been ruled out above - a project
       // that genuinely declares its own `document` shadows this sugar,
       // same precedence a real local always has over anything ambient.
+      //
+      // Deliberately no IsVisible(ambient->second) check here, unlike
+      // every other name lookup in this function: `document` is ambient
+      // precisely because it needs no import to use, so its backing
+      // function can't be gated behind one either, or a multi-file
+      // project where the DOM bridge lives in its own file (see
+      // README.md's "Using ART" section) would need to import a function
+      // (`ArtDocument`) it never actually calls by name, just to make
+      // this sugar keep working. Existing anywhere in the merged program
+      // is enough - the same "ambient, not import-gated" treatment
+      // `IsVisible` already gives every real builtin via `builtinNames`.
       FunctionDecl *backing = functions.at(ambient->second);
       if (!backing->params.empty()) {
         Error(expr->loc, "'" + ambient->second + "' backs the ambient '" + expr->name +

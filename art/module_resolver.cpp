@@ -20,7 +20,21 @@ void ModuleResolver::Error(SourceLoc loc, const std::string &file, const std::st
 
 std::string ModuleResolver::ResolveImportPath(const std::string &fromFile, const std::string &importPath,
                                                SourceLoc loc) {
-  fs::path candidate = fs::path(fromFile).parent_path() / importPath;
+  bool isRelative = importPath.rfind("./", 0) == 0 || importPath.rfind("../", 0) == 0;
+
+  fs::path candidate;
+  if (isRelative) {
+    candidate = fs::path(fromFile).parent_path() / importPath;
+  } else if (!stdlibDir.empty()) {
+    candidate = fs::path(stdlibDir) / importPath;
+  } else {
+    Error(loc, fromFile,
+          "cannot find imported file '" + importPath +
+              "' - no standard library directory is configured (a bare, non-relative import path only "
+              "resolves against one; did you mean './" +
+              importPath + "'?)");
+    return "";
+  }
   if (candidate.extension() != ".ts") candidate += ".ts";
 
   std::error_code ec;

@@ -49,8 +49,12 @@ ART](#using-art)):
 ```
 my-app/
   pages/index.html   # starter markup - the page the app opens on
-  app.ts              # ART app - native startup code, compiled ahead of time
+  app.ts              # ART app - your own startup code goes here
 ```
+
+`app.ts` starts with `import { Node, Event, ... } from "art";` - the DOM
+bridge (Node/Event, `document`, ...) is ART's standard library, not
+something copied into your project (see "Using ART" below).
 
 Add more pages under `pages/` - nested folders become nested routes,
 Next.js-style (`pages/settings/profile.html` becomes the route
@@ -265,11 +269,14 @@ compiled, not interpreted" deal `ARTISAN_APP_CPP_SOURCES`/
 artisan-cli new my-app  # --lang art is the default
 ```
 
-scaffolds `app.ts` with the DOM bridge below already `declare`d and
-wrapped in `declare class Node`/`declare class Event` (see "Classes"
-below), plus an empty setup section. An ART app needs a `setupApp` -
-either an explicit function, or (the default the scaffold uses) just
-bare top-level statements, which the compiler collects into one for you:
+scaffolds a single `app.ts`: a clean `import { Node, Event, ... } from
+"art";` (the DOM bridge below, already `declare`d and wrapped in
+`declare class Node`/`declare class Event` - see "Classes" below - but
+part of ART's own standard library, not copied into your project) plus
+an empty setup section, which is where your own code goes. An ART app
+needs a `setupApp` - either an explicit function, or (the default the
+scaffold uses) just bare top-level statements, which the compiler
+collects into one for you:
 
 ```ts
 function onButtonClick(event: Event): void {
@@ -312,16 +319,18 @@ in ART - wrap any procedural setup code that touches `document` in one.
 
 `document` is ambient - always just there, the same way a real
 browser's own global `document` is, not something `setupApp` (or
-anything else) has to be handed or look up itself (see its own doc
-comment further down for exactly how). `Node` is an opaque foreign type
-(`declare class Node;`
+anything else) has to be handed or look up itself, and (unlike
+everything else ART's standard library provides) it needs no `import`
+to use either (see its own doc comment further down for exactly how).
+`Node` is an opaque foreign type (`declare class Node;`
 underneath - see "Classes" below) - a plain handle ART code passes around
 but never constructs or looks inside; the DOM API itself is a curated
 subset of `include/node_c_api.h`, exposed as ART-callable `declare
 function`s (`include/art_bridge.h` has the exact signatures) wrapped into
 `Node`/`Event` methods and properties (see "Getters and setters" below)
 named/shaped to match a real browser's own DOM API as closely as
-possible - all copied into every scaffolded `app.ts`:
+possible - all part of ART's standard library (`import { ... } from
+"art";`, see [`art/stdlib/art.ts`](art/stdlib/art.ts)):
 `document.getElementById(id)`, `.querySelector(selector)`, `.isNull()`
 (the only way to test a lookup for "no match" - ART has no null literal
 of its own to compare against), `.textContent` (get/set), `.getAttribute
@@ -366,9 +375,15 @@ function onItemClick(event: Event): void {
 `document` (see `kAmbientGlobals` in `art/sema.cpp`) isn't a real
 variable or a declared function of its own - it's pure sugar, rewritten
 at compile time into a call to the `declare function ArtDocument():
-Node;` every scaffolded `app.ts` still declares (needed as the sugar's
-actual target, even though nothing calls it directly by name anymore).
-`ArtDocument()`/`document` returns the current page's root `Node`,
+Node;` [`art/stdlib/art.ts`](art/stdlib/art.ts) still declares (needed
+as the sugar's actual target, even though nothing calls it directly by
+name anymore).
+Unlike every other name a file references, the sugar's rewritten call
+skips the usual "was this actually imported here" visibility check
+(Sema's `IsVisible`) entirely - deliberately, since gating an *ambient*
+identifier behind an import would defeat the point of it being ambient:
+`ArtDocument` just needs to exist somewhere in the merged program, in
+any file, exported or not. `ArtDocument()`/`document` returns the current page's root `Node`,
 whatever it is at the moment of the call - it exists specifically for a
 handler: unlike `setupApp`, a handler takes no `Node` parameter of its
 own, so without some way to ask for the document directly it would have
@@ -590,8 +605,12 @@ function main(): number {
 }
 ```
 
-`import`s are always relative (`./`/`../`, `.ts` optional) and must come
-before any other top-level declaration in a file. `export` may prefix a
+An import path is either relative (`./`/`../`, `.ts` optional), resolved
+against the importing file's own directory, or bare (no such prefix),
+resolved against ART's standard library instead - see "The DOM bridge"
+above for `import { Node, Event } from "art";`, the one standard-library
+module today. `import`s must come before any other top-level declaration
+in a file. `export` may prefix a
 `function`, `interface`, `declare function`, `declare type`, or top-level
 `let`/`const` - anything left unmarked is private to the file that
 declares it, invisible even to a file that imports something else from
@@ -656,8 +675,9 @@ object literal against an explicit target type).
 `declare class` is the opaque counterpart (no accessible fields, same as
 `declare type`), for wrapping a `declare function`-based FFI surface into
 ergonomic method calls instead of `ArtDoSomething(handle, ...)` C-style
-calls - this is exactly how `artisan-cli new --lang art`'s scaffold
-exposes the DOM bridge:
+calls - this is exactly how ART's standard library exposes the DOM
+bridge ([`art/stdlib/art.ts`](art/stdlib/art.ts), `export`ed for any
+project to `import { Node, Event } from "art";`):
 
 ```ts
 declare function ArtFindById(root: Node, id: string): Node;

@@ -35,3 +35,15 @@ add_executable(art
 
 target_include_directories(art PRIVATE ${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(art PRIVATE ${LLVM_SHARED_LIB})
+
+# Where a bare (non-relative) `import` resolves from - see
+# ModuleResolver::ResolveImportPath and stdlib/art.ts. CMAKE_CURRENT_SOURCE_DIR
+# is always wherever this CMakeLists.txt itself lives, so this is correct
+# whether `art` is built standalone (cmake -S art -B art/build) or pulled
+# in via add_subdirectory from the root CMakeLists.txt, dev checkout or
+# packaged /usr/lib/artisan install alike - art/stdlib travels with art/
+# itself either way (see the root CMakeLists.txt's own `install(DIRECTORY
+# art/ ...)`).
+target_compile_definitions(art PRIVATE
+    ARTISAN_ART_STDLIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/stdlib"
+)

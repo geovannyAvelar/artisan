@@ -26,6 +26,13 @@ namespace ART {
 // control - Sema consults it at every identifier/type lookup.
 class ModuleResolver {
 public:
+  // `stdlibDir`: where a bare (non-relative) import path resolves from -
+  // see ResolveImportPath below. Empty is legal (a program that only ever
+  // writes `./`/`../` imports never needs it), and is what the standalone
+  // `art` binary would be built with if ARTISAN_ART_STDLIB_DIR were ever
+  // absent - see main.cpp.
+  explicit ModuleResolver(std::string stdlibDir = "") : stdlibDir(std::move(stdlibDir)) {}
+
   // Empty on any resolution error - check Diagnostics().empty() before
   // using either this or Visibility().
   Program ResolveAndMerge(const std::string &entryPath);
@@ -40,6 +47,7 @@ public:
   const std::unordered_map<std::string, std::unordered_set<std::string>> &Visibility() const { return visibility; }
 
 private:
+  std::string stdlibDir;
   std::vector<std::string> diagnostics;
   std::unordered_map<std::string, std::unordered_set<std::string>> visibility;
 
@@ -53,8 +61,13 @@ private:
   void Error(SourceLoc loc, const std::string &file, const std::string &message);
 
   // Resolves `importPath` (as written in `fromFile`'s own import
-  // statement) to a canonical, existing file path. Empty string (with a
-  // diagnostic already recorded) on failure.
+  // statement) to a canonical, existing file path. `./`/`../`-prefixed
+  // resolves relative to `fromFile`'s own directory, same as always; a
+  // bare path (no such prefix) resolves against `stdlibDir` instead - the
+  // standard library's own namespace, e.g. `import { Node } from "art";`
+  // (see art/stdlib/art.ts). Empty string (with a diagnostic already
+  // recorded) on failure, including a bare import when `stdlibDir` is
+  // empty.
   std::string ResolveImportPath(const std::string &fromFile, const std::string &importPath, SourceLoc loc);
 
   void Resolve(const std::string &canonicalPath); // recursive DFS
