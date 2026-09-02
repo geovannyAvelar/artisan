@@ -74,6 +74,17 @@ struct EngineContext {
   TimerQueue *timers;
   AnimationFrameQueue *animationFrames;
   std::unordered_map<Node *, JSValue> nodeWrapperCache;
+  // The one global `document` JS object itself (see its own construction
+  // further down) - a plain object, not a classed Node wrapper, so it
+  // can't be reached the way parentNode/nextSibling/etc. reach another
+  // Node (WrapExistingNode). Held here (a real reference, via
+  // JS_DupValue - freed in ~Impl) so node.ownerDocument (below) can hand
+  // back this exact object, `===` the global - it now has both document
+  // methods (createElement, querySelector, ...) and the Node-ish ones
+  // real-world script also expects off it (addEventListener,
+  // removeEventListener - see kDocumentFuncs), same as a real DOM's own
+  // Document, which genuinely is both.
+  JSValue documentObj = JS_UNDEFINED;
 };
 
 EngineContext *ContextOpaque(JSContext *ctx) {
@@ -223,6 +234,21 @@ void PrintException(JSContext *ctx) {
   std::cerr << "JS error: " << (message != nullptr ? message : "(no message)")
             << "\n";
   JS_FreeCString(ctx, message);
+  // A real Error object's own .stack (QuickJS sets this itself at throw
+  // time - see build_backtrace in quickjs.c) - names the actual line
+  // that failed, not just what the message alone says, invaluable for
+  // anything more than a one-line script. A value thrown that isn't an
+  // Error (a bare string, a plain object, ...) has no .stack - silently
+  // skip it rather than printing "undefined".
+  JSValue stack = JS_GetPropertyStr(ctx, exception, "stack");
+  if (!JS_IsUndefined(stack)) {
+    const char *stackStr = JS_ToCString(ctx, stack);
+    if (stackStr != nullptr && stackStr[0] != '\0') {
+      std::cerr << stackStr;
+    }
+    JS_FreeCString(ctx, stackStr);
+  }
+  JS_FreeValue(ctx, stack);
   JS_FreeValue(ctx, exception);
 }
 
@@ -1521,6 +1547,28 @@ JSValue JsNodeGetParentNode(JSContext *ctx, JSValueConst this_val) {
   return WrapExistingNode(ctx, node->parent());
 }
 
+// The global `document` object (real DOM's ownerDocument, matching
+// `===` identity) - same on every node regardless of tree position or
+// attachment (real DOM's own contract: even a freshly created, not-yet-
+// appended node already has an ownerDocument, the document that created
+// it). This binding has exactly one document ever, so there's no
+// "created by a different document" case to distinguish. `document`
+// carries both document methods (createElement, querySelector, ...) and
+// the Node-ish ones real-world script also expects off it
+// (addEventListener, removeEventListener - see kDocumentFuncs) for
+// exactly this reason: react-dom's own event-delegation setup, among
+// other real-world code, calls `container.ownerDocument.
+// addEventListener(...)` to attach one listener that catches every
+// bubbled event in the tree, and needs the *same* object to also answer
+// `.createElement(...)` elsewhere in its own commit logic.
+JSValue JsNodeGetOwnerDocument(JSContext *ctx, JSValueConst this_val) {
+  Node *node = GetNode(ctx, this_val);
+  if (node == nullptr) {
+    return JS_EXCEPTION;
+  }
+  return JS_DupValue(ctx, ContextOpaque(ctx)->documentObj);
+}
+
 JSValue JsNodeGetNextSibling(JSContext *ctx, JSValueConst this_val) {
   Node *node = GetNode(ctx, this_val);
   if (node == nullptr) {
@@ -1608,6 +1656,7 @@ const JSCFunctionListEntry kNodeProto[] = {
     JS_CGETSET_DEF("tagName", JsNodeGetTagName, nullptr),
     JS_CGETSET_DEF("textContent", JsNodeGetTextContent, JsNodeSetTextContent),
     JS_CGETSET_DEF("parentNode", JsNodeGetParentNode, nullptr),
+    JS_CGETSET_DEF("ownerDocument", JsNodeGetOwnerDocument, nullptr),
     JS_CGETSET_DEF("nextSibling", JsNodeGetNextSibling, nullptr),
     JS_CGETSET_DEF("previousSibling", JsNodeGetPreviousSibling, nullptr),
     JS_CGETSET_DEF("children", JsNodeGetChildren, nullptr),
@@ -1660,6 +1709,53 @@ JSValue JsDocumentQuerySelectorAll(JSContext *ctx, JSValueConst /*this_val*/,
   return BuildNodeArray(ctx, found);
 }
 
+// document.addEventListener/removeEventListener - the document-level
+// counterparts to JsNodeAddEventListener/JsNodeRemoveEventListener
+// above (same body otherwise, mirroring how every other kDocumentFuncs
+// entry already has its own Node-sourced-from-ContextOpaque version
+// rather than sharing GetNode(ctx, this_val)'s object-classed lookup,
+// since `document` here is a plain object, not a classed Node wrapper).
+// Real-world script that walks up to the document to attach one
+// listener for a whole subtree (event delegation - react-dom's own
+// event system does exactly this) needs these to exist at all; `.
+// ownerDocument` (see JsNodeGetOwnerDocument) returns this exact object
+// for that reason.
+JSValue JsDocumentAddEventListener(JSContext *ctx, JSValueConst /*this_val*/,
+                                    int argc, JSValueConst *argv) {
+  Node *root = ContextOpaque(ctx)->document;
+  if (root == nullptr || argc < 2) {
+    return JS_EXCEPTION;
+  }
+  if (!JS_IsFunction(ctx, argv[1])) {
+    JS_ThrowTypeError(ctx, "addEventListener: listener must be a function");
+    return JS_EXCEPTION;
+  }
+  const char *type = JS_ToCString(ctx, argv[0]);
+  std::string eventType = type != nullptr ? type : "";
+  JS_FreeCString(ctx, type);
+  bool capture = argc >= 3 ? ParseCaptureArg(ctx, argv[2]) : false;
+  root->AddEventListener(eventType, JsCallback(ctx, argv[1]), capture);
+  return JS_UNDEFINED;
+}
+
+JSValue JsDocumentRemoveEventListener(JSContext *ctx, JSValueConst /*this_val*/,
+                                       int argc, JSValueConst *argv) {
+  Node *root = ContextOpaque(ctx)->document;
+  if (root == nullptr || argc < 2) {
+    return JS_EXCEPTION;
+  }
+  const char *type = JS_ToCString(ctx, argv[0]);
+  std::string eventType = type != nullptr ? type : "";
+  JS_FreeCString(ctx, type);
+  bool capture = argc >= 3 ? ParseCaptureArg(ctx, argv[2]) : false;
+  JSValueConst fnToRemove = argv[1];
+  root->RemoveEventListener(eventType, capture, [fnToRemove](const EventHandler &handler) {
+    const JsCallback *cb = handler.target<JsCallback>();
+    return cb != nullptr && cb->Matches(fnToRemove);
+  });
+  return JS_UNDEFINED;
+}
+
 JSValue JsDocumentCreateElement(JSContext *ctx, JSValueConst /*this_val*/,
                                  int argc, JSValueConst *argv) {
   if (argc < 1) {
@@ -1688,6 +1784,8 @@ const JSCFunctionListEntry kDocumentFuncs[] = {
     JS_CFUNC_DEF("querySelectorAll", 1, JsDocumentQuerySelectorAll),
     JS_CFUNC_DEF("createElement", 1, JsDocumentCreateElement),
     JS_CFUNC_DEF("createTextNode", 1, JsDocumentCreateTextNode),
+    JS_CFUNC_DEF("addEventListener", 2, JsDocumentAddEventListener),
+    JS_CFUNC_DEF("removeEventListener", 2, JsDocumentRemoveEventListener),
 };
 
 // --- console ---
@@ -1779,6 +1877,13 @@ JSValue JsRequestAnimationFrame(JSContext *ctx, JSValueConst /*this_val*/,
   return JS_NewInt32(ctx, id);
 }
 
+// A do-nothing constructor, for a global like window.HTMLIFrameElement
+// (below) that exists purely so `instanceof` has a real function to
+// compare against - nothing here ever actually constructs one.
+JSValue JsNoopConstructor(JSContext * /*ctx*/, JSValueConst /*this_val*/, int /*argc*/, JSValueConst * /*argv*/) {
+  return JS_UNDEFINED;
+}
+
 JSValue JsCancelAnimationFrame(JSContext *ctx, JSValueConst /*this_val*/,
                                 int argc, JSValueConst *argv) {
   AnimationFrameQueue *frames = ContextOpaque(ctx)->animationFrames;
@@ -1800,6 +1905,13 @@ struct JsEngine::Impl {
 
   ~Impl() {
     if (ctx != nullptr) {
+      // Balances the JS_DupValue taken when documentObj was stashed here
+      // (see EngineContext's own doc comment) - JS_FreeContext below has
+      // no way to know about a reference held from outside the JS heap,
+      // so leaving this out would leak the document object forever (and,
+      // c.f. JS_FreeRuntime's own internal consistency assertion, is
+      // exactly the kind of leftover reference that trips it).
+      JS_FreeValue(ctx, engineContext.documentObj);
       JS_FreeContext(ctx);
     }
     if (rt != nullptr) {
@@ -1911,6 +2023,11 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   JSValue documentObj = JS_NewObject(impl_->ctx);
   JS_SetPropertyFunctionList(impl_->ctx, documentObj, kDocumentFuncs,
                               static_cast<int>(std::size(kDocumentFuncs)));
+  // A second, real reference (see EngineContext::documentObj's own doc
+  // comment) - the one below (passed to JS_SetPropertyStr as the global
+  // `document`) isn't enough on its own, since node.ownerDocument needs
+  // to hand this same object back too.
+  impl_->engineContext.documentObj = JS_DupValue(impl_->ctx, documentObj);
 
   JSValue consoleObj = JS_NewObject(impl_->ctx);
   JS_SetPropertyFunctionList(impl_->ctx, consoleObj, kConsoleFuncs,
@@ -1930,6 +2047,37 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   JS_SetPropertyStr(impl_->ctx, global, "document", documentObj);
   JS_SetPropertyStr(impl_->ctx, global, "console", consoleObj);
   JS_SetPropertyStr(impl_->ctx, global, "Node", nodeGlobal);
+  // Real browsers: `window === globalThis` (`globalThis` itself is a
+  // language-level ES2020 builtin QuickJS already provides on its own -
+  // this only adds the browser-specific alias on top of it). Real-world
+  // script - not just this project's own app.js - routinely does
+  // `typeof window !== "undefined"` environment detection, or reads
+  // something off `window.` directly the same way it would off a bare
+  // global (react-dom's own event-priority heuristic among them, which
+  // checks `window.event`) - undefined `window` used to make both throw
+  // a ReferenceError, since it isn't a name at all here otherwise.
+  JS_SetPropertyStr(impl_->ctx, global, "window", JS_DupValue(impl_->ctx, global));
+  // A minimal stub, not a real user-agent string - real-world script
+  // that got this far past the `typeof window !== "undefined"` check
+  // above routinely goes on to read `navigator.userAgent` next (usually
+  // for its own environment/browser-quirk detection - react-dom's own
+  // Safari/iOS-specific workarounds among them), and an empty string
+  // deliberately matches none of those regexes, so such code falls
+  // through to its generic, no-special-casing path - the same one it'd
+  // already take with a real `window` but no matching browser quirk.
+  JSValue navigatorObj = JS_NewObject(impl_->ctx);
+  JS_SetPropertyStr(impl_->ctx, navigatorObj, "userAgent", JS_NewString(impl_->ctx, ""));
+  JS_SetPropertyStr(impl_->ctx, global, "navigator", navigatorObj);
+  // A bare, do-nothing constructor - `instanceof` needs *some* function
+  // as its right operand or it throws, and real-world script routinely
+  // checks `someNode instanceof window.HTMLIFrameElement` to special-
+  // case iframes (react-dom's own focus/selection-preservation code
+  // among them) - this Node model has no notion of an iframe (or any
+  // other element-specific subclass) at all, so nothing here is ever
+  // actually an instance of it, which is exactly the correct answer:
+  // the check should read as "definitely not an iframe", not throw.
+  JS_SetPropertyStr(impl_->ctx, global, "HTMLIFrameElement",
+                     JS_NewCFunction(impl_->ctx, JsNoopConstructor, "HTMLIFrameElement", 0));
   // setTimeout/setInterval are bare globals (window.setTimeout in a real
   // browser is reachable unqualified the same way), not document methods.
   JS_SetPropertyStr(impl_->ctx, global, "setTimeout",

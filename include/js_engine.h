@@ -16,6 +16,15 @@ namespace artisan {
 //   document.querySelector(selector) / querySelectorAll(selector)
 //   document.createElement(tagName)
 //   document.createTextNode(text)
+//   document.addEventListener(type, fn, captureOrOptions) /
+//   document.removeEventListener(type, fn, captureOrOptions)
+//                                           (same semantics as
+//                                            node.addEventListener below,
+//                                            registered on the root - for
+//                                            event delegation: one
+//                                            listener here catches every
+//                                            bubbled event from anywhere
+//                                            in the tree)
 //   node.tagName / nodeType                (read-only; nodeType is 1 for
 //                                            an element, 3 for text - see
 //                                            also the ELEMENT_NODE/
@@ -27,6 +36,16 @@ namespace artisan {
 //                                            already "live" in the only
 //                                            sense that means anything
 //                                            for a single node reference)
+//   node.ownerDocument                     (read-only; the one global
+//                                            `document` object, `===` on
+//                                            every node regardless of
+//                                            tree position or attachment
+//                                            - there's only ever one
+//                                            document here, so unlike a
+//                                            real multi-document DOM
+//                                            there's no "created by a
+//                                            different document" case to
+//                                            tell apart)
 //   node.children                          (read-only; a live
 //                                            HTMLCollection-like object -
 //                                            .length and node.children[i]
@@ -178,6 +197,23 @@ public:
   // main.cpp) is expected to call TimerQueue::FireDue/
   // AnimationFrameQueue::FireAll itself once per iteration; JsEngine only
   // ever schedules/cancels into them.
+  //
+  // Concretely, that means `document` must be *destroyed before* this
+  // JsEngine, not after (main.cpp's own navigate() already does exactly
+  // this: document.reset() first, jsEngine.reset() second) - counter-
+  // intuitive if "outlive" is read as a plain stack-declaration-order
+  // rule, where declaring `document` first would destroy it *after* a
+  // later-declared JsEngine. The reason: node.addEventListener(...)
+  // stores its JS callback inside the Node itself (Node::listeners_,
+  // entirely outside JsEngine's own ownership), holding a real JS
+  // reference (JsCallback) that has to be freed - via that Node's own
+  // destructor - while this JsEngine's JSContext is still alive to free
+  // it into. Destroying this JsEngine first leaves that reference
+  // dangling: harmless as long as `document` never dispatches again
+  // afterward, but it trips QuickJS's own internal consistency assertion
+  // in JS_FreeRuntime (list_empty(&rt->gc_obj_list)) on process exit -
+  // real, reproducible, and specifically what first surfaced this
+  // ordering requirement.
   JsEngine(Node &document, TimerQueue &timers,
            AnimationFrameQueue &animationFrames);
   ~JsEngine();
