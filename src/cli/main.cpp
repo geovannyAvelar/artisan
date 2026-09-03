@@ -14,17 +14,13 @@
 // purpose. There's no mode for naming individual files by hand - always a
 // project directory, so there's exactly one way a project is laid out.
 //
-// `new` writes out a starting point using both of artisan's two app
-// languages together: ART (app.tsx, compiled ahead of time via LLVM -
-// see art/) and JS (app.jsx, interpreted at runtime via QuickJS, real
-// JSX against the framework-agnostic h/Fragment target - see
-// src/js_engine.cpp's "h/Fragment" section, no UI library needed).
-// Neither is required to stay - deleting one leaves a project driven by
-// just the other (see DiscoverProject) - but both are scaffolded from
-// the start, since that's the whole point: two independent ways to
-// drive the same DOM, working side by side on one page. README.md's
-// "Using JavaScript" section also covers bringing in a real UI library
-// (e.g. React) instead of the built-in h/Fragment, if wanted.
+// `new` writes out a starting point using ART (app.tsx, compiled ahead
+// of time via LLVM - see art/), artisan's primary app language. A
+// project can also add its own app.js/app.jsx (interpreted at runtime
+// via QuickJS - see DiscoverProject) alongside it, for JS code that
+// can't be ported to ART or a real UI library (e.g. React) - see
+// README.md's "Using JavaScript" section - but that's opt-in, not part
+// of the default scaffold.
 
 #include <algorithm>
 #include <cctype>
@@ -317,11 +313,9 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 
 void PrintNewUsage() {
   std::cerr << "usage: artisan-cli new <project-dir>\n\n"
-               "Scaffolds a new artisan project at <project-dir>, using\n"
-               "artisan's two app languages together:\n"
-               "  pages/index.html   a bare mount point (<div id=\"art-\n"
-               "                     root\">/<div id=\"js-root\">) - the\n"
-               "                     real UI is built in app.tsx/app.jsx\n"
+               "Scaffolds a new artisan project at <project-dir>:\n"
+               "  pages/index.html   a bare mount point (<div id=\"root\">)\n"
+               "                     - the real UI is built in app.tsx\n"
                "                     below. Add more pages/*.html (or\n"
                "                     pages/some-folder/*.html for a nested\n"
                "                     route, Next.js-style) and link between\n"
@@ -335,20 +329,10 @@ void PrintNewUsage() {
                "                     reaches the DOM through the ambient\n"
                "                     `document` - see README.md's \"Using\n"
                "                     ART\" section.\n\n"
-               "  app.jsx            real JSX (transformed to plain JS at\n"
-               "                     build time - see tools/jsx_transform),\n"
-               "                     against a built-in, zero-dependency\n"
-               "                     h(tag, props, ...children)/Fragment\n"
-               "                     (see src/js_engine.cpp's \"h/\n"
-               "                     Fragment\" section) - no UI library\n"
-               "                     needed. Needs Go (for the JSX build\n"
-               "                     step) - see README.md's \"Using\n"
-               "                     JavaScript\" section, including how\n"
-               "                     to bring in a real UI library (e.g.\n"
-               "                     React) instead.\n\n"
-               "Either file can be deleted afterward, leaving a project\n"
-               "driven by just the other one (see README.md's \"Building a\n"
-               "project\" section).\n"
+               "A project can also add an app.js/app.jsx of its own,\n"
+               "interpreted at runtime via QuickJS alongside app.tsx - see\n"
+               "README.md's \"Using JavaScript\" section for how the two\n"
+               "combine on one page.\n"
                "Build it afterward with:\n"
                "  artisan-cli build <project-dir>\n";
 }
@@ -362,29 +346,25 @@ void WriteFile(const fs::path &path, const std::string &contents) {
   out << contents;
 }
 
-// A JSX-driven project's own index.html - both app.tsx and app.jsx build
-// their actual UI at runtime, the same way a bundler-based React app's
-// own index.html is normally just a mount point too - the interesting
-// markup lives in code, not here. Two independent mount points, one per
-// language, so the scaffold reads as "two systems working side by
-// side," not one merged tree. Still real HTML artisanc compiles ahead
-// of time like any other page (DiscoverPages requires at least one),
-// just about as bare as one can be while still giving app.tsx/app.jsx
-// an id each to find and build into. kAppArtTemplate/kAppJsTemplate
-// below use "art-"/"js-"-prefixed ids throughout for exactly this
-// reason too - document.getElementById searches the *whole* document,
-// not just the caller's own mount point, so two counters sharing a
-// plain "count-label" id would silently read/write each other's
-// element instead of their own (a real bug this scaffold hit and fixed
-// during development).
+// A new project's own index.html - app.tsx builds its actual UI at
+// runtime, the same way a bundler-based React app's own index.html is
+// normally just a mount point too - the interesting markup lives in
+// code, not here. Still real HTML artisanc compiles ahead of time like
+// any other page (DiscoverPages requires at least one), just about as
+// bare as one can be while still giving app.tsx an id to find and
+// build into. If a project also adds its own app.js/app.jsx (see
+// README.md's "Using JavaScript" section), give it a separate mount
+// point of its own here rather than reusing "root" -
+// document.getElementById searches the *whole* document, not a
+// caller-scoped subtree, so two independent scripts sharing one id
+// would silently read/write each other's element instead of their own.
 constexpr const char *kIndexHtmlTemplate = R"html(<!doctype html>
 <html>
   <head>
     <title>My artisan app</title>
   </head>
   <body>
-    <div id="art-root"></div>
-    <div id="js-root"></div>
+    <div id="root"></div>
   </body>
 </html>
 )html";
@@ -416,7 +396,7 @@ let clickCount: number = 0;
 // instead, e.g. `document.getElementById(id)`.
 function onButtonClick(event: Event): void {
   clickCount++;
-  let label: Node = document.getElementById("art-count-label");
+  let label: Node = document.getElementById("count-label");
   if (!label.isNull()) {
     label.textContent = `Clicked ${numberToString(clickCount)} times`;
   }
@@ -438,59 +418,18 @@ function onButtonClick(event: Event): void {
 // required here).
 //
 // pages/index.html is deliberately just a mount point (a bare <div
-// id="art-root">) - the actual UI is built here, in code, the same way
-// a bundler-based React app's own index.html usually just has one too.
-// A separate <div id="js-root"> right next to it is where app.jsx
-// mounts its own, independent counter - two ways to drive the same
-// page, side by side.
-let root: Node = document.getElementById("art-root");
+// id="root">) - the actual UI is built here, in code, the same way a
+// bundler-based React app's own index.html usually just has one too.
+let root: Node = document.getElementById("root");
 if (!root.isNull()) {
   root.appendChild(
     <div>
-      <p id="art-count-label">{"Clicked 0 times"}</p>
+      <p id="count-label">{"Clicked 0 times"}</p>
       <button onclick={onButtonClick}>{"Click me"}</button>
     </div>
   );
 }
 )art";
-
-// A new project's own app.jsx: real JSX (compiled to plain JS by
-// tools/jsx_transform at build time - see CMakeLists.txt's
-// ARTISAN_APP_JSX_SOURCE handling), against the built-in, framework-
-// agnostic h()/Fragment (see src/js_engine.cpp's "h/Fragment" section) -
-// no UI library needed. Deliberately mirrors kAppArtTemplate's own
-// counter example above for a consistent first impression across
-// languages: same plain top-level state + direct DOM mutation on click
-// (h() is an element-builder, not a virtual DOM - there's no re-render-
-// on-state-change model here, on purpose, unlike a UI library). Real
-// JSX does allow one thing ART's own JSX doesn't, shown below: bare
-// text mixed with {expr} interpolation in the same element.
-constexpr const char *kAppJsTemplate = R"jsx(// Your app's own JSX code goes here - see README.md's "Using
-// JavaScript" section, including how to bring in a real UI library
-// (e.g. React) instead of the built-in h()/Fragment, if you want one.
-// pages/index.html is deliberately just a mount point (a bare
-// <div id="js-root">) - the actual UI is built here, in code. A
-// separate <div id="art-root"> right next to it is where app.tsx
-// mounts its own, independent counter - two ways to drive the same
-// page, side by side.
-
-let clickCount = 0;
-
-function onButtonClick() {
-  clickCount++;
-  document.getElementById("js-count-label").textContent = `Clicked ${clickCount} times`;
-}
-
-let root = document.getElementById("js-root");
-if (root) {
-  root.appendChild(
-    <div>
-      <p id="js-count-label">Clicked {clickCount} times</p>
-      <button onclick={onButtonClick}>Click me</button>
-    </div>
-  );
-}
-)jsx";
 
 // Creates `dir` (including any missing parents) or exits the process with
 // an error - used for both the project root and its pages/src
@@ -530,7 +469,6 @@ int RunNew(int argc, char *argv[]) {
   CreateDirectory(projectDir / "pages");
   WriteFile(projectDir / "pages" / "index.html", kIndexHtmlTemplate);
   WriteFile(projectDir / "app.tsx", kAppArtTemplate);
-  WriteFile(projectDir / "app.jsx", kAppJsTemplate);
 
   std::cout << "artisan-cli: created a new project at "
             << fs::absolute(projectDir).string() << "\n\n"

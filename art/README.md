@@ -52,10 +52,9 @@ artisan-cli new my-app
 artisan-cli build my-app --run
 ```
 
-That scaffolds `app.tsx` (alongside `app.jsx` - see the root README's
-"Using JavaScript" section): a clean `import { Node, Event } from
-"art";` plus a small JSX-driven counter, which is where your own code
-goes (`.tsx` rather than plain `.ts` so it can use JSX - see [JSX
+That scaffolds `app.tsx`: a clean `import { Node, Event } from "art";`
+plus a small JSX-driven counter, which is where your own code goes
+(`.tsx` rather than plain `.ts` so it can use JSX - see [JSX
 (.tsx)](#jsx-tsx) below - and `pages/index.html` is deliberately just a
 bare mount point as a result). The DOM bridge itself (`declare`d and
 wrapped in ergonomic classes - see [The DOM bridge](#the-dom-bridge)

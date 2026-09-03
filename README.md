@@ -47,32 +47,32 @@ path, for everything below.
 artisan-cli new my-app
 ```
 
-Scaffolds a project using both of artisan's app languages together, so
-they can be seen working side by side from the start:
+Scaffolds a project using ART, artisan's primary app language:
 
 ```
 my-app/
-  pages/index.html   # a bare mount point (<div id="art-root">/<div id="js-root">)
+  pages/index.html   # a bare mount point (<div id="root">)
   app.tsx             # ART app - see "Using ART" below
-  app.jsx             # JSX app - see "Using JavaScript" below
 ```
 
 `app.tsx` starts with `import { Node, Event } from "art";` - the DOM
 bridge (Node/Event, `document`, ...) is ART's standard library, not
 something copied into your project (see [Using ART](#using-art) below).
-`app.jsx` is real JSX, compiled to plain JS at build time, against a
-built-in `h`/`Fragment` element builder - no UI library needed (see
-[Using JavaScript](#using-javascript) below). Both mount into their own
-`<div>` in `pages/index.html`, which is otherwise just a bare shell -
-the same way a bundler-based React app's own `index.html` usually is
-too - since the real UI is built at runtime, in code, by both.
+It mounts into `pages/index.html`'s `<div id="root">`, which is
+otherwise just a bare shell - the same way a bundler-based React app's
+own `index.html` usually is too - since the real UI is built at
+runtime, in code.
 
-Either file can be deleted afterward - a project with only `app.tsx` is
-ART-only; only `app.jsx` (or `app.js`, plain JS with no JSX) is
-JS-only; deleting both (and `pages/index.html`'s now-unused mount
-points) leaves a markup-only project with no app logic at all. See
-[Building a project](#building-a-project) for exactly what gets
-discovered.
+A project can also add its own `app.js`/`app.jsx` (interpreted at
+runtime via QuickJS) alongside `app.tsx`, for JS code that can't be
+ported to ART, or to bring in a real UI library like React (see [Using
+JavaScript](#using-javascript) below) - give it its own mount point in
+`pages/index.html` rather than reusing `root`, since
+`document.getElementById` isn't scoped per script. `app.tsx` can also
+be deleted, leaving a project driven by `app.js`/`app.jsx` alone; with
+neither, `pages/index.html` is a markup-only project with no app logic
+at all. See [Building a project](#building-a-project) for exactly what
+gets discovered.
 
 Add more pages under `pages/` - nested folders become nested routes,
 Next.js-style (`pages/settings/profile.html` becomes the route
@@ -116,13 +116,12 @@ its own UI directly - see "JSX (.tsx)" below.
 artisan-cli new my-app
 ```
 
-scaffolds `app.tsx` (alongside `app.jsx` - see [Using
-JavaScript](#using-javascript)): a clean `import { Node, Event } from
-"art";` (the DOM bridge below, already `declare`d and wrapped in
-`declare class Node`/`declare class Event` - see "Classes" below - but
-part of ART's own standard library, not copied into your project) plus
-a small JSX-driven counter that mounts into `pages/index.html`'s bare
-`<div id="art-root">`, which is where your own code goes. An ART app
+scaffolds `app.tsx`: a clean `import { Node, Event } from "art";` (the
+DOM bridge below, already `declare`d and wrapped in `declare class
+Node`/`declare class Event` - see "Classes" below - but part of ART's
+own standard library, not copied into your project) plus a small
+JSX-driven counter that mounts into `pages/index.html`'s bare `<div
+id="root">`, which is where your own code goes. An ART app
 needs a `setupApp` - either an explicit function, or (the default the
 scaffold uses) just bare top-level statements, which the compiler
 collects into one for you:
@@ -1209,8 +1208,8 @@ requestAnimationFrame(function (timestampMs) {
 
 ### JSX (app.jsx)
 
-`artisan-cli new` (see [Creating a project](#creating-a-project))
-scaffolds `app.jsx` - real JSX, transformed to plain JS at
+An `app.jsx` you add yourself (see [Creating a
+project](#creating-a-project)) is real JSX, transformed to plain JS at
 build time (`tools/jsx_transform`, built on
 [esbuild](https://github.com/evanw/esbuild)), against `h(tag, props,
 ...children)`/`Fragment(props)` - a built-in, zero-dependency element
