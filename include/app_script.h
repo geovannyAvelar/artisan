@@ -10,4 +10,12 @@ namespace artisan {
 // lives in the binary's data section.
 const char *GetAppScript();
 
+// Same pattern as GetAppScript(), for a second independent optional
+// script (ARTISAN_REACT_RUNTIME_SOURCE) run before it - see
+// src/main.cpp's navigate(). Typically the vendored React+ReactDOM
+// build from third_party/react/, so React/ReactDOM are already global
+// by the time GetAppScript() runs - but not tied to React specifically,
+// same "" -if-unconfigured contract as GetAppScript().
+const char *GetReactRuntimeScript();
+
 } // namespace artisan

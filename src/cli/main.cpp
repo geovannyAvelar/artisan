@@ -9,18 +9,22 @@
 // it actually does is discover a project directory's files (see
 // DiscoverProject) and turn them into the right CMake configure + build
 // invocation, substituted in via cache variables (ARTISAN_UI_SOURCES,
-// ARTISAN_APP_CPP_SOURCES, ARTISAN_APP_JS_SOURCE, ARTISAN_APP_GO_SOURCE)
-// that CMakeLists.txt exposes for exactly this purpose. There's no mode
-// for naming individual files by hand - always a project directory, so
-// there's exactly one way a project is laid out.
+// ARTISAN_APP_CPP_SOURCES, ARTISAN_APP_JS_SOURCE, ARTISAN_APP_JSX_SOURCE,
+// ARTISAN_REACT_RUNTIME_SOURCE, ARTISAN_APP_GO_SOURCE) that CMakeLists.txt
+// exposes for exactly this purpose. There's no mode for naming individual
+// files by hand - always a project directory, so there's exactly one way
+// a project is laid out.
 //
 // `new` writes out a starting point for one native language - ART
 // (app.tsx, see art/, the default - .tsx rather than plain .ts so the
 // scaffold's own UI can be written as JSX, matching its otherwise-bare
 // pages/index.html mount point), with --lang cpp, C++ (src/main.cpp),
 // or with --lang go, Go (goapp/) - a project uses exactly one of these,
-// never more than one (see DiscoverProject). Script (app.js) is
-// orthogonal to that choice and can layer on any of them.
+// never more than one (see DiscoverProject). Script (app.js/app.jsx) is
+// orthogonal to that choice and can layer on any of them - --lang react
+// is exactly this, with no native language at all: a vendored React
+// runtime (react-runtime.js) plus a JSX entry point (app.jsx), see
+// README.md's "Using React" section.
 //
 // `component` scaffolds a smaller, reusable pairing within an existing
 // project: a markup fragment (components/<name>.html, meant to be pasted
@@ -82,9 +86,15 @@ void PrintBuildUsage() {
          "        art/) - one file (app.ts instead, if you don't need JSX\n"
          "        in the entry point itself), compiled ahead of time, never\n"
          "        combined with src/**/*.cpp or goapp/ in the same project.\n"
-         "  <project-dir>/app.js            optional embedded script -\n"
+         "  <project-dir>/app.js            optional embedded script (or\n"
+         "        app.jsx, transformed from real JSX at build time - see\n"
+         "        tools/jsx_transform - mutually exclusive with app.js) -\n"
          "        orthogonal to the native-language choice above, works\n"
-         "        with any of them.\n\n"
+         "        with any of them.\n"
+         "  <project-dir>/react-runtime.js  optional second embedded\n"
+         "        script, run before app.js/app.jsx - typically a vendored\n"
+         "        React+ReactDOM build (see third_party/react/ and\n"
+         "        README.md's \"Using React\" section).\n\n"
          "  --build-dir     Where to configure/build (default: ./build).\n"
          "  -o, --output    Copy the built binary here.\n"
          "  --run           Run the binary after a successful build.\n";
@@ -202,9 +212,11 @@ std::vector<PageEntry> DiscoverPages(const fs::path &pagesDir) {
 struct DiscoveredProject {
   std::vector<std::string> htmlEntries; // "name=absolute/path.html", one per page.
   std::vector<fs::path> cppPaths;
-  fs::path jsPath;  // Empty if app.js doesn't exist.
-  fs::path goPath;  // Empty if goapp/go.mod doesn't exist.
-  fs::path artPath; // Empty if neither app.ts nor app.tsx exists.
+  fs::path jsPath;             // Empty if app.js doesn't exist.
+  fs::path jsxPath;            // Empty if app.jsx doesn't exist.
+  fs::path reactRuntimePath;   // Empty if react-runtime.js doesn't exist.
+  fs::path goPath;             // Empty if goapp/go.mod doesn't exist.
+  fs::path artPath;            // Empty if neither app.ts nor app.tsx exists.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
@@ -231,9 +243,28 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
   discovered.cppPaths =
       SortedFilesWithExtensionRecursive(projectDir / "src", ".cpp");
 
+  // app.js and app.jsx are mutually exclusive, same reasoning as
+  // app.ts/app.tsx below - app.jsx needs the JSX transform (see
+  // tools/jsx_transform), app.js doesn't.
   fs::path jsPath = projectDir / "app.js";
-  if (fs::exists(jsPath)) {
+  fs::path jsxPath = projectDir / "app.jsx";
+  bool hasJs = fs::exists(jsPath);
+  bool hasJsx = fs::exists(jsxPath);
+  if (hasJs && hasJsx) {
+    std::cerr << "artisan-cli: " << projectDir
+               << " has both app.js and app.jsx - a project has exactly one script entry point. Remove the "
+                  "one you don't want.\n";
+    std::exit(1);
+  }
+  if (hasJs) {
     discovered.jsPath = fs::absolute(jsPath);
+  } else if (hasJsx) {
+    discovered.jsxPath = fs::absolute(jsxPath);
+  }
+
+  fs::path reactRuntimePath = projectDir / "react-runtime.js";
+  if (fs::exists(reactRuntimePath)) {
+    discovered.reactRuntimePath = fs::absolute(reactRuntimePath);
   }
 
   // A Go app is its own module (go.mod), not a bag of loose .cpp-style
@@ -269,8 +300,9 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
   // more than one at once - each of C++/Go/ART runs its own SetupApp-
   // equivalent against the same page on load, so any two at once would
   // be independent, unordered sources of truth for the same startup
-  // behavior. Script (app.js) doesn't compete here since it's already
-  // designed to layer on top of whichever native language runs.
+  // behavior. Script (app.js/app.jsx) doesn't compete here since it's
+  // already designed to layer on top of whichever native language runs
+  // (or none at all - see --lang react).
   int nativeLangCount = (!discovered.cppPaths.empty() ? 1 : 0) + (!discovered.goPath.empty() ? 1 : 0) +
                         (!discovered.artPath.empty() ? 1 : 0);
   if (nativeLangCount > 1) {
@@ -291,7 +323,8 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
 // for a nested route - see DiscoverPages).
 int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
                        const std::vector<fs::path> &cppAbs,
-                       const fs::path &jsAbs, const fs::path &goAbs,
+                       const fs::path &jsAbs, const fs::path &jsxAbs,
+                       const fs::path &reactRuntimeAbs, const fs::path &goAbs,
                        const fs::path &artAbs,
                        const std::string &buildDirStr,
                        const std::string &outputPathStr, bool run) {
@@ -315,6 +348,12 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 
   configureCmd << " -DARTISAN_APP_JS_SOURCE="
                << ShellQuote(jsAbs.empty() ? "" : jsAbs.string());
+
+  configureCmd << " -DARTISAN_APP_JSX_SOURCE="
+               << ShellQuote(jsxAbs.empty() ? "" : jsxAbs.string());
+
+  configureCmd << " -DARTISAN_REACT_RUNTIME_SOURCE="
+               << ShellQuote(reactRuntimeAbs.empty() ? "" : reactRuntimeAbs.string());
 
   configureCmd << " -DARTISAN_APP_GO_SOURCE="
                << ShellQuote(goAbs.empty() ? "" : goAbs.string());
@@ -365,7 +404,7 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 }
 
 void PrintNewUsage() {
-  std::cerr << "usage: artisan-cli new <project-dir> [--lang art|cpp|go]\n\n"
+  std::cerr << "usage: artisan-cli new <project-dir> [--lang art|cpp|go|react]\n\n"
                "Scaffolds a new artisan project at <project-dir>:\n"
                "  pages/index.html   starter markup - the page the app\n"
                "                     opens on; add more pages/*.html (or\n"
@@ -393,7 +432,19 @@ void PrintNewUsage() {
                "    goapp/           a Go app (go.mod/main.go) exporting\n"
                "                     ArtisanSetupApp - see go/artisango and\n"
                "                     README.md's \"Using Go\" section.\n\n"
-               "A project uses one native language, never more than one.\n"
+               "  --lang react\n"
+               "    app.jsx          real React 18 + ReactDOM (vendored,\n"
+               "                     see third_party/react/) - no native\n"
+               "                     language at all, just a JSX entry\n"
+               "                     point (transformed to plain JS at\n"
+               "                     build time - see tools/jsx_transform)\n"
+               "                     plus react-runtime.js, the vendored\n"
+               "                     copy this scaffolds alongside it.\n"
+               "                     Needs Go too (for the JSX build\n"
+               "                     step) - see README.md's \"Using\n"
+               "                     React\" section.\n\n"
+               "A project uses one native language, never more than one\n"
+               "(--lang react uses none at all).\n"
                "Build it afterward with:\n"
                "  artisan-cli build <project-dir>\n";
 }
@@ -419,14 +470,14 @@ constexpr const char *kIndexHtmlTemplate = R"html(<!doctype html>
 </html>
 )html";
 
-// An ART project's own index.html, deliberately minimal: `--lang art`
-// (the default) builds its actual UI in app.tsx via JSX at runtime, the
-// same way a bundler-based React app's own index.html is normally just
-// a mount point too - the interesting markup lives in code, not here.
-// Still real HTML artisanc compiles ahead of time like any other page
-// (DiscoverPages requires at least one), just about as bare as one can
-// be while still giving app.tsx an id to find and build into.
-constexpr const char *kIndexHtmlTemplateArt = R"html(<!doctype html>
+// A JSX-driven project's own index.html - `--lang art` (the default) and
+// `--lang react` both build their actual UI at runtime (app.tsx/app.jsx),
+// the same way a bundler-based React app's own index.html is normally
+// just a mount point too - the interesting markup lives in code, not
+// here. Still real HTML artisanc compiles ahead of time like any other
+// page (DiscoverPages requires at least one), just about as bare as one
+// can be while still giving app.tsx/app.jsx an id to find and build into.
+constexpr const char *kIndexHtmlTemplateMinimal = R"html(<!doctype html>
 <html>
   <head>
     <title>My artisan app</title>
@@ -525,6 +576,59 @@ function onButtonClick(event: Event): void {
   }
 }
 )art";
+
+// A --lang react project's own app.jsx: real JSX (compiled to plain JS
+// by tools/jsx_transform at build time - see CMakeLists.txt's
+// ARTISAN_APP_JSX_SOURCE handling), against real React 18 + ReactDOM
+// (vendored, see third_party/react/ and WriteReactRuntime below) rather
+// than ART's own DOM bridge - React/ReactDOM are globals here, not
+// imported, since react-runtime.js already ran by the time this does
+// (see src/main.cpp's navigate()). Deliberately mirrors kAppArtTemplate's
+// own counter example above for a consistent first impression across
+// languages, but written the idiomatic React way: real JSX (unlike
+// ART's own JSX, real JSX allows bare text mixed with {expr}
+// interpolation in the same element) and real React.useState instead of
+// a persistent top-level variable.
+constexpr const char *kAppReactTemplate = R"jsx(// Your app's own React code goes here - see README.md's "Using React"
+// section. React/ReactDOM are globals (react-runtime.js, vendored from
+// third_party/react/, already ran before this file does) - nothing to
+// import. pages/index.html is deliberately just a mount point (a bare
+// <div id="root">), the same way a bundler-based React app's own
+// index.html usually just has one too.
+
+function Counter() {
+  const [count, setCount] = React.useState(0);
+  return (
+    <div>
+      <p id="count-label">Clicked {count} times</p>
+      <button onClick={() => setCount(count + 1)}>Click me</button>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Counter />);
+)jsx";
+
+// Concatenates the two vendored React UMD builds (third_party/react/,
+// see its own README.md) into the new project's react-runtime.js, in
+// the order they need to run: react.development.js defines the React
+// global first, react-dom.development.js's own UMD wrapper then reads
+// it off `global.React` to build ReactDOM against - swapping the order
+// makes react-dom throw immediately (it never gets a real React to
+// bind to).
+void WriteReactRuntime(const fs::path &dest) {
+  fs::path vendorDir = fs::path(ARTISAN_PROJECT_SOURCE_DIR) / "third_party" / "react";
+  std::ostringstream combined;
+  for (const char *name : {"react.development.js", "react-dom.development.js"}) {
+    std::ifstream in(vendorDir / name);
+    if (!in) {
+      std::cerr << "artisan-cli: failed to read " << (vendorDir / name) << "\n";
+      std::exit(1);
+    }
+    combined << in.rdbuf() << "\n";
+  }
+  WriteFile(dest, combined.str());
+}
 
 // go.mod's replace directive needs an absolute path to go/artisango - the
 // same checkout artisan-cli itself was built from (ARTISAN_PROJECT_SOURCE_DIR,
@@ -705,8 +809,8 @@ int RunNew(int argc, char *argv[]) {
     }
   }
 
-  if (lang != "cpp" && lang != "go" && lang != "art") {
-    std::cerr << "artisan-cli: --lang must be \"cpp\", \"go\", or \"art\", got \""
+  if (lang != "cpp" && lang != "go" && lang != "art" && lang != "react") {
+    std::cerr << "artisan-cli: --lang must be \"cpp\", \"go\", \"art\", or \"react\", got \""
                << lang << "\"\n";
     return 1;
   }
@@ -725,8 +829,10 @@ int RunNew(int argc, char *argv[]) {
     CreateDirectory(projectDir);
   }
 
+  bool usesMinimalShell = lang == "art" || lang == "react";
   CreateDirectory(projectDir / "pages");
-  WriteFile(projectDir / "pages" / "index.html", lang == "art" ? kIndexHtmlTemplateArt : kIndexHtmlTemplate);
+  WriteFile(projectDir / "pages" / "index.html",
+            usesMinimalShell ? kIndexHtmlTemplateMinimal : kIndexHtmlTemplate);
 
   if (lang == "go") {
     CreateDirectory(projectDir / "goapp");
@@ -734,13 +840,17 @@ int RunNew(int argc, char *argv[]) {
     WriteFile(projectDir / "goapp" / "main.go", kMainGoTemplate);
   } else if (lang == "art") {
     WriteFile(projectDir / "app.tsx", kAppArtTemplate);
+  } else if (lang == "react") {
+    WriteReactRuntime(projectDir / "react-runtime.js");
+    WriteFile(projectDir / "app.jsx", kAppReactTemplate);
   } else {
     CreateDirectory(projectDir / "src");
     WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
     WriteFile(projectDir / "CMakeLists.txt", CMakeListsTemplate());
   }
 
-  std::string langLabel = lang == "go" ? "Go" : lang == "art" ? "ART" : "C++";
+  std::string langLabel =
+      lang == "go" ? "Go" : lang == "art" ? "ART" : lang == "react" ? "React" : "C++";
   std::cout << "artisan-cli: created a new " << langLabel
             << " project at " << fs::absolute(projectDir).string() << "\n\n"
             << "Next steps:\n"
@@ -956,7 +1066,8 @@ int RunBuild(int argc, char *argv[]) {
   }
 
   return ConfigureAndBuild(discovered.htmlEntries, discovered.cppPaths,
-                            discovered.jsPath, discovered.goPath,
+                            discovered.jsPath, discovered.jsxPath,
+                            discovered.reactRuntimePath, discovered.goPath,
                             discovered.artPath, buildDirStr,
                             outputPathStr, run);
 }

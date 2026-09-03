@@ -95,6 +95,10 @@ set(ARTISAN_APP_CPP_SOURCES "${PROJECT_SOURCE_DIR}/src/app.cpp" CACHE STRING
     "Semicolon-separated native C++ source(s) compiled into the app")
 set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
     "Optional script embedded into the app and run once at startup")
+set(ARTISAN_APP_JSX_SOURCE "" CACHE STRING
+    "Optional .jsx counterpart to ARTISAN_APP_JS_SOURCE - real JSX, transformed to plain JS (tools/jsx_transform) before being embedded the same way. Mutually exclusive with ARTISAN_APP_JS_SOURCE.")
+set(ARTISAN_REACT_RUNTIME_SOURCE "" CACHE STRING
+    "Optional script embedded and run before ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE - typically a vendored React+ReactDOM build (see third_party/react/), so React/ReactDOM are globals by the time the app script runs")
 set(ARTISAN_APP_GO_SOURCE "" CACHE STRING
     "Optional directory of a Go app (its own go.mod/main.go, see go/artisango) compiled and linked into the app")
 set(ARTISAN_APP_ART_SOURCE "" CACHE STRING
@@ -130,14 +134,50 @@ add_executable(embed_text
     src/tools/embed_text.cpp
 )
 
+# ARTISAN_APP_JSX_SOURCE needs a build-time transform before it can be
+# embedded like ARTISAN_APP_JS_SOURCE - real JSX isn't plain JS. Built
+# only when actually configured (like art/'s own conditional
+# add_subdirectory below) so a non-React project never pays the Go/
+# esbuild cost. See tools/jsx_transform/main.go.
+if(ARTISAN_APP_JSX_SOURCE)
+    find_program(ARTISAN_GO_EXECUTABLE go REQUIRED)
+
+    set(JSX_TRANSFORM_DIR "${PROJECT_SOURCE_DIR}/tools/jsx_transform")
+    set(JSX_TRANSFORM_BIN "${CMAKE_BINARY_DIR}/jsx_transform")
+
+    add_custom_command(
+        OUTPUT "${JSX_TRANSFORM_BIN}"
+        COMMAND "${ARTISAN_GO_EXECUTABLE}" build -mod=vendor -o "${JSX_TRANSFORM_BIN}" .
+        WORKING_DIRECTORY "${JSX_TRANSFORM_DIR}"
+        DEPENDS "${JSX_TRANSFORM_DIR}/main.go" "${JSX_TRANSFORM_DIR}/go.mod" "${JSX_TRANSFORM_DIR}/go.sum"
+        COMMENT "Building jsx_transform"
+        VERBATIM
+    )
+
+    set(GENERATED_APP_JSX_JS "${CMAKE_BINARY_DIR}/generated_app_jsx.js")
+    add_custom_command(
+        OUTPUT "${GENERATED_APP_JSX_JS}"
+        COMMAND "${JSX_TRANSFORM_BIN}" "${ARTISAN_APP_JSX_SOURCE}" "${GENERATED_APP_JSX_JS}"
+        DEPENDS "${JSX_TRANSFORM_BIN}" "${ARTISAN_APP_JSX_SOURCE}"
+        COMMENT "Transforming ${ARTISAN_APP_JSX_SOURCE}'s JSX into plain JS"
+        VERBATIM
+    )
+
+    set(ARTISAN_APP_SCRIPT_SOURCE "${GENERATED_APP_JSX_JS}")
+    set(ARTISAN_APP_SCRIPT_DEPENDS "${GENERATED_APP_JSX_JS}")
+else()
+    set(ARTISAN_APP_SCRIPT_SOURCE "${ARTISAN_APP_JS_SOURCE}")
+    set(ARTISAN_APP_SCRIPT_DEPENDS "${ARTISAN_APP_JS_SOURCE}")
+endif()
+
 set(GENERATED_SCRIPT_CPP "${CMAKE_BINARY_DIR}/generated_script.cpp")
 
-if(ARTISAN_APP_JS_SOURCE)
+if(ARTISAN_APP_SCRIPT_SOURCE)
     add_custom_command(
         OUTPUT "${GENERATED_SCRIPT_CPP}"
-        COMMAND embed_text "${ARTISAN_APP_JS_SOURCE}" "${GENERATED_SCRIPT_CPP}" GetAppScript
-        DEPENDS embed_text "${ARTISAN_APP_JS_SOURCE}"
-        COMMENT "Embedding ${ARTISAN_APP_JS_SOURCE}"
+        COMMAND embed_text "${ARTISAN_APP_SCRIPT_SOURCE}" "${GENERATED_SCRIPT_CPP}" GetAppScript
+        DEPENDS embed_text "${ARTISAN_APP_SCRIPT_DEPENDS}"
+        COMMENT "Embedding ${ARTISAN_APP_SCRIPT_SOURCE}"
         VERBATIM
     )
 else()
@@ -148,6 +188,27 @@ else()
     # input file to embed.
     file(WRITE "${GENERATED_SCRIPT_CPP}"
         "namespace artisan { const char *GetAppScript() { return \"\"; } }\n")
+endif()
+
+# ARTISAN_REACT_RUNTIME_SOURCE is a second, independent optional embedded
+# script, same GetAppScript()/embed_text pattern as above (see
+# main.cpp's navigate(), which runs this one first) - typically the
+# vendored React+ReactDOM build from third_party/react/, but not tied
+# to whether ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE is JSX or
+# plain JS.
+set(GENERATED_REACT_RUNTIME_CPP "${CMAKE_BINARY_DIR}/generated_react_runtime.cpp")
+
+if(ARTISAN_REACT_RUNTIME_SOURCE)
+    add_custom_command(
+        OUTPUT "${GENERATED_REACT_RUNTIME_CPP}"
+        COMMAND embed_text "${ARTISAN_REACT_RUNTIME_SOURCE}" "${GENERATED_REACT_RUNTIME_CPP}" GetReactRuntimeScript
+        DEPENDS embed_text "${ARTISAN_REACT_RUNTIME_SOURCE}"
+        COMMENT "Embedding ${ARTISAN_REACT_RUNTIME_SOURCE}"
+        VERBATIM
+    )
+else()
+    file(WRITE "${GENERATED_REACT_RUNTIME_CPP}"
+        "namespace artisan { const char *GetReactRuntimeScript() { return \"\"; } }\n")
 endif()
 
 # ARTISAN_APP_GO_SOURCE is the Go counterpart to ARTISAN_APP_CPP_SOURCES/
@@ -301,6 +362,7 @@ add_executable(artisan
     ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"
+    "${GENERATED_REACT_RUNTIME_CPP}"
 )
 
 if(NOT ARTISAN_APP_GO_SOURCE)
