@@ -26,7 +26,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build g++ pkg-config python3 \
-            libfreetype-dev libfontconfig-dev libsdl2-dev
+            libfreetype-dev libfontconfig-dev libsdl2-dev \
+            llvm-18-dev libgc-dev
 
       - name: Determine Skia cache key
         id: skia-sha
