@@ -261,19 +261,13 @@ doesn't replace the first, both run (`Node::AddEventListener`, same as
 real `addEventListener` - there's no separate single-handler "onclick"-
 style method, matching how a real browser's own `addEventListener` is
 the modern, preferred way to do this over the legacy `el.onclick = fn`
-property). `handler` isn't a call, just a bare reference to a top-level
-`function ...(event: Event): void` (`void` return - the only
-function-pointer-shaped value ART has, written as a type like `(event:
-Event) => void`), checked structurally like any other type (a mismatched
-parameter list is a compile error, not a silent bug). Passing a function
-by name this way needs no closures or heap boxing the way a real
-callback usually would: ART functions can't capture outer variables in
-the first place, so the reference is just that function's own compiled
-address, handed straight to `Node::AddEventListener` as a plain C
-function pointer - contrast Go's `ArtisanNodeAddEventListener`, which has
-to carry a `uintptr_t` handle through a Go-side registry (`cgo.Handle`)
-instead, since a Go closure can't produce a raw callable address like
-this. `Event` is another opaque foreign type, read through its own
+property). `handler` is a value of type `(event: Event) => void` - a
+bare reference to a top-level `function` (`void` return - the only
+function-pointer-shaped value ART has), or a real closure literal
+(`function(event: Event): void { ... }`, which can capture outer
+locals - see `art/README.md`'s own "Closures" section) - checked
+structurally like any other type either way (a mismatched parameter
+list is a compile error, not a silent bug). `Event` is another opaque foreign type, read through its own
 properties: `.eventType` (named that, not `.type` - `type` is a
 reserved word, used by `declare type`), `.target` (a `Node`),
 `ArtEventDetail<T>` (a free function, not a property - see
@@ -1084,9 +1078,11 @@ value is undefined, the same "not a runtime-checked contract" deal
 
 A `Signal<T[]>` plus a "clear and rebuild" effect is the whole pattern
 for keeping a DOM list in sync with data - no diffing/reconciliation
-needed, since ART's no-closures constraint rules out per-item handlers
-anyway. One listener on the *container*, using event delegation, handles
-clicks on any item, present or future:
+needed. Per-item handlers are possible now too (see `art/README.md`'s
+own "Closures" section - each item's closure can capture its own
+index), but event delegation is still a valid, often simpler choice:
+one listener on the *container* handles clicks on any item, present or
+future, with no per-item registration at all:
 
 ```ts
 function appendNumber(arr: number[], v: number): number[] {

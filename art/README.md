@@ -5,12 +5,11 @@ statically typed language, purpose-built as the app-logic layer for the
 [artisan](../README.md) native desktop framework.
 
 ART looks like TypeScript with the dynamic parts removed: no `any`, no
-prototypes, no dynamic property access, no closures. It's compiled ahead
-of time to native machine code via LLVM — not interpreted, not JIT'd —
-and linked straight into an artisan binary alongside its C++/Go/JS
-counterparts. If you've used TypeScript, ART should read as "the parts
-of TypeScript a native, ahead-of-time compiler can make good on,"
-nothing more.
+prototypes, no dynamic property access. It's compiled ahead of time to
+native machine code via LLVM — not interpreted, not JIT'd — and linked
+straight into an artisan binary alongside its JS counterpart. If you've
+used TypeScript, ART should read as "the parts of TypeScript a native,
+ahead-of-time compiler can make good on," nothing more.
 
 ```ts
 class Counter {
@@ -77,8 +76,8 @@ Needs LLVM 18 (`llvm-18-dev` or equivalent) to build, and the
 link a standalone binary (every ART allocation goes through it - see
 [Memory management](#memory-management)). Neither is required to build
 artisan itself unless an ART app is actually configured
-(`ARTISAN_APP_ART_SOURCE`/`app.ts`/`app.tsx`) - a C++/Go/JS-only project
-never pulls either in.
+(`ARTISAN_APP_ART_SOURCE`/`app.ts`/`app.tsx`) - a JS-only project never
+pulls either in.
 
 ## Language guide
 
@@ -180,9 +179,8 @@ function add(a: number, b: number): number {
 }
 ```
 
-A bare function name (not a call) is ART's only function-pointer-shaped
-value - `(params...) => void` - always a plain, capture-free code
-address, since ART has no closures:
+A bare function name (not a call) is a Handler value - `(params...) =>
+void` - a plain, capture-free code address:
 
 ```ts
 function onClick(): void { /* ... */ }
@@ -193,7 +191,74 @@ A Handler value doesn't have to be a bare name, either - a variable or
 array element holding one is callable too (`handler()`,
 `handlers[i]()`), compiled as a real indirect call through the computed
 function pointer. This is what makes something like a dynamic list of
-event subscribers possible at all - see [Signals](#signals).
+event subscribers possible at all - see [Signals](#signals). A Handler
+value can also be a real closure - see [Closures](#closures) below.
+
+### Closures
+
+`function(params): void { ... }` - the same syntax as a top-level
+function declaration, minus the name - is a closure LITERAL, usable
+anywhere a Handler value is expected: a `let` initializer, a call
+argument, a class field, an array element, a return value. Unlike a
+bare function name, it can reference ("capture") a local from
+whichever function/closure it's written inside:
+
+```ts
+function makeCounter(label: Node): () => void {
+  let count: number = 0;
+  return function(): void {
+    count = count + 1;
+    label.textContent = numberToString(count);
+  };
+}
+```
+
+Capture is **by reference**, not a snapshot: two closures capturing the
+same variable share one live binding, and each sees the other's writes.
+```ts
+let count: number = 0;
+let increment: () => void = function(): void { count = count + 1; };
+let read: () => void = function(): void {
+  label.textContent = numberToString(count); // sees increment()'s writes
+};
+increment();
+read(); // label now reads "1"
+```
+This is what makes per-item event handlers in a rendered list
+straightforward (see [List rendering](#list-rendering) below) - each
+item's closure captures its own index/id, no `data-*` attribute or
+event-delegation trick needed.
+
+A closure created inside a loop's **body** (a `let` there, or a
+`for...of` loop variable) gets its own fresh capture every iteration,
+matching real JS `let` semantics:
+
+```ts
+let handlers: () => void[] = makeArray::<() => void>(3, noopHandler);
+let i: number = 0;
+while (i < 3) {
+  let idx: number = i; // fresh binding each iteration
+  handlers[idx] = function(): void { labels[idx].textContent = numberToString(idx); };
+  i = i + 1;
+}
+// handlers[0]() writes "0" into labels[0], handlers[1]() writes "1" into
+// labels[1], and so on - each captured its OWN idx, not whichever value
+// `i` ended up at.
+```
+
+**One accepted gap from real JS**: a classic `for (let k = 0; k < n;
+k++)` loop-**header** counter does NOT get a fresh capture per
+iteration - every closure created in the loop shares that one cell, so
+by the time any of them run, `k` already holds its final value. Use a
+`let` in the loop body instead (as above) - or `for...of`, which does
+get correct per-iteration captures - whenever each iteration's closure
+needs to see its own value.
+
+Only a void-returning closure is legal (same restriction a bare
+function reference already has). There's no explicit capture list -
+every outer local/parameter the closure's body references is captured
+automatically - and no support (yet) for a *named* nested function
+declaration; only anonymous closure literals.
 
 ### Interfaces
 
@@ -648,10 +713,9 @@ project as its own module.
 ### List rendering
 
 A `Signal<T[]>` plus a "clear and rebuild" effect keeps a DOM list in
-sync with data with no diffing needed - and since there are no closures,
-each rendered item can't carry its own bound handler, so one listener on
-the *container* uses event delegation instead, resolving `event.target`
-back to the item that was clicked via a `data-index` attribute:
+sync with data with no diffing needed. Each rendered item can now carry
+its own bound handler - a closure capturing that item's own index -
+instead of needing event delegation:
 
 ```ts
 function renderList(): void {
@@ -661,21 +725,32 @@ function renderList(): void {
   let xs: number[] = items.value; // subscribes renderList to items
   let i: number = 0;
   while (i < xs.length) { // rebuild
+    let idx: number = i; // captured below - fresh binding each iteration
     let li: Node = document.createElement("li");
-    li.textContent = numberToString(xs[i]);
-    li.setAttribute("data-index", numberToString(i));
+    li.textContent = numberToString(xs[idx]);
+    li.addEventListener("click", function(event: Event): void {
+      items.value = removeAt(items.value, idx); // re-runs renderList on its own
+    }, false);
     container.appendChild(li);
     i = i + 1;
   }
 }
+```
 
+Event delegation (one listener on the *container*, resolving
+`event.target` back to the clicked item via a `data-index` attribute) is
+still a valid, sometimes simpler choice - especially if a list is large
+enough that registering one listener per item matters, since delegation
+needs exactly one registration no matter how many items there are:
+
+```ts
 function onItemClick(event: Event): void {
   let target: Node = event.target;
   let xs: number[] = items.value;
   let i: number = 0;
   while (i < xs.length) {
     if (target.getAttribute("data-index") == numberToString(i)) {
-      items.value = removeAt(xs, i); // re-runs renderList on its own
+      items.value = removeAt(xs, i);
       return;
     }
     i = i + 1;
@@ -685,10 +760,10 @@ function onItemClick(event: Event): void {
 
 Removing the very node a click is bubbling through (the clear step tears
 down the whole subtree, including whichever `<li>` was just clicked) is
-safe: `.remove()` only detaches a node from its parent, it never frees
-it mid-dispatch, so the ongoing bubbling walk keeps working off pointers
-that are still valid, just no longer attached to anything. See
-[the main README's "List rendering" section](../README.md#list-rendering)
+safe either way: `.remove()` only detaches a node from its parent, it
+never frees it mid-dispatch, so the ongoing bubbling walk keeps working
+off pointers that are still valid, just no longer attached to anything.
+See [the main README's "List rendering" section](../README.md#list-rendering)
 for the full worked example, including `appendNumber`/`removeAt` and the
 wiring to an "add" button.
 
@@ -715,10 +790,6 @@ Deliberate omissions, not oversights - each traded for something else
 (usually: simple enough to actually finish, or a native ahead-of-time
 compiler with no runtime being able to make good on it at all):
 
-- **No closures.** A bare function name is just its own compiled code
-  address - there's no captured environment to box, which is also why
-  passing a handler around never needs a registry/handle scheme the way
-  Go's `cgo.Handle` does.
 - **No inheritance or dynamic dispatch.** A method call is always
   resolved statically against the receiver's declared type.
 - **No type inference for generics.** Every instantiation is explicit

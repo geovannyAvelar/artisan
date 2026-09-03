@@ -1,5 +1,6 @@
 #include "sema.h"
 
+#include <iterator>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -181,10 +182,12 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
       instMethod->body = CloneStmt(*m->body);
       FunctionDecl *savedCurrentFunction = currentFunction;
       currentFunction = instMethod;
+      frameStack.push_back(instMethod);
       PushScope();
-      for (auto &p : instMethod->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false);
+      for (auto &p : instMethod->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
       CheckStmt(instMethod->body.get());
       PopScope();
+      frameStack.pop_back();
       if (instMethod->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(instMethod->body.get())) {
         Error(m->loc, "method '" + m->name + "' does not return a value of type " +
                           instMethod->resolvedReturnType.ToString() + " on all code paths (instantiated as '" +
@@ -263,26 +266,52 @@ FunctionDecl *Sema::FindPlainMethod(InterfaceDecl *iface, const std::string &nam
   return nullptr;
 }
 
-void Sema::PushScope() { scopes.emplace_back(); }
-void Sema::PopScope() { scopes.pop_back(); }
+void Sema::PushScope() {
+  scopes.emplace_back();
+  scopeFrameDepth.push_back(frameStack.size());
+}
+void Sema::PopScope() {
+  scopes.pop_back();
+  scopeFrameDepth.pop_back();
+}
 
 Sema::VarInfo *Sema::Lookup(const std::string &name) {
   for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
     auto found = it->find(name);
-    if (found != it->end()) return &found->second;
+    if (found == it->end()) continue;
+    size_t idx = static_cast<size_t>(std::distance(scopes.begin(), it.base()) - 1);
+    size_t declaredAtDepth = scopeFrameDepth[idx];
+    if (declaredAtDepth < frameStack.size()) {
+      // A real lexical capture: `name` was declared in an ancestor
+      // frame, not just an outer block within the SAME frame currently
+      // being checked. Mark both ends - see this method's own doc
+      // comment in sema.h.
+      VarInfo &v = found->second;
+      if (v.declParam) v.declParam->isCapturedByClosure = true;
+      if (v.declStmt) v.declStmt->isCapturedByClosure = true;
+      for (size_t k = declaredAtDepth; k < frameStack.size(); k++) {
+        FunctionDecl *frame = frameStack[k];
+        bool already = false;
+        for (auto &c : frame->captures)
+          if (c.name == name) { already = true; break; }
+        if (!already) frame->captures.push_back({name, v.type});
+      }
+    }
+    return &found->second;
   }
   auto globalIt = globals.find(name);
   if (globalIt != globals.end() && IsVisible(name)) return &globalIt->second;
   return nullptr;
 }
 
-void Sema::Declare(SourceLoc loc, const std::string &name, ResolvedType type, bool isConst) {
+void Sema::Declare(SourceLoc loc, const std::string &name, ResolvedType type, bool isConst, Param *declParam,
+                    Stmt *declStmt) {
   auto &scope = scopes.back();
   if (scope.count(name)) {
     Error(loc, "'" + name + "' is already declared in this scope");
     return;
   }
-  scope[name] = VarInfo{std::move(type), isConst};
+  scope[name] = VarInfo{std::move(type), isConst, declParam, declStmt};
 }
 
 bool Sema::IsVisible(const std::string &name) const {
@@ -650,10 +679,12 @@ void Sema::RegisterFunctionSignature(FunctionDecl *fn) {
 void Sema::CheckFunctionBody(FunctionDecl *decl) {
   currentFunction = decl;
   currentFile = decl->sourceFile;
+  frameStack.push_back(decl);
   PushScope();
-  for (auto &p : decl->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false);
+  for (auto &p : decl->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
   CheckStmt(decl->body.get());
   PopScope();
+  frameStack.pop_back();
   if (decl->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(decl->body.get())) {
     Error(decl->loc, "function '" + decl->name + "' does not return a value of type " +
                           decl->resolvedReturnType.ToString() + " on all code paths");
@@ -731,14 +762,18 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
     instantiations[mangled] = inst;
     instantiationStorage.push_back(std::move(clone));
 
+    inst->isExtern = tmpl->isExtern;
+
     if (tmpl->body) {
       inst->body = CloneStmt(*tmpl->body);
       FunctionDecl *savedCurrentFunction = currentFunction;
       currentFunction = inst;
+      frameStack.push_back(inst);
       PushScope();
-      for (auto &p : inst->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false);
+      for (auto &p : inst->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
       CheckStmt(inst->body.get());
       PopScope();
+      frameStack.pop_back();
       if (inst->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(inst->body.get())) {
         Error(tmpl->loc, "function '" + callee + "' does not return a value of type " +
                               inst->resolvedReturnType.ToString() + " on all code paths (instantiated as '" +
@@ -813,7 +848,7 @@ void Sema::CheckStmt(Stmt *stmt) {
     } else if (!hasDeclared && actual.tag == TypeTag::Void) {
       Error(stmt->loc, "cannot declare '" + stmt->varName + "' with type void");
     }
-    Declare(stmt->loc, stmt->varName, stmt->resolvedVarType, stmt->isConst);
+    Declare(stmt->loc, stmt->varName, stmt->resolvedVarType, stmt->isConst, nullptr, stmt);
     break;
   }
   case StmtKind::If: {
@@ -851,7 +886,7 @@ void Sema::CheckStmt(Stmt *stmt) {
     }
     stmt->resolvedVarType = elemT;
     PushScope();
-    Declare(stmt->loc, stmt->varName, elemT, stmt->isConst);
+    Declare(stmt->loc, stmt->varName, elemT, stmt->isConst, nullptr, stmt);
     CheckStmt(stmt->body.get());
     PopScope();
     break;
@@ -998,12 +1033,13 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     if (v) {
       actual = v->type;
     } else if (funcIt != functions.end() && IsVisible(expr->name)) {
-      // A bare function name (not a call) - the only first-class value ART
-      // functions have. Only a void-returning function can be one (ART has
-      // no closures, so this is always just a plain code address, never a
-      // captured environment) - its own parameter types become the
-      // Handler's, checked structurally like any other type against
-      // whatever "(params...) => void" the use site actually expects.
+      // A bare function name (not a call) - a plain code address with no
+      // captured environment of its own (contrast a closure literal,
+      // ExprKind::FunctionExpr, which can capture - see its own case
+      // below). Only a void-returning function can be used this way -
+      // its own parameter types become the Handler's, checked
+      // structurally like any other type against whatever
+      // "(params...) => void" the use site actually expects.
       FunctionDecl *fn = funcIt->second;
       if (fn->resolvedReturnType.tag != TypeTag::Void) {
         Error(expr->loc, "function '" + expr->name +
@@ -1500,6 +1536,50 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       }
     }
     actual = ResolvedType::String();
+    break;
+  }
+
+  case ExprKind::FunctionExpr: {
+    // An anonymous closure literal - see ast.h's own doc comment on
+    // Expr::fn. Named/typechecked/body-checked fresh right here, exactly
+    // once per AST node actually reached (so a generic template's own,
+    // never-checked-in-template-form closure never gets a name, and each
+    // concrete instantiation's own clone gets its own separate one when
+    // Sema checks *it* - see Sema::Closures()). Captures - which locals
+    // from an enclosing frame this closure references - are discovered
+    // as a side effect of Lookup while checking the body below, not
+    // computed up front; see Lookup's own doc comment.
+    FunctionDecl *fn = expr->fn.get();
+    fn->name = "$closure" + std::to_string(nextClosureId++);
+    fn->sourceFile = currentFile;
+
+    for (auto &p : fn->params) p.resolvedType = ResolveType(p.type.get());
+    fn->resolvedReturnType = ResolveType(fn->returnType.get());
+    if (fn->resolvedReturnType.tag != TypeTag::Void) {
+      Error(expr->loc, "a function expression must return void - ART's Handler type ('(...) => void'-shaped "
+                        "values) only supports void-returning functions, matching every actual use (event "
+                        "handlers, timers, animation frames)");
+    }
+
+    FunctionDecl *savedCurrentFunction = currentFunction;
+    currentFunction = fn;
+    frameStack.push_back(fn);
+    PushScope();
+    for (auto &p : fn->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
+    CheckStmt(fn->body.get());
+    PopScope();
+    frameStack.pop_back();
+    currentFunction = savedCurrentFunction;
+    // No AlwaysReturns check - a closure is always void (enforced just
+    // above), the same "nothing to check" deal every other void
+    // function's own body already has (see CheckFunctionBody's own
+    // check, gated on resolvedReturnType.tag != TypeTag::Void).
+
+    closures.push_back(fn);
+    std::vector<ResolvedType> paramTypes;
+    paramTypes.reserve(fn->params.size());
+    for (auto &p : fn->params) paramTypes.push_back(p.resolvedType);
+    actual = ResolvedType::Handler(std::move(paramTypes));
     break;
   }
   }

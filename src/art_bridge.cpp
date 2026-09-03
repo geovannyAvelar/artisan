@@ -77,23 +77,28 @@ bool *BoxBool(bool value) {
   return box;
 }
 
-// Wraps an ArtEventHandler (a raw ART function pointer) so it can be
-// stored in a Node::EventHandler (std::function<void(Event&)>) and later
-// *recovered* - a plain lambda can't be, since std::function::target<T>()
-// needs the exact stored type named, and a lambda's type has no name to
-// give it. Same idiom as node_c_api.cpp's GoCallback / js_engine.cpp's
-// JsCallback, just wrapping a bare C function pointer instead of a Go
-// handle or a JS closure - see ArtRemoveEventListener below, which is
-// this class's whole reason to exist (ArtAddEventListener alone could
-// have used an anonymous lambda instead).
+// Wraps an ArtEventHandler + its captured env (a raw ART function
+// pointer, plus whatever closure environment it needs - see
+// include/art_bridge.h's own ArtHandler/ArtEventHandler doc comment) so
+// it can be stored in a Node::EventHandler (std::function<void(Event&)>)
+// and later *recovered* - a plain lambda can't be, since
+// std::function::target<T>() needs the exact stored type named, and a
+// lambda's type has no name to give it. Same idiom as node_c_api.cpp's
+// GoCallback / js_engine.cpp's JsCallback, just wrapping a bare C
+// function pointer (plus env) instead of a Go handle or a JS closure -
+// see ArtRemoveEventListener below, which is this class's whole reason
+// to exist (ArtAddEventListener alone could have used an anonymous
+// lambda instead).
 class ArtEventCallback {
 public:
-  explicit ArtEventCallback(ArtEventHandler handler) : handler_(handler) {}
-  void operator()(artisan::Event &event) const { handler_(&event); }
+  ArtEventCallback(ArtEventHandler handler, void *env) : handler_(handler), env_(env) {}
+  void operator()(artisan::Event &event) const { handler_(env_, &event); }
   ArtEventHandler handler() const { return handler_; }
+  void *env() const { return env_; }
 
 private:
   ArtEventHandler handler_;
+  void *env_;
 };
 
 } // namespace
@@ -207,26 +212,29 @@ void ArtSetStyle(void *node, ArtString *property, ArtString *value) {
   ArtisanNodeStyleSet(static_cast<ArtisanNode *>(node), property->data, value->data);
 }
 
-void ArtSetOnClick(void *node, ArtHandler handler) {
+void ArtSetOnClick(void *node, ArtHandler handler, void *env) {
   // Goes straight to Node::SetOnClick rather than through node_c_api.h's
   // ArtisanNodeSetOnClick, which only knows how to wrap a Go-style
-  // uintptr_t handle (see GoCallback in node_c_api.cpp) - a bare C
-  // function pointer already satisfies ClickHandler (std::function<void()>)
-  // directly, no wrapper needed.
-  static_cast<artisan::Node *>(node)->SetOnClick(handler);
+  // uintptr_t handle (see GoCallback in node_c_api.cpp). No identity-
+  // recovery need here (unlike ArtAddEventListener below) - SetOnClick
+  // always just replaces whatever was there - so a plain capturing
+  // lambda is enough, no named wrapper class needed.
+  static_cast<artisan::Node *>(node)->SetOnClick([handler, env]() { handler(env); });
 }
 
-void ArtAddEventListener(void *node, ArtString *eventType, ArtEventHandler handler, bool capture) {
+void ArtAddEventListener(void *node, ArtString *eventType, ArtEventHandler handler, void *env, bool capture) {
   std::string type(eventType->data, static_cast<size_t>(eventType->length));
-  static_cast<artisan::Node *>(node)->AddEventListener(type, ArtEventCallback(handler), capture);
+  static_cast<artisan::Node *>(node)->AddEventListener(type, ArtEventCallback(handler, env), capture);
 }
 
-void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler handler, bool capture) {
+void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler handler, void *env, bool capture) {
   std::string type(eventType->data, static_cast<size_t>(eventType->length));
   static_cast<artisan::Node *>(node)->RemoveEventListener(
-      type, capture, [handler](const artisan::EventHandler &stored) {
+      type, capture, [handler, env](const artisan::EventHandler &stored) {
         const ArtEventCallback *cb = stored.target<ArtEventCallback>();
-        return cb != nullptr && cb->handler() == handler;
+        // BOTH must match, not just `handler` - see ArtRemoveEventListener's
+        // own doc comment in art_bridge.h.
+        return cb != nullptr && cb->handler() == handler && cb->env() == env;
       });
 }
 
@@ -299,25 +307,27 @@ ArtString *ArtEventKey(void *event) { return MakeArtString(static_cast<artisan::
 
 ArtString *ArtEventCode(void *event) { return MakeArtString(static_cast<artisan::Event *>(event)->code.c_str()); }
 
-double ArtSetTimeout(ArtHandler callback, double delayMs) {
+double ArtSetTimeout(ArtHandler callback, void *env, double delayMs) {
   if (g_timerQueue == nullptr) return 0;
   return static_cast<double>(g_timerQueue->Schedule(
-      callback, SDL_GetTicks(), delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/false));
+      [callback, env]() { callback(env); }, SDL_GetTicks(),
+      delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/false));
 }
 
-double ArtSetInterval(ArtHandler callback, double delayMs) {
+double ArtSetInterval(ArtHandler callback, void *env, double delayMs) {
   if (g_timerQueue == nullptr) return 0;
   return static_cast<double>(g_timerQueue->Schedule(
-      callback, SDL_GetTicks(), delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/true));
+      [callback, env]() { callback(env); }, SDL_GetTicks(),
+      delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/true));
 }
 
 void ArtClearTimer(double id) {
   if (g_timerQueue != nullptr) g_timerQueue->Cancel(static_cast<int>(id));
 }
 
-double ArtRequestAnimationFrame(ArtAnimationFrameHandler callback) {
+double ArtRequestAnimationFrame(ArtAnimationFrameHandler callback, void *env) {
   if (g_animationFrames == nullptr) return 0;
-  return static_cast<double>(g_animationFrames->Schedule(callback));
+  return static_cast<double>(g_animationFrames->Schedule([callback, env](double ts) { callback(env, ts); }));
 }
 
 void ArtCancelAnimationFrame(double id) {

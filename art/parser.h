@@ -78,6 +78,7 @@ private:
   std::unique_ptr<Expr> ParseUnary();
   std::unique_ptr<Expr> ParsePostfix();
   std::unique_ptr<Expr> ParsePrimary();
+  std::unique_ptr<Expr> ParseFunctionExpr();
   std::unique_ptr<Expr> ParseArrayLiteral();
   std::unique_ptr<Expr> ParseObjectLiteral();
   std::unique_ptr<Expr> ParseJsxElement();

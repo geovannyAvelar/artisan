@@ -108,6 +108,8 @@ private:
 // Expressions
 // ---------------------------------------------------------------------
 
+struct FunctionDecl; // forward decl - Expr::fn needs it before FunctionDecl itself is defined below
+
 enum class ExprKind {
   NumberLiteral,
   BoolLiteral,
@@ -158,6 +160,15 @@ enum class ExprKind {
   // conversion for anything else, matching JSX's own child-type rule).
   // Always resolves to `string`.
   TemplateLiteral,
+  // Anonymous `function(params): void { body }`, used as a Handler value
+  // wherever one's expected (a `let` init, a call argument, a class
+  // field init, an array/object element, a return value) - ART's only
+  // function-EXPRESSION form, as opposed to a top-level `function`
+  // *declaration* or a class method (see Parser::ParseFunctionExpr).
+  // Unlike a plain function reference, a FunctionExpr can capture -
+  // reference - locals from its enclosing function/closure; see `fn`
+  // below and FunctionDecl::captures.
+  FunctionExpr,
 };
 
 struct Expr {
@@ -205,6 +216,17 @@ struct Expr {
   // needs this).
   std::vector<std::unique_ptr<TypeNode>> typeArgs;
   std::string resolvedCalleeName;
+
+  // FunctionExpr only - owns the closure's own params/body, reusing
+  // FunctionDecl's existing shape wholesale rather than inventing a
+  // parallel node. Sema assigns `fn->name` a synthesized, globally-unique
+  // symbol ("$closureN") the first time it actually checks this node
+  // (never earlier - a generic template's own FunctionExpr, never
+  // checked in template form, never gets one; each concrete
+  // instantiation's own clone gets its own name/captures when Sema
+  // checks *it*). Sema also fills in `fn->captures` here - see
+  // FunctionDecl::captures' own doc comment.
+  std::unique_ptr<FunctionDecl> fn;
 };
 
 inline std::unique_ptr<Expr> MakeExpr(ExprKind kind, SourceLoc loc) {
@@ -233,6 +255,17 @@ struct Stmt {
   // see FunctionDecl's own isExported/sourceFile for what these mean.
   bool isExported = false;
   std::string sourceFile;
+
+  // VarDecl only (ForOf reuses this the same way it already reuses
+  // isConst/varName/resolvedVarType above) - true iff some closure
+  // nested inside this variable's own owning function/closure captures
+  // it, set by Sema::Lookup (see its own doc comment), read by Codegen's
+  // `let`/ForOf codegen to decide plain-alloca vs. heap-boxed-cell
+  // storage. Never true for anything Sema didn't itself mark - Codegen
+  // never infers this independently. Deliberately NOT copied by
+  // CloneStmt, same as resolvedVarType isn't - see CloneStmt's own
+  // top-of-file comment.
+  bool isCapturedByClosure = false;
 
   // If / While / For share cond + body; If additionally uses elseBranch
   std::unique_ptr<Expr> cond;
@@ -266,6 +299,12 @@ struct Param {
   std::unique_ptr<TypeNode> type;
   ResolvedType resolvedType;
   SourceLoc loc;
+
+  // True iff some closure nested inside this parameter's own owning
+  // function/closure captures it - same meaning/lifecycle as
+  // Stmt::isCapturedByClosure, just for a parameter instead of a
+  // `let`/`const` local. See that field's own doc comment.
+  bool isCapturedByClosure = false;
 };
 
 struct FunctionDecl {
@@ -301,6 +340,36 @@ struct FunctionDecl {
   // functions once qualified.
   bool isGetter = false;
   bool isSetter = false;
+
+  // True only for a `declare function` (or a generic instantiation of
+  // one) - a real native-ABI boundary, as opposed to a body-less
+  // *internal* FunctionDecl Codegen hand-generates itself
+  // (numberToString/stringToNumber/makeArray<T> - see Sema's own
+  // builtin-seeding). Deliberately NOT inferred from `body == nullptr`:
+  // that's also true for those builtins, and at least one of them
+  // (makeArray<T>) can genuinely be called with a Handler-typed argument
+  // (see art/tests/signals.ts's `makeArray::<() => void>(...)`) -
+  // conflating the two would wrongly apply the native-bridge
+  // Handler-unpacking ABI rule (see Codegen's declare-function-call
+  // codegen) to an ordinary internal call. Set by
+  // Parser::ParseDeclareFunction; copied through by Sema when cloning a
+  // generic declare-function template's instantiation.
+  bool isExtern = false;
+
+  // Non-empty only for a closure (ExprKind::FunctionExpr's own `fn`)
+  // that actually references something from an enclosing frame - see
+  // Sema::Lookup's own doc comment for exactly how/when this gets
+  // populated, including the "thread-through" case (an intermediate
+  // closure that doesn't itself use a variable but still needs to carry
+  // its cell pointer to a closure nested inside IT). Always empty for a
+  // plain top-level function or class method. Order matters: it's also
+  // the closure's own env struct's field order (see Codegen's
+  // FunctionExpr codegen and GenClosureFunction).
+  struct CapturedVar {
+    std::string name;
+    ResolvedType type;
+  };
+  std::vector<CapturedVar> captures;
 };
 
 // A deep copy of a Stmt/Expr subtree - used to give each concrete

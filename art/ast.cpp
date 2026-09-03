@@ -52,6 +52,31 @@ std::unique_ptr<TypeNode> CloneTypeNode(const TypeNode &node) {
   for (auto &a : node.genericArgs) out->genericArgs.push_back(CloneTypeNode(*a));
   return out;
 }
+
+// Used only by CloneExpr's FunctionExpr case, to give each instantiation
+// of a generic function/class containing a closure literal its own,
+// independent copy of that closure's AST - same reasoning CloneStmt's
+// own top-of-file doc comment gives for cloning at all. Deliberately
+// does NOT copy `name`/`resolvedReturnType`/`captures`/`isExtern` - all
+// Sema-computed (or, for isExtern, simply never applicable to a
+// FunctionExpr), freshly (re)derived per instantiation the same way
+// Expr::resolvedType/Stmt::resolvedVarType already are (see CloneExpr's
+// and CloneStmt's own comments below).
+std::unique_ptr<FunctionDecl> CloneFunctionDecl(const FunctionDecl &fn) {
+  auto out = std::make_unique<FunctionDecl>();
+  out->loc = fn.loc;
+  out->params.reserve(fn.params.size());
+  for (auto &p : fn.params) {
+    Param cp;
+    cp.name = p.name;
+    cp.loc = p.loc;
+    if (p.type) cp.type = CloneTypeNode(*p.type);
+    out->params.push_back(std::move(cp));
+  }
+  if (fn.returnType) out->returnType = CloneTypeNode(*fn.returnType);
+  if (fn.body) out->body = CloneStmt(*fn.body);
+  return out;
+}
 } // namespace
 
 std::unique_ptr<Expr> CloneExpr(const Expr &expr) {
@@ -76,6 +101,9 @@ std::unique_ptr<Expr> CloneExpr(const Expr &expr) {
   for (auto &e : expr.elements) out->elements.push_back(CloneExpr(*e));
   for (auto &f : expr.fields) out->fields.emplace_back(f.first, CloneExpr(*f.second));
   for (auto &t : expr.typeArgs) out->typeArgs.push_back(CloneTypeNode(*t));
+  // FunctionExpr's own `fn` - see CloneFunctionDecl's doc comment for
+  // exactly what is/isn't copied.
+  if (expr.fn) out->fn = CloneFunctionDecl(*expr.fn);
 
   return out;
 }

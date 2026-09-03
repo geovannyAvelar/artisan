@@ -49,7 +49,18 @@ public:
 private:
   struct VarBinding {
     llvm::Value *alloca; // an AllocaInst for a local, or a GlobalVariable for a top-level let/const
-    llvm::Type *type;
+    llvm::Type *type;    // the variable's own value type - never `ptr`-to-cell; that indirection is
+                          // implicit via isBoxed (see LoadVar/GenLValue's Identifier branch)
+    // True iff Sema marked this variable's own declaration site (Param/
+    // Stmt) isCapturedByClosure - see that field's own doc comment. When
+    // true, `alloca` doesn't hold the value directly: it holds a `ptr`
+    // to a separate, GC-allocated cell that actually holds the value
+    // (see GenStmt's VarDecl case and DeclareParamBinding for how the
+    // cell is created, and LoadVar/GenLValue for the one extra
+    // indirection every read/write goes through). This is what makes
+    // capture-by-reference work: a closure's env holds a copy of the
+    // same cell's address, not a copy of the value.
+    bool isBoxed = false;
   };
 
   struct LValue {
@@ -73,6 +84,9 @@ private:
   std::unordered_map<std::string, llvm::StructType *> structTypes;
   std::unordered_map<std::string, llvm::Function *> llvmFunctions;
   std::unordered_map<std::string, VarBinding> globalVars;
+  // Lazily generated, cached per plain-function name - see
+  // GetOrCreatePlainThunk's own doc comment.
+  std::unordered_map<std::string, llvm::Function *> plainHandlerThunks;
 
   std::vector<std::unordered_map<std::string, VarBinding>> scopes;
   llvm::Function *currentFunction = nullptr;
@@ -143,6 +157,63 @@ private:
   // a runtime value, not a compile-time-known element count.
   void GenBuiltinMakeArray(FunctionDecl *inst);
   void GenFunction(FunctionDecl *decl);
+  // Binds one parameter of `fn` to `argVal` - shared by GenFunction and
+  // GenClosureFunction. Boxes into a fresh GC cell (see VarBinding's own
+  // doc comment) when `p.isCapturedByClosure`, otherwise an ordinary
+  // stack alloca, exactly the same split GenStmt's VarDecl case makes
+  // for a captured vs. plain local.
+  void DeclareParamBinding(llvm::Function *fn, const Param &p, llvm::Value *argVal);
+
+  // Every closure literal Sema found (sema.Closures()) gets its own LLVM
+  // function declared here, ahead of any function body generation (a
+  // closure can be referenced before its own textual position - e.g.
+  // stored in a global) - mirrors DeclareFunctionSignatures, but every
+  // closure's signature is the uniform thunk shape "(ptr env,
+  // ...params) -> void" (see GenClosureFunction's own doc comment), not
+  // derived from MapType the normal way.
+  void DeclareClosureThunkSignatures(const std::vector<FunctionDecl *> &closureFns);
+  // Generates one closure's own thunk body - see FunctionDecl::captures'
+  // doc comment and DeclareClosureThunkSignatures above for the
+  // signature this fills in. Mirrors GenFunction almost exactly, except
+  // there's an extra env-unpack prologue before the ordinary param loop,
+  // and the tail is always a plain "ret void" (a closure is always
+  // void - see Sema::CheckExpr's FunctionExpr case).
+  void GenClosureFunction(FunctionDecl *fn);
+  // Returns the Handler struct type - see MapType's own Handler case,
+  // the single choke point that makes this apply everywhere a Handler-
+  // typed value flows (locals, params, returns, array/struct fields).
+  llvm::StructType *GetHandlerStructType();
+  // Returns the "(ptr env, ...) -> void"-shaped thunk for `fnName` - a
+  // plain top-level function used as a first-class Handler *value* (not
+  // directly called by name) still needs one, purely so every Handler
+  // value - closure or plain-function-reference alike - is callable
+  // through the exact same uniform calling convention at every indirect-
+  // call/declare-function-call site. Lazily generated and cached in
+  // `plainHandlerThunks`, since most functions are only ever called
+  // directly and never need one at all.
+  llvm::Function *GetOrCreatePlainThunk(const std::string &fnName);
+  // Builds the {thunk, null} Handler aggregate for a bare reference to
+  // `fnName` used as a value - see GetOrCreatePlainThunk above.
+  llvm::Value *BuildPlainFunctionHandlerValue(const std::string &fnName);
+  // Finds the already-checked FunctionDecl `name` names, if any -
+  // sema.Functions() for an ordinary function/method, sema.Instantiations()
+  // for a generic one. Used only to read `isExtern` at a call site (see
+  // AppendCallArg below) - returns null for anything that isn't looked
+  // up by name at all (a closure, an indirect call through a Handler
+  // value), which never needs this.
+  FunctionDecl *LookupCalleeDecl(const std::string &name);
+  // Appends one already-evaluated call argument `val` to `args` - plain
+  // append, UNLESS `unpackHandler` is set and `ty` is Handler, in which
+  // case the 2-word {fn, env} aggregate is unpacked into two separate
+  // native arguments instead of one. `unpackHandler` is true only for a
+  // call into an `isExtern` (declare function) native symbol: the real
+  // C function on the other side (see include/art_bridge.h) takes `fn`/
+  // `env` as two separate parameters, not an LLVM struct value - see
+  // DeclareFunctionSignatures' matching signature-side rule below, and
+  // FunctionDecl::isExtern's own doc comment for why this can't just be
+  // `body == nullptr`.
+  void AppendCallArg(std::vector<llvm::Value *> &args, llvm::Value *val, const ResolvedType &ty,
+                      bool unpackHandler);
 
   void GenStmt(Stmt *stmt);
   llvm::Value *GenExpr(Expr *expr);
@@ -169,7 +240,14 @@ private:
   // llvmFunctions instead - see Sema::CheckExpr's Identifier case for
   // why both produce the same TypeTag::Handler resolvedType).
   VarBinding *TryLookup(const std::string &name);
-  void Declare(const std::string &name, llvm::AllocaInst *alloca, llvm::Type *type);
+  void Declare(const std::string &name, llvm::Value *alloca, llvm::Type *type, bool isBoxed = false);
+  // Reads a variable's current value - a plain load for an ordinary
+  // binding, or one extra indirection (load the cell pointer out of
+  // `b->alloca`, then load the value out of the cell) for a boxed one -
+  // see VarBinding::isBoxed's own doc comment. Used by both GenExpr's
+  // Identifier case and (indirectly, via LValue's boxed-aware address)
+  // GenLValue's own Identifier branch.
+  llvm::Value *LoadVar(VarBinding *b, const std::string &name);
 };
 
 } // namespace ART

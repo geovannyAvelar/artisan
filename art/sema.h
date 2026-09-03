@@ -40,6 +40,15 @@ public:
   struct VarInfo {
     ResolvedType type;
     bool isConst;
+    // Non-null for exactly one of these - the declaration site this
+    // binding came from - used only by Lookup's own capture-marking
+    // side effect (see its doc comment). Both null for a global
+    // (Globals()' own entries are built directly by CheckGlobalDecl
+    // without going through Declare - see Lookup's own fallback, which
+    // never applies capture-marking there, matching a global's real
+    // "never capturable" semantics).
+    Param *declParam = nullptr;
+    Stmt *declStmt = nullptr;
   };
 
   // Every top-level `let`/`const`, keyed by name - Codegen builds one
@@ -54,6 +63,15 @@ public:
   // function`, if `body` is null - i.e. the template itself had no body).
   const std::unordered_map<std::string, FunctionDecl *> &Instantiations() const { return instantiations; }
 
+  // Every ExprKind::FunctionExpr's own `fn`, appended the one time
+  // CheckExpr actually visits that node (so a generic template's own,
+  // never-checked-in-template-form closure is correctly excluded, and
+  // each concrete instantiation's own clone contributes its own separate
+  // entry) - Codegen uses this to know every closure that needs a thunk
+  // generated, the same role Instantiations() already plays for generic-
+  // function instantiations.
+  const std::vector<FunctionDecl *> &Closures() const { return closures; }
+
 private:
   std::vector<std::string> diagnostics;
   std::unordered_map<std::string, InterfaceDecl *> interfaces;
@@ -61,6 +79,23 @@ private:
   std::unordered_map<std::string, VarInfo> globals;
   std::vector<std::unordered_map<std::string, VarInfo>> scopes;
   FunctionDecl *currentFunction = nullptr;
+
+  // One entry per enclosing function/method/closure currently being
+  // checked, outermost first - a real STACK (not just `currentFunction`
+  // above, a single field, kept in sync as `frameStack.back()` or null
+  // when empty - every existing read of `currentFunction` is unaffected)
+  // because a closure nested inside a closure needs to see every
+  // ancestor frame at once, to tell "my own frame's variable" from "an
+  // ancestor's" and, when it's the latter, from which ancestor exactly -
+  // see Lookup's own doc comment.
+  std::vector<FunctionDecl *> frameStack;
+  // Parallel to `scopes` above - records frameStack.size() at the moment
+  // each entry of `scopes` was pushed. Folded directly into
+  // PushScope()/PopScope() so every existing call site gets this for
+  // free with no changes of its own.
+  std::vector<size_t> scopeFrameDepth;
+  int nextClosureId = 0;
+  std::vector<FunctionDecl *> closures; // see Closures() above
 
   // Built-in functions with no ART source/body of their own - Codegen
   // generates their LLVM definitions directly (see
@@ -154,8 +189,26 @@ private:
 
   void PushScope();
   void PopScope();
+  // Beyond a plain lookup, this has one side effect: if `name` resolves
+  // to a scope that belongs to an ANCESTOR frame relative to whichever
+  // frame is currently being checked (frameStack.back()) - i.e. a real
+  // lexical capture, not just a deeper block scope within the SAME
+  // function/closure - this marks the capture on both ends: (a) the
+  // declaring Param/Stmt itself (isCapturedByClosure = true, read by
+  // Codegen to decide boxed-vs-plain storage), and (b) every frame
+  // strictly between the declaring one and the current one, inclusive of
+  // the current one (FunctionDecl::captures) - not just the innermost
+  // closure, so an intermediate closure that never itself reads `name`
+  // still carries its cell pointer through its own env for whatever's
+  // nested further inside it to find. Both of Lookup's call sites
+  // (CheckExpr's Identifier case, CheckLValueTarget) get this
+  // automatically - no call-site-specific logic needed. A real,
+  // deliberate departure from "lookup doesn't mutate" - kept here rather
+  // than split across each call site so the thread-through loop isn't
+  // duplicated.
   VarInfo *Lookup(const std::string &name);
-  void Declare(SourceLoc loc, const std::string &name, ResolvedType type, bool isConst);
+  void Declare(SourceLoc loc, const std::string &name, ResolvedType type, bool isConst,
+               Param *declParam = nullptr, Stmt *declStmt = nullptr);
 
   void CheckGlobalDecl(Stmt *stmt);
   void RegisterFunctionSignature(FunctionDecl *fn);

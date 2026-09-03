@@ -386,6 +386,31 @@ std::unique_ptr<FunctionDecl> Parser::ParseFunction() {
   return decl;
 }
 
+// Anonymous `function(params): returnType { body }` used as a Handler
+// value - ART's only function-EXPRESSION form (contrast ParseFunction,
+// which parses a top-level *declaration*; that path never reaches here,
+// so there's no real grammar ambiguity to resolve). A *named* function
+// where an expression is expected is deliberately rejected with a clear
+// diagnostic instead of silently being treated as some other construct -
+// it isn't a closure literal (those are always anonymous) and nested
+// named function declarations aren't supported.
+std::unique_ptr<Expr> Parser::ParseFunctionExpr() {
+  SourceLoc loc = Cur().loc;
+  Expect(TokenKind::KwFunction, "to start a function expression");
+  if (Check(TokenKind::Identifier)) {
+    Fail("a function expression is always anonymous - nested named function declarations aren't "
+         "supported ('function " + Cur().text + "(...) {...}' isn't valid here; write 'function(...) {...}' "
+         "instead)",
+         Cur().loc);
+  }
+  auto e = MakeExpr(ExprKind::FunctionExpr, loc);
+  e->fn = std::make_unique<FunctionDecl>();
+  e->fn->loc = loc;
+  ParseParamsAndReturnType(e->fn.get());
+  e->fn->body = ParseBlock();
+  return e;
+}
+
 std::unique_ptr<InterfaceDecl> Parser::ParseDeclareType() {
   auto decl = std::make_unique<InterfaceDecl>();
   decl->loc = Cur().loc;
@@ -402,6 +427,7 @@ std::unique_ptr<FunctionDecl> Parser::ParseDeclareFunction() {
   decl->loc = Cur().loc;
   Expect(TokenKind::KwFunction, "after 'declare'");
   decl->name = Expect(TokenKind::Identifier, "as the function name").text;
+  decl->isExtern = true; // see FunctionDecl::isExtern's own doc comment
   ParseOptionalTypeParams(decl->typeParams);
   ParseParamsAndReturnType(decl.get());
   Expect(TokenKind::Semicolon, "after a 'declare function' signature (it has no body)");
@@ -869,6 +895,7 @@ std::unique_ptr<Expr> Parser::ParsePrimary() {
   }
   if (Check(TokenKind::LBracket)) return ParseArrayLiteral();
   if (Check(TokenKind::LBrace)) return ParseObjectLiteral();
+  if (Check(TokenKind::KwFunction)) return ParseFunctionExpr();
   // A bare '<' can only reach here (the start of a brand-new primary
   // expression) if it isn't a comparison operator - ParseRelational only
   // ever sees '<' *between* two already-parsed operands, never at an

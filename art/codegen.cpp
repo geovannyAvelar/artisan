@@ -40,7 +40,7 @@ llvm::Type *Codegen::MapType(const ResolvedType &t) {
   case TypeTag::String:
     return llvm::PointerType::get(context, 0);
   case TypeTag::Handler:
-    return llvm::PointerType::get(context, 0);
+    return GetHandlerStructType();
   case TypeTag::Void:
     return llvm::Type::getVoidTy(context);
   case TypeTag::Array:
@@ -51,6 +51,20 @@ llvm::Type *Codegen::MapType(const ResolvedType &t) {
     break;
   }
   throw std::runtime_error("codegen: unresolved type reached MapType - Sema should have rejected this program");
+}
+
+// A Handler value is a literal, anonymous 2-word {ptr fn, ptr env}
+// struct, passed by value - not a pointer to a heap struct. `fn` always
+// has the uniform "(ptr env, ...params) -> void" thunk signature (see
+// GetOrCreatePlainThunk/GenClosureFunction), so it's callable the same
+// way whether it's a plain function reference (env == null) or a real
+// closure. Anonymous/literal (not `StructType::create`d) - LLVM
+// auto-uniques structurally identical anonymous struct types itself, so
+// there's nothing to cache here the way GetArrayHeaderType's NAMED
+// struct needs.
+llvm::StructType *Codegen::GetHandlerStructType() {
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  return llvm::StructType::get(context, {ptrTy, ptrTy});
 }
 
 llvm::Type *Codegen::ArrayElemStorageType(const ResolvedType &elem) {
@@ -228,8 +242,14 @@ Codegen::VarBinding *Codegen::Lookup(const std::string &name) {
   return b;
 }
 
-void Codegen::Declare(const std::string &name, llvm::AllocaInst *alloca, llvm::Type *type) {
-  scopes.back()[name] = VarBinding{alloca, type};
+void Codegen::Declare(const std::string &name, llvm::Value *alloca, llvm::Type *type, bool isBoxed) {
+  scopes.back()[name] = VarBinding{alloca, type, isBoxed};
+}
+
+llvm::Value *Codegen::LoadVar(VarBinding *b, const std::string &name) {
+  if (!b->isBoxed) return builder.CreateLoad(b->type, b->alloca, name);
+  llvm::Value *cellPtr = builder.CreateLoad(llvm::PointerType::get(context, 0), b->alloca, name + ".cell");
+  return builder.CreateLoad(b->type, cellPtr, name);
 }
 
 llvm::AllocaInst *Codegen::CreateEntryAlloca(llvm::Function *fn, llvm::Type *type, const std::string &name) {
@@ -327,6 +347,11 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   DeclareFunctionSignatures(externFunctions, /*allowMainRename=*/false);
   DeclareFunctionSignatures(instantiations, /*allowMainRename=*/false);
   DeclareFunctionSignatures(makeArrayInstantiations, /*allowMainRename=*/false);
+  // Every closure literal Sema found, declared the same "signature
+  // first, body later" way as everything else above - a closure can be
+  // referenced before its own textual position (e.g. stored in a
+  // global's initializer).
+  DeclareClosureThunkSignatures(sema.Closures());
   // Needs every function signature already declared above (a global
   // initializer may call one), but not yet defined - see its own doc
   // comment in codegen.h.
@@ -345,6 +370,7 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   for (auto *fn : concreteFunctions) GenFunction(fn);
   for (auto *fn : instantiations)
     if (fn->body) GenFunction(fn);
+  for (auto *fn : sema.Closures()) GenClosureFunction(fn);
   for (auto *fn : makeArrayInstantiations) GenBuiltinMakeArray(fn);
   // program.externFunctions and a generic `declare function`'s own
   // instantiations (body == nullptr) stay as bare external declarations,
@@ -377,8 +403,27 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
 void Codegen::DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls, bool allowMainRename) {
   for (auto *decl : decls) {
     std::vector<llvm::Type *> paramTypes;
+    std::vector<std::string> argNames; // parallel to the actual LLVM args - longer than decl->params whenever a
+                                        // Handler param below expands into two
     paramTypes.reserve(decl->params.size());
-    for (auto &p : decl->params) paramTypes.push_back(MapType(p.resolvedType));
+    argNames.reserve(decl->params.size());
+    for (auto &p : decl->params) {
+      if (decl->isExtern && p.resolvedType.tag == TypeTag::Handler) {
+        // A Handler-typed parameter of a real native-ABI function
+        // (`declare function`) is two separate native words on the C
+        // side (see include/art_bridge.h's ArtHandler/ArtEventHandler
+        // typedefs), not one LLVM struct value - matches the unpacking
+        // AppendCallArg does at every call site passing one of these.
+        llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+        paramTypes.push_back(ptrTy);
+        paramTypes.push_back(ptrTy);
+        argNames.push_back(p.name + ".fn");
+        argNames.push_back(p.name + ".env");
+      } else {
+        paramTypes.push_back(MapType(p.resolvedType));
+        argNames.push_back(p.name);
+      }
+    }
     llvm::Type *retTy = MapType(decl->resolvedReturnType);
     auto *fnTy = llvm::FunctionType::get(retTy, paramTypes, false);
     // ART's own "main" (if any) is renamed at the LLVM level so the real C
@@ -388,9 +433,67 @@ void Codegen::DeclareFunctionSignatures(const std::vector<FunctionDecl *> &decls
     std::string llvmName = (allowMainRename && decl->name == "main") ? "__art_main" : decl->name;
     auto *fn = llvm::Function::Create(fnTy, llvm::Function::ExternalLinkage, llvmName, module.get());
     size_t i = 0;
-    for (auto &arg : fn->args()) arg.setName(decl->params[i++].name);
+    for (auto &arg : fn->args()) arg.setName(argNames[i++]);
     llvmFunctions[decl->name] = fn;
   }
+}
+
+// See this method's own doc comment in codegen.h.
+FunctionDecl *Codegen::LookupCalleeDecl(const std::string &name) {
+  auto it = sema.Functions().find(name);
+  if (it != sema.Functions().end()) return it->second;
+  auto it2 = sema.Instantiations().find(name);
+  if (it2 != sema.Instantiations().end()) return it2->second;
+  return nullptr;
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::AppendCallArg(std::vector<llvm::Value *> &args, llvm::Value *val, const ResolvedType &ty,
+                             bool unpackHandler) {
+  if (unpackHandler && ty.tag == TypeTag::Handler) {
+    args.push_back(builder.CreateExtractValue(val, 0)); // fn
+    args.push_back(builder.CreateExtractValue(val, 1)); // env
+  } else {
+    args.push_back(val);
+  }
+}
+
+// See this method's own doc comment in codegen.h.
+llvm::Function *Codegen::GetOrCreatePlainThunk(const std::string &fnName) {
+  auto it = plainHandlerThunks.find(fnName);
+  if (it != plainHandlerThunks.end()) return it->second;
+  llvm::Function *real = llvmFunctions.at(fnName);
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  std::vector<llvm::Type *> paramTypes = {ptrTy};
+  paramTypes.reserve(1 + real->getFunctionType()->params().size());
+  for (auto *t : real->getFunctionType()->params()) paramTypes.push_back(t);
+  auto *thunkTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), paramTypes, false);
+  auto *thunk =
+      llvm::Function::Create(thunkTy, llvm::Function::InternalLinkage, "art.handler_thunk." + fnName, module.get());
+  auto *entry = llvm::BasicBlock::Create(context, "entry", thunk);
+  // A LOCAL builder, deliberately not `this->builder` - this can be
+  // triggered mid-generation of some unrelated function (the first time
+  // that function's own body references `fnName` as a value) and must
+  // not disturb its insert point, the same reasoning CreateEntryAlloca's
+  // own temporary builder already has.
+  llvm::IRBuilder<> tb(entry);
+  std::vector<llvm::Value *> callArgs;
+  auto argIt = thunk->arg_begin();
+  ++argIt; // skip env - a plain function reference never captures anything
+  for (; argIt != thunk->arg_end(); ++argIt) callArgs.push_back(&*argIt);
+  tb.CreateCall(real, callArgs);
+  tb.CreateRetVoid();
+  plainHandlerThunks[fnName] = thunk;
+  return thunk;
+}
+
+// See this method's own doc comment in codegen.h.
+llvm::Value *Codegen::BuildPlainFunctionHandlerValue(const std::string &fnName) {
+  llvm::Function *thunk = GetOrCreatePlainThunk(fnName);
+  llvm::Value *agg = llvm::UndefValue::get(GetHandlerStructType());
+  agg = builder.CreateInsertValue(agg, thunk, {0});
+  agg = builder.CreateInsertValue(agg, llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)), {1});
+  return agg;
 }
 
 void Codegen::GenGlobalDecl(Stmt *stmt) {
@@ -586,7 +689,11 @@ void Codegen::GenBuiltinStringToNumber() {
 void Codegen::GenBuiltinMakeArray(FunctionDecl *inst) {
   const ResolvedType &elemType = *inst->resolvedReturnType.elementType;
   llvm::Type *storageTy = ArrayElemStorageType(elemType);
-  uint64_t elemSize = elemType.tag == TypeTag::Boolean ? 1 : 8; // i8 vs {double,ptr} - same convention ArrayLiteral uses
+  // Computed from the actual LLVM storage type rather than hardcoded -
+  // Handler is a 16-byte {ptr,ptr} struct, not an 8-byte pointer, so a
+  // fixed "boolean ? 1 : 8" would under-allocate a Handler[]'s backing
+  // buffer by half (real heap corruption, not just a wrong size).
+  uint64_t elemSize = module->getDataLayout().getTypeAllocSize(storageTy).getFixedValue();
 
   llvm::Function *fn = llvmFunctions.at(inst->name);
   currentFunction = fn;
@@ -646,13 +753,7 @@ void Codegen::GenFunction(FunctionDecl *decl) {
   PushScope();
 
   size_t i = 0;
-  for (auto &arg : fn->args()) {
-    const Param &p = decl->params[i++];
-    llvm::Type *ty = MapType(p.resolvedType);
-    llvm::AllocaInst *alloca = CreateEntryAlloca(fn, ty, p.name);
-    builder.CreateStore(&arg, alloca);
-    Declare(p.name, alloca, ty);
-  }
+  for (auto &arg : fn->args()) DeclareParamBinding(fn, decl->params[i++], &arg);
 
   GenStmt(decl->body.get());
 
@@ -670,6 +771,90 @@ void Codegen::GenFunction(FunctionDecl *decl) {
   currentFunction = nullptr;
 }
 
+// See this method's own doc comment in codegen.h. `fn` is the function
+// the parameter is being bound INTO (needed for CreateEntryAlloca's own
+// entry-block-of-this-function requirement) - not necessarily
+// `currentFunction`-by-another-name, just always equal to it in
+// practice, since this is only ever called while generating `fn`'s own
+// body.
+void Codegen::DeclareParamBinding(llvm::Function *fn, const Param &p, llvm::Value *argVal) {
+  llvm::Type *ty = MapType(p.resolvedType);
+  if (p.isCapturedByClosure) {
+    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+    llvm::AllocaInst *slot = CreateEntryAlloca(fn, ptrTy, p.name);
+    uint64_t bytes = module->getDataLayout().getTypeAllocSize(ty).getFixedValue();
+    llvm::Value *cellPtr = GenHeapAlloc(bytes); // once per call - a param is bound exactly once per invocation
+    builder.CreateStore(argVal, cellPtr);
+    builder.CreateStore(cellPtr, slot);
+    Declare(p.name, slot, ty, /*isBoxed=*/true);
+  } else {
+    llvm::AllocaInst *alloca = CreateEntryAlloca(fn, ty, p.name);
+    builder.CreateStore(argVal, alloca);
+    Declare(p.name, alloca, ty);
+  }
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::DeclareClosureThunkSignatures(const std::vector<FunctionDecl *> &closureFns) {
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  for (auto *fn : closureFns) {
+    std::vector<llvm::Type *> paramTypes = {ptrTy};
+    paramTypes.reserve(1 + fn->params.size());
+    for (auto &p : fn->params) paramTypes.push_back(MapType(p.resolvedType));
+    auto *fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), paramTypes, false);
+    auto *thunk = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, fn->name, module.get());
+    thunk->getArg(0)->setName("env");
+    size_t i = 1;
+    for (auto &p : fn->params) thunk->getArg(static_cast<unsigned>(i++))->setName(p.name);
+    llvmFunctions[fn->name] = thunk;
+  }
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenClosureFunction(FunctionDecl *fn) {
+  llvm::Function *thunkFn = llvmFunctions.at(fn->name);
+  currentFunction = thunkFn;
+  auto *entry = llvm::BasicBlock::Create(context, "entry", thunkFn);
+  builder.SetInsertPoint(entry);
+  PushScope();
+
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  auto argIt = thunkFn->arg_begin();
+  llvm::Argument *envArg = &*argIt++;
+
+  if (!fn->captures.empty()) {
+    // Unpacks each captured cell's address out of the env struct into an
+    // ordinary boxed local binding (one more alloca+store) - purely so
+    // every other piece of codegen (LoadVar, GenLValue's Identifier
+    // branch) treats "captured, unpacked from env" identically to
+    // "declared locally and boxed", with no special-casing anywhere
+    // else. This is also what makes N-level nesting work: a nested
+    // closure's own env-build code (see the FunctionExpr case below)
+    // looks these up the exact same way it would look up a directly-
+    // declared boxed local.
+    std::vector<llvm::Type *> fieldTypes(fn->captures.size(), ptrTy);
+    auto *envTy = llvm::StructType::get(context, fieldTypes);
+    for (size_t i = 0; i < fn->captures.size(); i++) {
+      llvm::Value *fieldPtr = builder.CreateStructGEP(envTy, envArg, static_cast<unsigned>(i));
+      llvm::Value *cellPtr = builder.CreateLoad(ptrTy, fieldPtr);
+      llvm::AllocaInst *slot = CreateEntryAlloca(thunkFn, ptrTy, fn->captures[i].name);
+      builder.CreateStore(cellPtr, slot);
+      Declare(fn->captures[i].name, slot, MapType(fn->captures[i].type), /*isBoxed=*/true);
+    }
+  }
+
+  for (auto &p : fn->params) DeclareParamBinding(thunkFn, p, &*argIt++);
+
+  GenStmt(fn->body.get());
+  // A closure is always void (Sema enforces this in its FunctionExpr
+  // case) - no Unreachable-vs-RetVoid split to make the way GenFunction's
+  // own tail needs for a possibly-non-void function.
+  if (!builder.GetInsertBlock()->getTerminator()) builder.CreateRetVoid();
+
+  PopScope();
+  currentFunction = nullptr;
+}
+
 // ---------------------------------------------------------------------
 // Statements
 // ---------------------------------------------------------------------
@@ -678,10 +863,30 @@ void Codegen::GenStmt(Stmt *stmt) {
   switch (stmt->kind) {
   case StmtKind::VarDecl: {
     llvm::Type *ty = MapType(stmt->resolvedVarType);
-    llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, ty, stmt->varName);
     llvm::Value *val = GenExpr(stmt->expr.get());
-    builder.CreateStore(val, alloca);
-    Declare(stmt->varName, alloca, ty);
+    if (stmt->isCapturedByClosure) {
+      // Boxed: `slot` (an ordinary, entry-block, mem2reg-friendly ptr
+      // alloca) always holds the CURRENT cell's address, but the cell
+      // itself - and the store into it - is allocated right here, at
+      // this statement's own position in the CFG, not hoisted. So a
+      // `let` inside a loop *body* naturally gets a fresh cell every
+      // dynamic execution (every iteration re-runs this GenStmt call) -
+      // a closure created in one iteration copies that iteration's cell
+      // address into its own env and never reads `slot` again, so a
+      // later iteration overwriting `slot` doesn't affect it. See
+      // VarBinding::isBoxed's own doc comment.
+      llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+      llvm::AllocaInst *slot = CreateEntryAlloca(currentFunction, ptrTy, stmt->varName);
+      uint64_t bytes = module->getDataLayout().getTypeAllocSize(ty).getFixedValue();
+      llvm::Value *cellPtr = GenHeapAlloc(bytes);
+      builder.CreateStore(val, cellPtr);
+      builder.CreateStore(cellPtr, slot);
+      Declare(stmt->varName, slot, ty, /*isBoxed=*/true);
+    } else {
+      llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, ty, stmt->varName);
+      builder.CreateStore(val, alloca);
+      Declare(stmt->varName, alloca, ty);
+    }
     break;
   }
 
@@ -764,10 +969,18 @@ void Codegen::GenStmt(Stmt *stmt) {
     const ResolvedType &elemType = stmt->resolvedVarType;
     llvm::Type *storageTy = ArrayElemStorageType(elemType);
     llvm::Type *varTy = MapType(elemType);
+    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
 
     llvm::AllocaInst *idxAlloca = CreateEntryAlloca(currentFunction, i64Ty, "forof.idx");
     builder.CreateStore(llvm::ConstantInt::get(i64Ty, 0), idxAlloca);
-    llvm::AllocaInst *varAlloca = CreateEntryAlloca(currentFunction, varTy, stmt->varName);
+    // Boxed: this slot always holds the CURRENT iteration's cell address
+    // - a fresh cell is allocated inside the loop body below, every
+    // dynamic pass through it (i.e. every iteration, since a real
+    // for...of iteration variable is already conceptually a fresh
+    // per-iteration binding) - same pattern/reasoning as GenStmt's own
+    // VarDecl case.
+    llvm::AllocaInst *varAlloca =
+        CreateEntryAlloca(currentFunction, stmt->isCapturedByClosure ? ptrTy : varTy, stmt->varName);
 
     auto *condBB = llvm::BasicBlock::Create(context, "forof.cond", currentFunction);
     auto *bodyBB = llvm::BasicBlock::Create(context, "forof.body", currentFunction);
@@ -786,8 +999,16 @@ void Codegen::GenStmt(Stmt *stmt) {
     if (elemType.tag == TypeTag::Boolean) {
       elemVal = builder.CreateICmpNE(rawVal, llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0));
     }
-    builder.CreateStore(elemVal, varAlloca);
-    Declare(stmt->varName, varAlloca, varTy);
+    if (stmt->isCapturedByClosure) {
+      uint64_t bytes = module->getDataLayout().getTypeAllocSize(varTy).getFixedValue();
+      llvm::Value *cellPtr = GenHeapAlloc(bytes);
+      builder.CreateStore(elemVal, cellPtr);
+      builder.CreateStore(cellPtr, varAlloca);
+      Declare(stmt->varName, varAlloca, varTy, /*isBoxed=*/true);
+    } else {
+      builder.CreateStore(elemVal, varAlloca);
+      Declare(stmt->varName, varAlloca, varTy);
+    }
     GenStmt(stmt->body.get());
     if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(updateBB);
 
@@ -832,6 +1053,13 @@ void Codegen::GenStmt(Stmt *stmt) {
 Codegen::LValue Codegen::GenLValue(Expr *expr) {
   if (expr->kind == ExprKind::Identifier) {
     VarBinding *b = Lookup(expr->name);
+    if (b->isBoxed) {
+      // The variable's own storage slot holds a `ptr` to its cell (see
+      // VarBinding::isBoxed's own doc comment) - the lvalue's real
+      // address is the cell itself, one indirection past the slot.
+      llvm::Value *cellPtr = builder.CreateLoad(llvm::PointerType::get(context, 0), b->alloca);
+      return {cellPtr, b->type, false};
+    }
     return {b->alloca, b->type, false};
   }
 
@@ -879,17 +1107,18 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
       // A Handler-typed Identifier is either a real local/global variable
       // holding a Handler value (e.g. a parameter forwarded into another
       // call - `function wrap(h: () => void): void { other(h); }`) or a
-      // bare reference to a top-level function used as a value, a plain
-      // code address with no variable/alloca of its own at all (see
-      // Sema::CheckExpr's Identifier case - both produce the same
-      // TypeTag::Handler resolvedType, so only an actual variable lookup
-      // tells them apart, not the type tag alone).
+      // bare reference to a top-level function used as a value, with no
+      // variable/alloca of its own at all (see Sema::CheckExpr's
+      // Identifier case - both produce the same TypeTag::Handler
+      // resolvedType, so only an actual variable lookup tells them apart,
+      // not the type tag alone). The latter still needs a real {fn, env}
+      // aggregate value, not just the bare llvm::Function* - see
+      // BuildPlainFunctionHandlerValue.
       VarBinding *b = TryLookup(expr->name);
-      if (b) return builder.CreateLoad(b->type, b->alloca, expr->name);
-      return llvmFunctions.at(expr->name);
+      if (b) return LoadVar(b, expr->name);
+      return BuildPlainFunctionHandlerValue(expr->name);
     }
-    VarBinding *b = Lookup(expr->name);
-    return builder.CreateLoad(b->type, b->alloca, expr->name);
+    return LoadVar(Lookup(expr->name), expr->name);
   }
 
   case ExprKind::Binary: {
@@ -940,10 +1169,34 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     if (op == "<=") return builder.CreateFCmpOLE(lhsVal, rhsVal);
     if (op == ">") return builder.CreateFCmpOGT(lhsVal, rhsVal);
     if (op == ">=") return builder.CreateFCmpOGE(lhsVal, rhsVal);
+
+    if (operandTag == TypeTag::Handler) {
+      // A Handler value is a 2-word {fn, env} aggregate, not a bare
+      // pointer - the generic ICmpEQ/ICmpNE fallback below doesn't
+      // accept an aggregate operand, and even if it did, comparing only
+      // raw bytes would be structurally right anyway only by accident.
+      // Equal means both fields match: same underlying function AND
+      // same captured environment - two closures compiled from the same
+      // source literal (e.g. two different loop iterations) share one
+      // generated thunk function pointer but have different envs, and
+      // must compare unequal, matching real JS reference semantics for
+      // closures.
+      llvm::Value *lhsFn = builder.CreateExtractValue(lhsVal, 0);
+      llvm::Value *rhsFn = builder.CreateExtractValue(rhsVal, 0);
+      llvm::Value *lhsEnv = builder.CreateExtractValue(lhsVal, 1);
+      llvm::Value *rhsEnv = builder.CreateExtractValue(rhsVal, 1);
+      llvm::Value *bothEqual =
+          builder.CreateAnd(builder.CreateICmpEQ(lhsFn, rhsFn), builder.CreateICmpEQ(lhsEnv, rhsEnv));
+      if (op == "==") return bothEqual;
+      if (op == "!=") return builder.CreateNot(bothEqual);
+      throw std::runtime_error("codegen: unsupported handler operator '" + op + "'");
+    }
+
     // Number compares as float; every other reachable tag here (Boolean,
     // and - via Sema's generic "same tag" rule for "=="/"!=" - Struct/
-    // Array/Handler, all represented as `ptr`) compares as a plain
-    // integer/pointer identity check. String has its own branch above.
+    // Array, both represented as `ptr`) compares as a plain integer/
+    // pointer identity check. String has its own branch above, Handler
+    // its own branch just above.
     if (op == "==") {
       return operandTag == TypeTag::Number ? builder.CreateFCmpOEQ(lhsVal, rhsVal)
                                             : builder.CreateICmpEQ(lhsVal, rhsVal);
@@ -977,37 +1230,58 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     if (expr->isIndirectCall) {
       // `lhs` is a Handler-*valued* expression (a variable, array
       // element, ...), not a named function or class method - there's no
-      // symbol to look up, just a computed function-pointer value (see
-      // Sema::CheckExpr's Call case). The function type only needs
-      // param types (every Handler is void-returning), taken from lhs's
-      // own resolved type rather than re-deriving it from the argument
-      // expressions, so an indirect call with zero arguments still
-      // builds the right (empty) signature.
+      // symbol to look up, just a computed {fn, env} value (see
+      // Sema::CheckExpr's Call case). `fn` always has the uniform
+      // "(ptr env, ...params) -> void" thunk signature (see
+      // GetOrCreatePlainThunk/GenClosureFunction) whether this is really
+      // a closure or a plain function reference - `env` (null for the
+      // latter) is simply the first actual argument either way. Param
+      // types (beyond env) come from lhs's own resolved type rather than
+      // re-deriving them from the argument expressions, so a zero-
+      // argument indirect call still builds the right signature.
       llvm::Value *calleeVal = GenExpr(expr->lhs.get());
-      std::vector<llvm::Type *> paramTypes;
-      paramTypes.reserve(expr->lhs->resolvedType.handlerParamTypes->size());
+      llvm::Value *fnPtr = builder.CreateExtractValue(calleeVal, 0);
+      llvm::Value *envPtr = builder.CreateExtractValue(calleeVal, 1);
+      llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+      std::vector<llvm::Type *> paramTypes = {ptrTy};
+      paramTypes.reserve(1 + expr->lhs->resolvedType.handlerParamTypes->size());
       for (auto &p : *expr->lhs->resolvedType.handlerParamTypes) paramTypes.push_back(MapType(p));
       auto *fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context), paramTypes, false);
-      std::vector<llvm::Value *> args;
-      args.reserve(expr->elements.size());
+      std::vector<llvm::Value *> args = {envPtr};
+      args.reserve(1 + expr->elements.size());
       for (auto &argExpr : expr->elements) args.push_back(GenExpr(argExpr.get()));
-      return builder.CreateCall(fnTy, calleeVal, args);
+      return builder.CreateCall(fnTy, fnPtr, args);
     }
     // resolvedCalleeName is the plain name for an ordinary call, or the
     // mangled per-instantiation name for a generic one (see
     // Sema::CheckGenericCall) - either way, exactly what
-    // DeclareFunctionSignatures registered into llvmFunctions under.
+    // DeclareFunctionSignatures registered into llvmFunctions under. A
+    // Handler-typed argument to an `isExtern` (declare function) callee
+    // needs unpacking into two separate native arguments (fn, env) -
+    // see AppendCallArg's own doc comment and DeclareFunctionSignatures'
+    // matching signature-side rule; an ordinary ART-to-ART call (isExtern
+    // false, including a call to a generic builtin like makeArray<T> -
+    // see FunctionDecl::isExtern's own doc comment) passes the whole
+    // 2-word struct through unchanged, matching the callee's own MapType-
+    // derived parameter type.
     llvm::Function *callee = llvmFunctions.at(expr->resolvedCalleeName);
+    FunctionDecl *calleeDecl = LookupCalleeDecl(expr->resolvedCalleeName);
+    bool isExternCall = calleeDecl && calleeDecl->isExtern;
     std::vector<llvm::Value *> args;
     args.reserve(expr->elements.size());
-    for (auto &argExpr : expr->elements) args.push_back(GenExpr(argExpr.get()));
+    for (auto &argExpr : expr->elements) {
+      llvm::Value *val = GenExpr(argExpr.get());
+      AppendCallArg(args, val, argExpr->resolvedType, isExternCall);
+    }
     return builder.CreateCall(callee, args);
   }
 
   case ExprKind::ArrayLiteral: {
     const ResolvedType &elemType = *expr->resolvedType.elementType;
     llvm::Type *storageTy = ArrayElemStorageType(elemType);
-    uint64_t elemSize = elemType.tag == TypeTag::Boolean ? 1 : 8; // i8 vs {double,ptr}
+    // See GenBuiltinMakeArray's identical computation for why this can't
+    // be a hardcoded "boolean ? 1 : 8" - Handler is a 16-byte struct now.
+    uint64_t elemSize = module->getDataLayout().getTypeAllocSize(storageTy).getFixedValue();
     uint64_t count = expr->elements.size();
 
     llvm::Value *dataPtr = builder.CreateCall(
@@ -1173,7 +1447,16 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
         // capture=true.
         std::string eventType = attr.first.substr(2);
         llvm::Value *captureVal = llvm::ConstantInt::get(llvm::Type::getInt1Ty(context), 0);
-        builder.CreateCall(addEventListenerFn, {nodeVal, GenStringLiteral(eventType), valueVal, captureVal});
+        // ArtAddEventListener is an isExtern declare function - its
+        // Handler-typed parameter needs the same {fn,env}-unpacking
+        // AppendCallArg gives every other call into it (see the
+        // ordinary ExprKind::Call codegen above); this call site is
+        // hand-built (not going through that generic path at all) so it
+        // needs the same rule applied explicitly.
+        std::vector<llvm::Value *> addEventListenerArgs = {nodeVal, GenStringLiteral(eventType)};
+        AppendCallArg(addEventListenerArgs, valueVal, attr.second->resolvedType, /*unpackHandler=*/true);
+        addEventListenerArgs.push_back(captureVal);
+        builder.CreateCall(addEventListenerFn, addEventListenerArgs);
       } else {
         builder.CreateCall(setAttributeFn, {nodeVal, GenStringLiteral(attr.first), valueVal});
       }
@@ -1327,6 +1610,45 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
       result = GenStringConcat(result, GenExpr(expr->elements[i + 1].get()));
     }
     return result;
+  }
+
+  case ExprKind::FunctionExpr: {
+    // The closure's own thunk BODY was already generated as a separate
+    // pass (see Generate()'s GenClosureFunction loop, driven by
+    // sema.Closures()) - this only builds the {thunk, env} VALUE, right
+    // here at the point the closure literal is actually evaluated (e.g.
+    // inside a loop body, once per iteration - see GenStmt's VarDecl
+    // case for why that gives each iteration's closure its own cell).
+    FunctionDecl *fn = expr->fn.get();
+    llvm::Function *thunk = llvmFunctions.at(fn->name);
+    llvm::PointerType *ptrTy = llvm::PointerType::get(context, 0);
+    llvm::Value *envPtr;
+    if (fn->captures.empty()) {
+      envPtr = llvm::ConstantPointerNull::get(ptrTy);
+    } else {
+      std::vector<llvm::Type *> fieldTypes(fn->captures.size(), ptrTy);
+      auto *envTy = llvm::StructType::get(context, fieldTypes);
+      uint64_t bytes = module->getDataLayout().getTypeAllocSize(envTy).getFixedValue();
+      llvm::Value *envRaw = GenHeapAlloc(bytes);
+      for (size_t i = 0; i < fn->captures.size(); i++) {
+        // Looked up in the CURRENT (enclosing) function/closure's own
+        // live scope - already an ordinary, boxed VarBinding whether it
+        // was declared directly here or itself unpacked from THIS
+        // frame's own env as a thread-through capture (see
+        // GenClosureFunction's own env-unpack prologue) - no
+        // distinction needed, which is exactly what makes N-level
+        // nesting work by simple structural induction.
+        VarBinding *b = Lookup(fn->captures[i].name);
+        llvm::Value *cellPtr = builder.CreateLoad(ptrTy, b->alloca);
+        llvm::Value *fieldPtr = builder.CreateStructGEP(envTy, envRaw, static_cast<unsigned>(i));
+        builder.CreateStore(cellPtr, fieldPtr);
+      }
+      envPtr = envRaw;
+    }
+    llvm::Value *agg = llvm::UndefValue::get(GetHandlerStructType());
+    agg = builder.CreateInsertValue(agg, thunk, {0});
+    agg = builder.CreateInsertValue(agg, envPtr, {1});
+    return agg;
   }
   }
 

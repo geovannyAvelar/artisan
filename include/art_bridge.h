@@ -125,35 +125,47 @@ bool ArtClassListToggle(void *node, ArtString *name, bool hasForce, bool force);
 ArtString *ArtGetStyle(void *node, ArtString *property);
 void ArtSetStyle(void *node, ArtString *property, ArtString *value);
 
-// A void-returning ART function, passed as a plain code address (see
-// art/codegen.cpp's ExprKind::Identifier handling for a bare function-
-// name reference - ART's only function-pointer-shaped value, written
-// `(params...) => void`). ART has no closures, so there's no captured
-// environment to carry and no registration/release bookkeeping needed
-// the way Go's cgo.Handle scheme requires - contrast
-// ArtisanNodeSetOnClick's `uintptr_t handle` in node_c_api.h.
-using ArtHandler = void (*)();             // "() => void" - see ArtSetOnClick
-using ArtEventHandler = void (*)(void *);  // "(event: Event) => void" - see ArtAddEventListener
+// A void-returning ART function, passed as a code address PLUS a
+// captured environment (see art/codegen.cpp's Handler-related codegen -
+// ART's only function-pointer-shaped value, written `(params...) =>
+// void`). Every Handler value - a plain top-level function reference or
+// a real closure alike - is callable through this exact same uniform
+// "(env, ...params) -> void" convention: `env` is simply null for a
+// plain function reference (see Codegen::GetOrCreatePlainThunk), or a
+// pointer to a GC-allocated struct of captured-variable cell addresses
+// for a real closure (see Codegen::GenClosureFunction) - opaque to this
+// side either way, just threaded through and handed back on the next
+// call. No registration/release bookkeeping needed the way Go's
+// cgo.Handle scheme required (contrast ArtisanNodeSetOnClick's
+// `uintptr_t handle` in node_c_api.h) - `env`, like `handler` itself, is
+// just a plain pointer with no separate lifetime to manage; it's kept
+// alive by the same GC that keeps everything else ART allocates alive.
+using ArtHandler = void (*)(void *env);                     // "() => void" - see ArtSetOnClick
+using ArtEventHandler = void (*)(void *env, void *event);   // "(event: Event) => void" - see ArtAddEventListener
 
 // See Node::SetOnClick - replaces any handler already registered on this
 // node, the same way Node::SetOnClick's std::function replacement always
 // does.
-void ArtSetOnClick(void *node, ArtHandler handler);
+void ArtSetOnClick(void *node, ArtHandler handler, void *env);
 
 // See Node::AddEventListener - stacks alongside, never replaces, any
 // other listener already registered for `eventType` (or any other type),
 // same as the real method. `handler` receives an opaque `Event` handle -
 // a foreign type ART only ever holds and passes to the ArtEvent*
 // functions below, same relationship it has with `Node` itself.
-void ArtAddEventListener(void *node, ArtString *eventType, ArtEventHandler handler, bool capture);
+void ArtAddEventListener(void *node, ArtString *eventType, ArtEventHandler handler, void *env, bool capture);
 
 // See Node::RemoveEventListener - removes every listener registered for
-// `eventType`/`capture` on this node whose handler is `handler` itself
-// (recovered via std::function::target<T>() on the art_bridge.cpp-only
-// wrapper class ArtAddEventListener actually stored - see there). A
-// `handler` that matches nothing registered is a safe no-op, same as the
-// real method.
-void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler handler, bool capture);
+// `eventType`/`capture` on this node whose handler/env is `handler`/`env`
+// itself (recovered via std::function::target<T>() on the
+// art_bridge.cpp-only wrapper class ArtAddEventListener actually stored
+// - see there). Both must match, not just `handler` - two closures
+// compiled from the same source literal (e.g. two different loop
+// iterations) share one generated thunk function pointer but have
+// different envs, so matching on `handler` alone could remove the wrong
+// one. A `handler`/`env` pair that matches nothing registered is a safe
+// no-op, same as the real method.
+void ArtRemoveEventListener(void *node, ArtString *eventType, ArtEventHandler handler, void *env, bool capture);
 
 // See Node::DispatchEvent - fires `eventType` at `node` through the usual
 // capturing/target/bubbling walk, running every listener registered for
@@ -249,11 +261,11 @@ ArtString *ArtEventCode(void *event);
 // garbage - caught by a real ArtClearTimer(id) call silently failing to
 // cancel anything, id truncation/precision loss aside (never a real
 // concern here: every id fits exactly in a double already).
-using ArtAnimationFrameHandler = void (*)(double); // "(timestamp: number) => void"
-double ArtSetTimeout(ArtHandler callback, double delayMs);
-double ArtSetInterval(ArtHandler callback, double delayMs);
+using ArtAnimationFrameHandler = void (*)(void *env, double timestamp); // "(timestamp: number) => void"
+double ArtSetTimeout(ArtHandler callback, void *env, double delayMs);
+double ArtSetInterval(ArtHandler callback, void *env, double delayMs);
 void ArtClearTimer(double id);
-double ArtRequestAnimationFrame(ArtAnimationFrameHandler callback);
+double ArtRequestAnimationFrame(ArtAnimationFrameHandler callback, void *env);
 void ArtCancelAnimationFrame(double id);
 
 } // extern "C"
