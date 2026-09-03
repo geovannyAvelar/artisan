@@ -4,24 +4,25 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// A plain C ABI over Node (dom_node.h) - the bridge a Go app (which can't
-// call C++ directly) uses to drive the same DOM that SetupApp (app.h) and
-// JsEngine (js_engine.h) already drive, compiled and linked in the same
-// way as the native C++ path: ahead of time, into the same binary. See
-// go/artisango for the Go-side wrapper that turns this into an idiomatic
-// artisango.Node, and CMakeLists.txt (ARTISAN_APP_GO_SOURCE) for how a
-// project's Go app gets compiled into a static archive and linked in.
+// A plain C ABI over Node (dom_node.h) - reused by ART's own bridge
+// (art_bridge.cpp) for the structural parts of the DOM (creating/
+// finding/mutating nodes) rather than re-implementing them a second
+// time, since ART is also compiled ahead of time and needs a plain-C
+// calling convention to call from main.cpp across, the same as this
+// file's own extern "C" functions are. See art_bridge.h/art_bridge.cpp
+// for ART's own event/timer callbacks, which go straight to Node's C++
+// methods instead of through here (they don't need a handle-based
+// indirection this file's callback-free half doesn't have anyway).
 //
 // Every function takes/returns ArtisanNode* - an opaque handle over a
 // live artisan::Node* (see node_c_api.cpp) - except FindById, which
 // returns nullptr for "no such id", same as Node::FindById itself.
 //
 // String ownership: every `const char *` passed in is read-only and not
-// retained past the call (matches cgo.CString - freed by the Go caller
-// right after). Every `char *` returned out is a freshly heap-allocated
-// copy the caller must release with ArtisanFreeString - never a pointer
-// into Node's own storage, so it stays valid regardless of what the
-// caller does to the node afterward.
+// retained past the call. Every `char *` returned out is a freshly
+// heap-allocated copy the caller must release with ArtisanFreeString -
+// never a pointer into Node's own storage, so it stays valid regardless
+// of what the caller does to the node afterward.
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,8 +64,8 @@ ArtisanNode *ArtisanNodePreviousSibling(ArtisanNode *node);
 
 // See Node::children. ArtisanNodeChildAt is undefined behavior if `index`
 // isn't `< ArtisanNodeChildCount(node)` - same "caller keeps the count it
-// already fetched in range" contract a Go slice index would have, just
-// without Go's own bounds check backing it up across the C boundary.
+// already fetched in range" contract elsewhere, just without a bounds
+// check backing it up across the C boundary.
 size_t ArtisanNodeChildCount(ArtisanNode *node);
 ArtisanNode *ArtisanNodeChildAt(ArtisanNode *node, size_t index);
 
@@ -94,9 +95,9 @@ void ArtisanFreeNodeArray(ArtisanNode **nodes);
 // C++ side (see node_c_api.cpp's pending-node registry) until it's passed
 // to ArtisanNodeAppendChild/InsertBefore below, which transfers it into
 // the tree; a node created and never appended is never freed (leaks
-// until process exit) - there's no Go-side finalizer to catch that the
-// way a garbage-collected JS wrapper would (see js_engine.h's NodeHandle
-// for that comparison). Passing the same not-yet-appended ArtisanNode* to
+// until process exit) - there's no finalizer to catch that the way a
+// garbage-collected JS wrapper would (see js_engine.h's NodeHandle for
+// that comparison). Passing the same not-yet-appended ArtisanNode* to
 // AppendChild/InsertBefore twice, or passing an ArtisanNode* that isn't a
 // currently-pending created node (e.g. one already in the tree, found via
 // FindById), is a safe no-op, not an error - there's no exception
@@ -125,47 +126,6 @@ ArtisanNode *ArtisanNodeRemove(ArtisanNode *node);
 // never event listeners. `deep`: also clones every descendant. See
 // Node::CloneNode.
 ArtisanNode *ArtisanNodeCloneNode(ArtisanNode *node, bool deep);
-
-// Registers `handle` (a Go closure's cgo.Handle) for `eventType` -
-// alongside, not replacing, any other handler already registered for
-// that type or any other, matching Node::AddEventListener/real
-// addEventListener. `capture`: fires during the capturing phase instead
-// of the bubbling phase - see Node::AddEventListener/DispatchEvent. The
-// closure itself is invoked through ArtisanGoInvokeHandler below, same
-// mechanism ArtisanNodeSetOnClick uses (see it for that comparison).
-void ArtisanNodeAddEventListener(ArtisanNode *node, const char *eventType,
-                                  uintptr_t handle, bool capture);
-
-// Removes every listener registered for `eventType`/`capture` whose
-// handle equals `handle` (the exact value passed to the
-// ArtisanNodeAddEventListener call that registered it) - see
-// Node::RemoveEventListener. A handle that matches nothing is a safe
-// no-op.
-void ArtisanNodeRemoveEventListener(ArtisanNode *node, const char *eventType,
-                                     uintptr_t handle, bool capture);
-
-// Fires `eventType` at `node` through the usual capturing/target/
-// bubbling walk (see Node::DispatchEvent) - every listener registered
-// for it, Go or otherwise (see js_engine.h - the same underlying Node
-// can have both JS- and Go-registered listeners), runs exactly as it
-// would for an internally-fired click/change/input. `bubbles = false`
-// skips the ancestor phases; `cancelable = false` makes any listener's
-// preventDefault() (JS-side; a Go listener registered here has no way
-// to call it - see ArtisanNodeAddEventListener above, whose handler is
-// always zero-arg) a no-op. Returns false if the event was cancelable
-// and some listener called preventDefault(), true otherwise - the same
-// convention real dispatchEvent()'s return value has.
-bool ArtisanNodeDispatchEvent(ArtisanNode *node, const char *eventType,
-                               bool bubbles, bool cancelable);
-
-// Registers the handler Click() invokes (see Node::SetOnClick), given as
-// a Go closure's cgo.Handle rather than a function pointer - the closure
-// itself is invoked through ArtisanGoInvokeHandler below. Replaces
-// any handler already set on this node, releasing its handle first (via
-// ArtisanGoReleaseHandler), same as Node::SetOnClick replacing the
-// previous std::function would - unlike ArtisanNodeAddEventListener
-// above, which never replaces anything.
-void ArtisanNodeSetOnClick(ArtisanNode *node, uintptr_t handle);
 
 // The "class" attribute's space-separated tokens - see
 // Node::GetAttribute("class") and js_engine.h's classList doc comment
@@ -198,47 +158,18 @@ char *ArtisanNodeGetData(ArtisanNode *node, const char *name);
 void ArtisanNodeSetData(ArtisanNode *node, const char *name,
                          const char *value);
 
-// setTimeout/setInterval/requestAnimationFrame for a Go app - see
-// TimerQueue (timer_queue.h) and AnimationFrameQueue
-// (animation_frame_queue.h). A no-op (returns 0, an id no real timer/
-// frame ever has - both queues' ids start at 1) if called before the
-// document is ready to schedule into (see node_c_api_bridge.h's
-// SetGoTimerContext, called by main.cpp before ArtisanSetupApp runs -
-// this should never actually happen from within SetupApp itself).
-// ArtisanClearTimer cancels either a setTimeout or a setInterval id -
-// same single entry point real clearTimeout/clearInterval each are.
-int ArtisanSetTimeout(uintptr_t handle, double delayMs);
-int ArtisanSetInterval(uintptr_t handle, double delayMs);
-void ArtisanClearTimer(int id);
-int ArtisanRequestAnimationFrame(uintptr_t handle);
-void ArtisanCancelAnimationFrame(int id);
-
 // Releases a string ArtisanNodeTagName/TextContent/GetAttribute returned.
 void ArtisanFreeString(char *str);
 
-// The Go app's entry point: called once whenever a page loads (first at
+// ART's own entry point: called once whenever a page loads (first at
 // startup, then again on every navigation - see main.cpp's navigate()),
-// the same way SetupApp(Node&) and the embedded script both are.
-// Implemented by the Go archive (see go/artisango's main-package
-// template) when a project configures ARTISAN_APP_GO_SOURCE, or by a
-// generated no-op stub otherwise (see CMakeLists.txt) - either way,
-// main.cpp calls it unconditionally, the same way it always calls
-// GetAppScript() whether or not a script was configured.
+// the same way the embedded script is. Implemented by ART's own compiled
+// code (see CMakeLists.txt's ARTISAN_APP_ART_SOURCE handling, adapting
+// ART's generated `setupApp()` to this name) when a project configures
+// one, or by a generated no-op stub otherwise - either way, main.cpp
+// calls it unconditionally, the same way it always calls GetAppScript()
+// whether or not a script was configured.
 void ArtisanSetupApp(ArtisanNode *document);
-
-// Implemented by the Go archive (//export'ed from go/artisango), called
-// from ArtisanNodeSetOnClick's/ArtisanNodeAddEventListener's registered
-// handlers / their replacement or release. Never called if no Go app is
-// configured, since nothing can produce a handle in that case.
-void ArtisanGoInvokeHandler(uintptr_t handle);
-void ArtisanGoReleaseHandler(uintptr_t handle);
-
-// Implemented by the Go archive - called from a
-// requestAnimationFrame handle's registered callback. Distinct from
-// ArtisanGoInvokeHandler because rAF passes a timestamp; every other Go
-// handler (SetOnClick/AddEventListener/setTimeout/setInterval) stays
-// zero-arg and goes through ArtisanGoInvokeHandler above.
-void ArtisanGoInvokeAnimationFrameHandler(uintptr_t handle, double timestampMs);
 
 #ifdef __cplusplus
 }

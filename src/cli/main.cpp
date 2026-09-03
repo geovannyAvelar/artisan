@@ -1,7 +1,7 @@
 // artisan-cli - the single entry point that ties artisan's whole
 // workflow together: scaffolding a new project (`new`), and compiling
-// markup (artisanc), native C++ app code, and an optional embedded
-// JavaScript file (embed_text) into one native binary (`build`).
+// markup (artisanc), a compiled ART app, and an embedded JS/JSX script
+// (embed_text) into one native binary (`build`).
 //
 // `build` does not reimplement compilation or linking itself - Skia,
 // lexbor, and QuickJS all need to be found and wired together correctly,
@@ -9,32 +9,22 @@
 // it actually does is discover a project directory's files (see
 // DiscoverProject) and turn them into the right CMake configure + build
 // invocation, substituted in via cache variables (ARTISAN_UI_SOURCES,
-// ARTISAN_APP_CPP_SOURCES, ARTISAN_APP_JS_SOURCE, ARTISAN_APP_JSX_SOURCE,
-// ARTISAN_JS_PRELUDE_SOURCE, ARTISAN_APP_GO_SOURCE) that CMakeLists.txt
-// exposes for exactly this purpose. There's no mode for naming individual
-// files by hand - always a project directory, so there's exactly one way
-// a project is laid out.
+// ARTISAN_APP_ART_SOURCE, ARTISAN_APP_JS_SOURCE, ARTISAN_APP_JSX_SOURCE,
+// ARTISAN_JS_PRELUDE_SOURCE) that CMakeLists.txt exposes for exactly this
+// purpose. There's no mode for naming individual files by hand - always a
+// project directory, so there's exactly one way a project is laid out.
 //
-// `new` writes out a starting point for one native language - ART
-// (app.tsx, see art/, the default - .tsx rather than plain .ts so the
-// scaffold's own UI can be written as JSX, matching its otherwise-bare
-// pages/index.html mount point), with --lang cpp, C++ (src/main.cpp),
-// or with --lang go, Go (goapp/) - a project uses exactly one of these,
-// never more than one (see DiscoverProject). Script (app.js/app.jsx) is
-// orthogonal to that choice and can layer on any of them - --lang js is
-// exactly this, with no native language at all: just a JSX entry point
-// (app.jsx), authored against the framework-agnostic h/Fragment JSX
-// target (see src/js_engine.cpp's "h/Fragment" section) - no UI library
-// needed. README.md's "Using JavaScript" section covers both this and
-// how to bring in a real UI library (e.g. React) instead, if wanted.
-//
-// `component` scaffolds a smaller, reusable pairing within an existing
-// project: a markup fragment (components/<name>.html, meant to be pasted
-// into a page - it isn't itself a routable page) and a matching
-// Setup_<name>(Node&) (src/components/<name>.cpp) the page's own SetupApp
-// calls explicitly with the Node the fragment landed in. There's no
-// automatic markup-embedding here (artisanc compiles each page
-// independently) - this is a naming/wiring convention, not new machinery.
+// `new` writes out a starting point using both of artisan's two app
+// languages together: ART (app.tsx, compiled ahead of time via LLVM -
+// see art/) and JS (app.jsx, interpreted at runtime via QuickJS, real
+// JSX against the framework-agnostic h/Fragment target - see
+// src/js_engine.cpp's "h/Fragment" section, no UI library needed).
+// Neither is required to stay - deleting one leaves a project driven by
+// just the other (see DiscoverProject) - but both are scaffolded from
+// the start, since that's the whole point: two independent ways to
+// drive the same DOM, working side by side on one page. README.md's
+// "Using JavaScript" section also covers bringing in a real UI library
+// (e.g. React) instead of the built-in h/Fragment, if wanted.
 
 #include <algorithm>
 #include <cctype>
@@ -53,11 +43,8 @@ namespace {
 void PrintTopUsage() {
   std::cerr << "usage: artisan-cli <command> [<args>]\n\n"
                "commands:\n"
-               "  new <project-dir>              Scaffold a new native project.\n"
-               "  component <project-dir> <name> Scaffold a reusable\n"
-               "                                  component in an existing\n"
-               "                                  project.\n"
-               "  build                           Compile a project into a binary.\n\n"
+               "  new <project-dir>   Scaffold a new project.\n"
+               "  build               Compile a project into a binary.\n\n"
                "Run `artisan-cli <command>` with no further arguments for\n"
                "that command's own usage.\n";
 }
@@ -77,22 +64,14 @@ void PrintBuildUsage() {
          "        project root's). pages/index.html, if present, is the\n"
          "        page the app opens on. An <a href=\"...\"> anywhere in\n"
          "        the bundle can navigate to any other page by name.\n"
-         "  <project-dir>/src/**/*.cpp      native C++ source, if the\n"
-         "        project uses that language - nesting is just\n"
-         "        organization here (not a route).\n"
-         "  <project-dir>/goapp/            a native Go app instead, if the\n"
-         "        project uses that language - its own go.mod/main.go (see\n"
-         "        go/artisango), compiled ahead of time, never combined\n"
-         "        with src/**/*.cpp or app.ts/app.tsx in the same project.\n"
-         "  <project-dir>/app.tsx           a native ART app instead (see\n"
-         "        art/) - one file (app.ts instead, if you don't need JSX\n"
-         "        in the entry point itself), compiled ahead of time, never\n"
-         "        combined with src/**/*.cpp or goapp/ in the same project.\n"
+         "  <project-dir>/app.tsx           an ART app (see art/) - one\n"
+         "        file (app.ts instead, if you don't need JSX in the\n"
+         "        entry point itself), compiled ahead of time. Optional -\n"
+         "        a project can be JS-only.\n"
          "  <project-dir>/app.js            optional embedded script (or\n"
          "        app.jsx, transformed from real JSX at build time - see\n"
          "        tools/jsx_transform - mutually exclusive with app.js) -\n"
-         "        orthogonal to the native-language choice above, works\n"
-         "        with any of them.\n"
+         "        independent of app.tsx above, works with or without it.\n"
          "  <project-dir>/js-prelude.js     optional second embedded\n"
          "        script, run before app.js/app.jsx - e.g. a vendored UI\n"
          "        library (see third_party/react/ for a ready-made\n"
@@ -103,26 +82,15 @@ void PrintBuildUsage() {
 }
 
 // Single-quotes a path for /bin/sh - safe against spaces and the ';'
-// ARTISAN_APP_CPP_SOURCES packs multiple paths with. Not bulletproof
-// against a literal "'" in a path, which is vanishingly rare for a build
-// tool's own inputs and not worth more complexity to handle perfectly.
+// ARTISAN_UI_SOURCES packs multiple paths with. Not bulletproof against
+// a literal "'" in a path, which is vanishingly rare for a build tool's
+// own inputs and not worth more complexity to handle perfectly.
 std::string ShellQuote(const std::string &text) { return "'" + text + "'"; }
 
-// Joins paths with ';', the separator CMake list-valued cache variables
-// (ARTISAN_UI_SOURCES, ARTISAN_APP_CPP_SOURCES) expect.
-std::string JoinPaths(const std::vector<fs::path> &paths) {
-  std::ostringstream joined;
-  for (size_t i = 0; i < paths.size(); ++i) {
-    if (i > 0) {
-      joined << ";";
-    }
-    joined << paths[i].string();
-  }
-  return joined.str();
-}
-
-// Same as JoinPaths, for entries that are already formatted strings
-// (bare paths or "name=path" - see DiscoverPages) rather than fs::paths.
+// Joins strings with ';', the separator CMake list-valued cache
+// variables (ARTISAN_UI_SOURCES) expect - entries that are already
+// formatted strings (bare paths or "name=path" - see DiscoverPages)
+// rather than fs::paths.
 std::string JoinStrings(const std::vector<std::string> &items) {
   std::ostringstream joined;
   for (size_t i = 0; i < items.size(); ++i) {
@@ -137,25 +105,6 @@ std::string JoinStrings(const std::vector<std::string> &items) {
 int RunCommand(const std::string &command) {
   std::cout << "$ " << command << "\n";
   return std::system(command.c_str());
-}
-
-// Every absolute file with `extension`, anywhere under `dir` (however
-// deeply nested), sorted for a deterministic build across runs/
-// filesystems - directory_iterator order isn't guaranteed. Used for
-// src/**/*.cpp, where nesting is just organization - unlike pages/ below,
-// a .cpp's location doesn't name anything, so no route logic is needed.
-std::vector<fs::path> SortedFilesWithExtensionRecursive(const fs::path &dir,
-                                                         const std::string &extension) {
-  std::vector<fs::path> paths;
-  if (fs::is_directory(dir)) {
-    for (const auto &entry : fs::recursive_directory_iterator(dir)) {
-      if (entry.is_regular_file() && entry.path().extension() == extension) {
-        paths.push_back(fs::absolute(entry.path()));
-      }
-    }
-  }
-  std::sort(paths.begin(), paths.end());
-  return paths;
 }
 
 struct PageEntry {
@@ -213,20 +162,17 @@ std::vector<PageEntry> DiscoverPages(const fs::path &pagesDir) {
 
 struct DiscoveredProject {
   std::vector<std::string> htmlEntries; // "name=absolute/path.html", one per page.
-  std::vector<fs::path> cppPaths;
   fs::path jsPath;             // Empty if app.js doesn't exist.
   fs::path jsxPath;            // Empty if app.jsx doesn't exist.
   fs::path jsPreludePath;      // Empty if js-prelude.js doesn't exist.
-  fs::path goPath;             // Empty if goapp/go.mod doesn't exist.
   fs::path artPath;            // Empty if neither app.ts nor app.tsx exists.
 };
 
 // The layout `artisan-cli new` scaffolds (see RunNew below): every page's
 // markup under pages/ (nested folders form nested routes - see
-// DiscoverPages), every native C++ source under src/, one optional
-// shared app.js at the project root, and one optional shared Go app
-// under goapp/. Exits the process with an error if pages/ is missing or
-// empty - a bundle needs at least one page.
+// DiscoverPages), an optional compiled ART entry point, and an optional
+// embedded JS/JSX script. Exits the process with an error if pages/ is
+// missing or empty - a bundle needs at least one page.
 DiscoveredProject DiscoverProject(const fs::path &projectDir) {
   DiscoveredProject discovered;
 
@@ -241,9 +187,6 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
   for (const PageEntry &page : pages) {
     discovered.htmlEntries.push_back(page.name + "=" + page.path.string());
   }
-
-  discovered.cppPaths =
-      SortedFilesWithExtensionRecursive(projectDir / "src", ".cpp");
 
   // app.js and app.jsx are mutually exclusive, same reasoning as
   // app.ts/app.tsx below - app.jsx needs the JSX transform (see
@@ -269,19 +212,11 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.jsPreludePath = fs::absolute(jsPreludePath);
   }
 
-  // A Go app is its own module (go.mod), not a bag of loose .cpp-style
-  // files - unlike src/**/*.cpp, "every .go file under goapp/" isn't a
-  // meaningful unit to compile on its own, so this only recognizes the
-  // whole directory, gated on go.mod actually being there.
-  fs::path goPath = projectDir / "goapp";
-  if (fs::exists(goPath / "go.mod")) {
-    discovered.goPath = fs::absolute(goPath);
-  }
-
   // An ART app's entry point is a single file, app.ts or app.tsx (the
   // latter needed only to use JSX syntax in the entry point itself - see
   // Parser::jsxEnabled) - see ModuleResolver (art/module_resolver.cpp)
   // for how it pulls in any other .ts/.tsx files it imports from there.
+  // Optional - a project can be JS-only.
   fs::path artTsPath = projectDir / "app.ts";
   fs::path artTsxPath = projectDir / "app.tsx";
   bool hasArtTs = fs::exists(artTsPath);
@@ -298,23 +233,6 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
     discovered.artPath = fs::absolute(artTsxPath);
   }
 
-  // A project drives its DOM natively from exactly one language, never
-  // more than one at once - each of C++/Go/ART runs its own SetupApp-
-  // equivalent against the same page on load, so any two at once would
-  // be independent, unordered sources of truth for the same startup
-  // behavior. Script (app.js/app.jsx) doesn't compete here since it's
-  // already designed to layer on top of whichever native language runs
-  // (or none at all - see --lang js).
-  int nativeLangCount = (!discovered.cppPaths.empty() ? 1 : 0) + (!discovered.goPath.empty() ? 1 : 0) +
-                        (!discovered.artPath.empty() ? 1 : 0);
-  if (nativeLangCount > 1) {
-    std::cerr << "artisan-cli: " << projectDir
-               << " has more than one of src/**/*.cpp, goapp/, and app.ts/app.tsx "
-                  "- a project can only use one native language at a "
-                  "time. Remove the ones you don't want.\n";
-    std::exit(1);
-  }
-
   return discovered;
 }
 
@@ -324,10 +242,8 @@ DiscoveredProject DiscoverProject(const fs::path &projectDir) {
 // derives the page name from its stem) or "name=path" (an explicit name,
 // for a nested route - see DiscoverPages).
 int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
-                       const std::vector<fs::path> &cppAbs,
                        const fs::path &jsAbs, const fs::path &jsxAbs,
-                       const fs::path &jsPreludeAbs, const fs::path &goAbs,
-                       const fs::path &artAbs,
+                       const fs::path &jsPreludeAbs, const fs::path &artAbs,
                        const std::string &buildDirStr,
                        const std::string &outputPathStr, bool run) {
   fs::path projectSourceDir = ARTISAN_PROJECT_SOURCE_DIR;
@@ -339,15 +255,6 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
                << " -DARTISAN_UI_SOURCES="
                << ShellQuote(JoinStrings(htmlEntries));
 
-  // Always set, even when empty: ARTISAN_APP_CPP_SOURCES is a CACHE
-  // STRING with its own default (this repo's own demo src/app.cpp, for
-  // building it directly with plain cmake) that would otherwise stick
-  // around from a previous configure of this same build dir - a Go-only
-  // project (empty cppAbs) needs that cleared, not silently left as
-  // whatever it was, to actually be Go-only.
-  configureCmd << " -DARTISAN_APP_CPP_SOURCES="
-               << ShellQuote(JoinPaths(cppAbs));
-
   configureCmd << " -DARTISAN_APP_JS_SOURCE="
                << ShellQuote(jsAbs.empty() ? "" : jsAbs.string());
 
@@ -357,9 +264,12 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
   configureCmd << " -DARTISAN_JS_PRELUDE_SOURCE="
                << ShellQuote(jsPreludeAbs.empty() ? "" : jsPreludeAbs.string());
 
-  configureCmd << " -DARTISAN_APP_GO_SOURCE="
-               << ShellQuote(goAbs.empty() ? "" : goAbs.string());
-
+  // Always set, even when empty: ARTISAN_APP_ART_SOURCE is a CACHE
+  // STRING with its own default (this repo's own demo assets/app.tsx,
+  // for building it directly with plain cmake) that would otherwise
+  // stick around from a previous configure of this same build dir - a
+  // JS-only project (empty artAbs) needs that cleared, not silently
+  // left as whatever it was, to actually be JS-only.
   configureCmd << " -DARTISAN_APP_ART_SOURCE="
                << ShellQuote(artAbs.empty() ? "" : artAbs.string());
 
@@ -406,15 +316,17 @@ int ConfigureAndBuild(const std::vector<std::string> &htmlEntries,
 }
 
 void PrintNewUsage() {
-  std::cerr << "usage: artisan-cli new <project-dir> [--lang art|cpp|go|js]\n\n"
-               "Scaffolds a new artisan project at <project-dir>:\n"
-               "  pages/index.html   starter markup - the page the app\n"
-               "                     opens on; add more pages/*.html (or\n"
+  std::cerr << "usage: artisan-cli new <project-dir>\n\n"
+               "Scaffolds a new artisan project at <project-dir>, using\n"
+               "artisan's two app languages together:\n"
+               "  pages/index.html   a bare mount point (<div id=\"art-\n"
+               "                     root\">/<div id=\"js-root\">) - the\n"
+               "                     real UI is built in app.tsx/app.jsx\n"
+               "                     below. Add more pages/*.html (or\n"
                "                     pages/some-folder/*.html for a nested\n"
                "                     route, Next.js-style) and link between\n"
                "                     them with <a href=\"...\">\n\n"
-               "  --lang art (default)\n"
-               "    app.tsx          an ART app (see art/) - a statically\n"
+               "  app.tsx            an ART app (see art/) - a statically\n"
                "                     typed, TypeScript-like language\n"
                "                     compiled ahead of time with the ART\n"
                "                     compiler, with JSX (<div>...</div>)\n"
@@ -422,34 +334,21 @@ void PrintNewUsage() {
                "                     run once per page load, and code\n"
                "                     reaches the DOM through the ambient\n"
                "                     `document` - see README.md's \"Using\n"
-               "                     ART\" section. pages/index.html is\n"
-               "                     just a bare mount point here; the\n"
-               "                     real UI is built in app.tsx.\n\n"
-               "  --lang cpp\n"
-               "    src/main.cpp     native SetupApp(Node&) - see\n"
-               "                     include/app.h. Add more src/*.cpp as\n"
-               "                     the project grows - every one gets\n"
-               "                     compiled in, no need to list them.\n\n"
-               "  --lang go\n"
-               "    goapp/           a Go app (go.mod/main.go) exporting\n"
-               "                     ArtisanSetupApp - see go/artisango and\n"
-               "                     README.md's \"Using Go\" section.\n\n"
-               "  --lang js\n"
-               "    app.jsx          real JSX - no native language at\n"
-               "                     all, just a JSX entry point\n"
-               "                     (transformed to plain JS at build\n"
-               "                     time - see tools/jsx_transform),\n"
+               "                     ART\" section.\n\n"
+               "  app.jsx            real JSX (transformed to plain JS at\n"
+               "                     build time - see tools/jsx_transform),\n"
                "                     against a built-in, zero-dependency\n"
                "                     h(tag, props, ...children)/Fragment\n"
                "                     (see src/js_engine.cpp's \"h/\n"
                "                     Fragment\" section) - no UI library\n"
-               "                     needed. Needs Go too (for the JSX\n"
-               "                     build step) - see README.md's\n"
-               "                     \"Using JavaScript\" section,\n"
-               "                     including how to bring in a real UI\n"
-               "                     library (e.g. React) instead.\n\n"
-               "A project uses one native language, never more than one\n"
-               "(--lang js uses none at all).\n"
+               "                     needed. Needs Go (for the JSX build\n"
+               "                     step) - see README.md's \"Using\n"
+               "                     JavaScript\" section, including how\n"
+               "                     to bring in a real UI library (e.g.\n"
+               "                     React) instead.\n\n"
+               "Either file can be deleted afterward, leaving a project\n"
+               "driven by just the other one (see README.md's \"Building a\n"
+               "project\" section).\n"
                "Build it afterward with:\n"
                "  artisan-cli build <project-dir>\n";
 }
@@ -463,58 +362,32 @@ void WriteFile(const fs::path &path, const std::string &contents) {
   out << contents;
 }
 
+// A JSX-driven project's own index.html - both app.tsx and app.jsx build
+// their actual UI at runtime, the same way a bundler-based React app's
+// own index.html is normally just a mount point too - the interesting
+// markup lives in code, not here. Two independent mount points, one per
+// language, so the scaffold reads as "two systems working side by
+// side," not one merged tree. Still real HTML artisanc compiles ahead
+// of time like any other page (DiscoverPages requires at least one),
+// just about as bare as one can be while still giving app.tsx/app.jsx
+// an id each to find and build into. kAppArtTemplate/kAppJsTemplate
+// below use "art-"/"js-"-prefixed ids throughout for exactly this
+// reason too - document.getElementById searches the *whole* document,
+// not just the caller's own mount point, so two counters sharing a
+// plain "count-label" id would silently read/write each other's
+// element instead of their own (a real bug this scaffold hit and fixed
+// during development).
 constexpr const char *kIndexHtmlTemplate = R"html(<!doctype html>
 <html>
   <head>
     <title>My artisan app</title>
   </head>
   <body>
-    <h1>Hello, artisan</h1>
-    <p>Edit index.html and main.cpp to get started.</p>
+    <div id="art-root"></div>
+    <div id="js-root"></div>
   </body>
 </html>
 )html";
-
-// A JSX-driven project's own index.html - `--lang art` (the default) and
-// `--lang js` both build their actual UI at runtime (app.tsx/app.jsx),
-// the same way a bundler-based React app's own index.html is normally
-// just a mount point too - the interesting markup lives in code, not
-// here. Still real HTML artisanc compiles ahead of time like any other
-// page (DiscoverPages requires at least one), just about as bare as one
-// can be while still giving app.tsx/app.jsx an id to find and build into.
-constexpr const char *kIndexHtmlTemplateMinimal = R"html(<!doctype html>
-<html>
-  <head>
-    <title>My artisan app</title>
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
-</html>
-)html";
-
-// SetupApp(Node&) is the native counterpart to a script's top-level code
-// (see include/js_engine.h) - plain compiled C++ against the same Node
-// API, run once when the app starts. include/app.h has the full picture;
-// dom_node.h documents Node itself (FindById, SetAttribute,
-// SetTextContent, SetOnClick, AppendChild, ...).
-constexpr const char *kMainCppTemplate = R"cpp(#include "app.h"
-
-namespace artisan {
-
-void SetupApp(Node &document) {
-  // Your native startup code goes here, e.g.:
-  //
-  //   Node *button = document.FindById("my-button");
-  //   if (button != nullptr) {
-  //     button->SetOnClick([]() {
-  //       // ...
-  //     });
-  //   }
-}
-
-} // namespace artisan
-)cpp";
 
 // setupApp is the ART counterpart to SetupApp/ArtisanSetupApp above - see
 // art_bridge.h for the full `declare`-able DOM API and README.md's "Using
@@ -543,7 +416,7 @@ let clickCount: number = 0;
 // instead, e.g. `document.getElementById(id)`.
 function onButtonClick(event: Event): void {
   clickCount++;
-  let label: Node = document.getElementById("count-label");
+  let label: Node = document.getElementById("art-count-label");
   if (!label.isNull()) {
     label.textContent = `Clicked ${numberToString(clickCount)} times`;
   }
@@ -565,20 +438,23 @@ function onButtonClick(event: Event): void {
 // required here).
 //
 // pages/index.html is deliberately just a mount point (a bare <div
-// id="root">) - the actual UI is built here, in code, the same way a
-// bundler-based React app's own index.html usually just has one too.
-let root: Node = document.getElementById("root");
+// id="art-root">) - the actual UI is built here, in code, the same way
+// a bundler-based React app's own index.html usually just has one too.
+// A separate <div id="js-root"> right next to it is where app.jsx
+// mounts its own, independent counter - two ways to drive the same
+// page, side by side.
+let root: Node = document.getElementById("art-root");
 if (!root.isNull()) {
   root.appendChild(
     <div>
-      <p id="count-label">{"Clicked 0 times"}</p>
+      <p id="art-count-label">{"Clicked 0 times"}</p>
       <button onclick={onButtonClick}>{"Click me"}</button>
     </div>
   );
 }
 )art";
 
-// A --lang js project's own app.jsx: real JSX (compiled to plain JS by
+// A new project's own app.jsx: real JSX (compiled to plain JS by
 // tools/jsx_transform at build time - see CMakeLists.txt's
 // ARTISAN_APP_JSX_SOURCE handling), against the built-in, framework-
 // agnostic h()/Fragment (see src/js_engine.cpp's "h/Fragment" section) -
@@ -593,167 +469,28 @@ constexpr const char *kAppJsTemplate = R"jsx(// Your app's own JSX code goes her
 // JavaScript" section, including how to bring in a real UI library
 // (e.g. React) instead of the built-in h()/Fragment, if you want one.
 // pages/index.html is deliberately just a mount point (a bare
-// <div id="root">) - the actual UI is built here, in code.
+// <div id="js-root">) - the actual UI is built here, in code. A
+// separate <div id="art-root"> right next to it is where app.tsx
+// mounts its own, independent counter - two ways to drive the same
+// page, side by side.
 
 let clickCount = 0;
 
 function onButtonClick() {
   clickCount++;
-  document.getElementById("count-label").textContent = `Clicked ${clickCount} times`;
+  document.getElementById("js-count-label").textContent = `Clicked ${clickCount} times`;
 }
 
-let root = document.getElementById("root");
+let root = document.getElementById("js-root");
 if (root) {
   root.appendChild(
     <div>
-      <p id="count-label">Clicked {clickCount} times</p>
+      <p id="js-count-label">Clicked {clickCount} times</p>
       <button onclick={onButtonClick}>Click me</button>
     </div>
   );
 }
 )jsx";
-
-// go.mod's replace directive needs an absolute path to go/artisango - the
-// same checkout artisan-cli itself was built from (ARTISAN_PROJECT_SOURCE_DIR,
-// already how ConfigureAndBuild finds this repo's own CMakeLists.txt), since
-// artisango isn't a published module a project could otherwise `go get`.
-std::string GoModTemplate() {
-  fs::path artisangoPath =
-      fs::path(ARTISAN_PROJECT_SOURCE_DIR) / "go" / "artisango";
-  std::ostringstream out;
-  out << "module goapp\n\n"
-      << "go 1.21\n\n"
-      << "require artisango v0.0.0\n\n"
-      << "replace artisango => " << artisangoPath.string() << "\n";
-  return out.str();
-}
-
-// Lets a C++ project build directly with plain cmake/ninja - no
-// artisan-cli involved - by discovering the same pages/**/*.html,
-// src/**/*.cpp, and app.js this project's own artisan-cli build already
-// would, in CMake itself, then add_subdirectory()-ing the artisan
-// checkout with those computed as CACHE variables (the exact mechanism
-// ConfigureAndBuild already drives via -D flags - a CACHE variable set
-// here before add_subdirectory() seeds the subdirectory's own `set(...
-// CACHE ...)` calls the same way a command-line -D would).
-//
-// This is a second implementation of DiscoverProject/DiscoverPages
-// (src/cli/main.cpp) in CMake's own glob/string/regex vocabulary, not a
-// call back into artisan-cli - keep the two in sync if that discovery
-// logic ever changes. One simplification versus DiscoverPages: only the
-// index page's position is functionally significant (main.cpp opens on
-// pages.front()), so this doesn't bother fully replicating its
-// alphabetical re-sort for the rest - just a plain list(SORT) for
-// reasonable determinism, with the index entry (if any) forced to the
-// front afterward.
-std::string CMakeListsTemplate() {
-  fs::path artisanCheckout = fs::path(ARTISAN_PROJECT_SOURCE_DIR);
-  std::ostringstream out;
-  out << R"cmake(cmake_minimum_required(VERSION 3.20)
-
-get_filename_component(ARTISAN_PROJECT_NAME "${CMAKE_CURRENT_SOURCE_DIR}" NAME)
-project(${ARTISAN_PROJECT_NAME} LANGUAGES CXX)
-
-# Path to the artisan framework checkout this project was scaffolded
-# from - update this if that checkout moves (same constraint
-# goapp/go.mod's `replace` line has for a Go project - see README).
-# Needs Skia already built there (./build_skia.sh) - this file only
-# builds this project, it doesn't build Skia itself.
-set(ARTISAN_CHECKOUT_DIR ")cmake"
-      << artisanCheckout.string() << R"cmake(" CACHE PATH
-    "Path to the artisan framework checkout")
-
-# --- Page discovery: pages/**/*.html -> route=path, Next.js-style
-# nested routes (pages/settings/profile.html -> "settings/profile"; a
-# folder's own index.html stands for that folder's route, e.g.
-# pages/settings/index.html -> "settings"). The top-level pages/index.html
-# stays "index" and is forced to the front below, since it's the page
-# the app opens on.
-file(GLOB_RECURSE ARTISAN_PAGE_FILES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/pages/*.html")
-
-set(ARTISAN_UI_SOURCES_LIST "")
-set(ARTISAN_INDEX_ENTRY "")
-foreach(page_file ${ARTISAN_PAGE_FILES})
-    file(RELATIVE_PATH route_name "${CMAKE_CURRENT_SOURCE_DIR}/pages" "${page_file}")
-    string(REGEX REPLACE "\\.html$" "" route_name "${route_name}")
-    string(REGEX REPLACE "^(.+)/index$" "\\1" route_name "${route_name}")
-    set(entry "${route_name}=${page_file}")
-    if(route_name STREQUAL "index")
-        set(ARTISAN_INDEX_ENTRY "${entry}")
-    else()
-        list(APPEND ARTISAN_UI_SOURCES_LIST "${entry}")
-    endif()
-endforeach()
-list(SORT ARTISAN_UI_SOURCES_LIST)
-if(NOT ARTISAN_INDEX_ENTRY STREQUAL "")
-    list(PREPEND ARTISAN_UI_SOURCES_LIST "${ARTISAN_INDEX_ENTRY}")
-endif()
-
-if(ARTISAN_UI_SOURCES_LIST STREQUAL "")
-    message(FATAL_ERROR "No pages/**/*.html found - a project needs at least one page")
-endif()
-
-# --- Native C++ source discovery: every src/**/*.cpp - a .cpp's
-# location is just organization, no route logic needed.
-file(GLOB_RECURSE ARTISAN_APP_CPP_SOURCES_LIST CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-list(SORT ARTISAN_APP_CPP_SOURCES_LIST)
-
-set(ARTISAN_APP_JS_SOURCE_VALUE "")
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.js")
-    set(ARTISAN_APP_JS_SOURCE_VALUE "${CMAKE_CURRENT_SOURCE_DIR}/app.js")
-endif()
-
-set(ARTISAN_UI_SOURCES "${ARTISAN_UI_SOURCES_LIST}" CACHE STRING "" FORCE)
-set(ARTISAN_APP_CPP_SOURCES "${ARTISAN_APP_CPP_SOURCES_LIST}" CACHE STRING "" FORCE)
-set(ARTISAN_APP_JS_SOURCE "${ARTISAN_APP_JS_SOURCE_VALUE}" CACHE STRING "" FORCE)
-set(ARTISAN_APP_GO_SOURCE "" CACHE STRING "" FORCE)
-
-# Pulls in the real `artisan` executable target (and everything else the
-# checkout's own CMakeLists.txt defines - artisanc, artisan_cli, ...) -
-# `cmake --build build --target artisan` builds just this project's
-# binary; a plain `cmake --build build` (no --target) builds those too.
-# Via the ARTISAN_CHECKOUT_DIR cache variable (not the literal path
-# above again) so overriding it - e.g. `cmake -B build
-# -DARTISAN_CHECKOUT_DIR=...` after moving the checkout - actually takes
-# effect, rather than only updating a comment nobody re-reads.
-add_subdirectory("${ARTISAN_CHECKOUT_DIR}" artisan_build)
-)cmake";
-  return out.str();
-}
-
-// ArtisanSetupApp is the Go counterpart to SetupApp above - see
-// go/artisango's own doc comment for the full picture. The trampoline
-// (ArtisanSetupApp/unsafe.Pointer) is boilerplate every Go app needs
-// verbatim; SetupApp itself is where a project's own code goes.
-constexpr const char *kMainGoTemplate = R"go(package main
-
-import "C"
-import (
-	"unsafe"
-
-	"artisango"
-)
-
-func SetupApp(doc artisango.Node) {
-	// Your native startup code goes here, e.g.:
-	//
-	//   button := doc.FindById("my-button")
-	//   if button != nil {
-	//     button.SetOnClick(func() {
-	//       // ...
-	//     })
-	//   }
-}
-
-//export ArtisanSetupApp
-func ArtisanSetupApp(doc unsafe.Pointer) {
-	SetupApp(artisango.WrapNode(doc))
-}
-
-func main() {}
-)go";
 
 // Creates `dir` (including any missing parents) or exits the process with
 // an error - used for both the project root and its pages/src
@@ -769,34 +506,12 @@ void CreateDirectory(const fs::path &dir) {
 }
 
 int RunNew(int argc, char *argv[]) {
-  if (argc < 3) {
+  if (argc != 3) {
     PrintNewUsage();
     return 1;
   }
 
   fs::path projectDir = argv[2];
-  std::string lang = "art";
-
-  for (int i = 3; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "--lang") {
-      if (i + 1 >= argc) {
-        std::cerr << "artisan-cli: --lang needs a value\n";
-        return 1;
-      }
-      lang = argv[++i];
-    } else {
-      std::cerr << "artisan-cli: unknown argument " << arg << "\n";
-      PrintNewUsage();
-      return 1;
-    }
-  }
-
-  if (lang != "cpp" && lang != "go" && lang != "art" && lang != "js") {
-    std::cerr << "artisan-cli: --lang must be \"cpp\", \"go\", \"art\", or \"js\", got \""
-               << lang << "\"\n";
-    return 1;
-  }
 
   if (fs::exists(projectDir)) {
     if (!fs::is_directory(projectDir)) {
@@ -812,200 +527,24 @@ int RunNew(int argc, char *argv[]) {
     CreateDirectory(projectDir);
   }
 
-  bool usesMinimalShell = lang == "art" || lang == "js";
   CreateDirectory(projectDir / "pages");
-  WriteFile(projectDir / "pages" / "index.html",
-            usesMinimalShell ? kIndexHtmlTemplateMinimal : kIndexHtmlTemplate);
+  WriteFile(projectDir / "pages" / "index.html", kIndexHtmlTemplate);
+  WriteFile(projectDir / "app.tsx", kAppArtTemplate);
+  WriteFile(projectDir / "app.jsx", kAppJsTemplate);
 
-  if (lang == "go") {
-    CreateDirectory(projectDir / "goapp");
-    WriteFile(projectDir / "goapp" / "go.mod", GoModTemplate());
-    WriteFile(projectDir / "goapp" / "main.go", kMainGoTemplate);
-  } else if (lang == "art") {
-    WriteFile(projectDir / "app.tsx", kAppArtTemplate);
-  } else if (lang == "js") {
-    WriteFile(projectDir / "app.jsx", kAppJsTemplate);
-  } else {
-    CreateDirectory(projectDir / "src");
-    WriteFile(projectDir / "src" / "main.cpp", kMainCppTemplate);
-    WriteFile(projectDir / "CMakeLists.txt", CMakeListsTemplate());
-  }
-
-  std::string langLabel =
-      lang == "go" ? "Go" : lang == "art" ? "ART" : lang == "js" ? "JavaScript" : "C++";
-  std::cout << "artisan-cli: created a new " << langLabel
-            << " project at " << fs::absolute(projectDir).string() << "\n\n"
+  std::cout << "artisan-cli: created a new project at "
+            << fs::absolute(projectDir).string() << "\n\n"
             << "Next steps:\n"
             << "  artisan-cli build " << fs::absolute(projectDir).string()
             << " --run\n";
   return 0;
 }
 
-void PrintComponentUsage() {
-  std::cerr
-      << "usage: artisan-cli component <project-dir> <name>\n\n"
-         "Scaffolds a reusable component in an existing project:\n"
-         "  components/<name>.html     markup fragment (with a starter\n"
-         "                             <style> block scoped to its own\n"
-         "                             id) - paste this into any page\n"
-         "                             under pages/ wherever you want it\n"
-         "                             to appear. Not itself a routable\n"
-         "                             page.\n"
-         "  src/components/<name>.cpp  Setup_<name>(Node&) - call it from\n"
-         "                             that page's SetupApp (or another\n"
-         "                             component's) with the Node the\n"
-         "                             fragment landed in. Auto-discovered\n"
-         "                             and compiled in like any other\n"
-         "                             src/**/*.cpp - no extra wiring.\n";
-}
-
-// Mirrors artisanc's own SanitizeIdentifier (src/compiler/main.cpp): a
-// component name is arbitrary user-facing text (may have hyphens, like an
-// id - "my-button"), but the C++ function built from it needs to be a
-// valid identifier - "Setup_my_button".
-std::string SanitizeIdentifier(const std::string &name) {
-  std::string out = name;
-  for (char &c : out) {
-    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
-      c = '_';
-    }
-  }
-  if (!out.empty() && std::isdigit(static_cast<unsigned char>(out.front()))) {
-    out = "_" + out;
-  }
-  return out.empty() ? "_" : out;
-}
-
-std::string ComponentHtmlTemplate(const std::string &name) {
-  std::string identifier = SanitizeIdentifier(name);
-  std::ostringstream out;
-  out << "<!--\n"
-      << "  \"" << name << "\" component markup - paste this into any page\n"
-      << "  under pages/ wherever you want it to appear, then wire it up\n"
-      << "  by calling Setup_" << identifier << "(...) from that page's\n"
-      << "  SetupApp with the Node it landed in (see\n"
-      << "  src/components/" << name << ".cpp).\n"
-      << "-->\n"
-      << "<style>\n"
-      << "  /* Selectors here apply to the whole page once pasted in, not\n"
-      << "     just this fragment (see README.md's \"Using CSS\") - no\n"
-      << "     descendant selectors (e.g. \"#" << name << " p\"), only\n"
-      << "     tag/.class/#id and compounds of these, so keep them scoped\n"
-      << "     to this component's own id/classes to avoid styling the\n"
-      << "     rest of the page by accident.\n"
-      << "  */\n"
-      << "  #" << name << " {\n"
-      << "    /* Component styles go here, e.g.: */\n"
-      << "    /* background-color: #f5f5f5; */\n"
-      << "  }\n"
-      << "</style>\n"
-      << "<div id=\"" << name << "\">\n"
-      << "  <!-- Component markup goes here. -->\n"
-      << "</div>\n";
-  return out.str();
-}
-
-std::string ComponentCppTemplate(const std::string &name) {
-  std::string identifier = SanitizeIdentifier(name);
-  std::ostringstream out;
-  out << "#include \"dom_node.h\"\n"
-      << "#include \"hooks.h\"\n\n"
-      << "namespace artisan {\n\n"
-      << "// Wires up the \"" << name << "\" component - call this from\n"
-      << "// SetupApp (see app.h) or another component's setup function,\n"
-      << "// passing the Node this component's markup\n"
-      << "// (components/" << name << ".html) landed in, e.g.:\n"
-      << "//\n"
-      << "//   Node *" << identifier << " = document.FindById(\"" << name
-      << "\");\n"
-      << "//   if (" << identifier << " != nullptr) {\n"
-      << "//     Setup_" << identifier << "(*" << identifier << ");\n"
-      << "//   }\n"
-      << "void Setup_" << identifier << "(Node &root) {\n"
-      << "  // Your component's native startup code goes here, e.g.:\n"
-      << "  //\n"
-      << "  //   Node *button = root.FindById(\"" << name << "-button\");\n"
-      << "  //   if (button != nullptr) {\n"
-      << "  //     button->SetOnClick([]() {\n"
-      << "  //       // ...\n"
-      << "  //     });\n"
-      << "  //   }\n"
-      << "  //\n"
-      << "  // Need state a handler can read/update across calls? Use\n"
-      << "  // UseState (hooks.h) instead of a class or a hand-rolled\n"
-      << "  // shared_ptr - Setup_" << identifier << " still only runs once,\n"
-      << "  // so it's the handlers that close over the state, e.g.:\n"
-      << "  //\n"
-      << "  //   auto [count, setCount] = UseState(0);\n"
-      << "  //   Node *label = root.FindById(\"" << name << "-count\");\n"
-      << "  //   if (button != nullptr && label != nullptr) {\n"
-      << "  //     button->SetOnClick([=]() mutable {\n"
-      << "  //       setCount(count() + 1);\n"
-      << "  //       label->SetTextContent(std::to_string(count()));\n"
-      << "  //     });\n"
-      << "  //   }\n"
-      << "}\n\n"
-      << "} // namespace artisan\n";
-  return out.str();
-}
-
-bool IsValidComponentName(const std::string &name) {
-  return !name.empty() && name != "." && name != ".." &&
-         name.find('/') == std::string::npos;
-}
-
-int RunComponent(int argc, char *argv[]) {
-  if (argc != 4) {
-    PrintComponentUsage();
-    return 1;
-  }
-
-  fs::path projectDir = argv[2];
-  std::string name = argv[3];
-
-  if (!fs::is_directory(projectDir)) {
-    std::cerr << "artisan-cli: " << projectDir << " is not a directory\n";
-    return 1;
-  }
-
-  if (!IsValidComponentName(name)) {
-    std::cerr << "artisan-cli: \"" << name
-               << "\" isn't a valid component name - no '/', and not empty, "
-                  "\".\", or \"..\"\n";
-    return 1;
-  }
-
-  fs::path htmlPath = projectDir / "components" / (name + ".html");
-  fs::path cppPath = projectDir / "src" / "components" / (name + ".cpp");
-
-  if (fs::exists(htmlPath) || fs::exists(cppPath)) {
-    std::cerr << "artisan-cli: " << (fs::exists(htmlPath) ? htmlPath : cppPath)
-               << " already exists - refusing to overwrite\n";
-    return 1;
-  }
-
-  CreateDirectory(htmlPath.parent_path());
-  CreateDirectory(cppPath.parent_path());
-
-  WriteFile(htmlPath, ComponentHtmlTemplate(name));
-  WriteFile(cppPath, ComponentCppTemplate(name));
-
-  std::cout << "artisan-cli: created component \"" << name << "\" at\n"
-            << "  " << fs::absolute(htmlPath).string() << "\n"
-            << "  " << fs::absolute(cppPath).string() << "\n\n"
-            << "Next steps:\n"
-            << "  1. Paste the markup from " << htmlPath.filename().string()
-            << " into a page under pages/.\n"
-            << "  2. In that page's SetupApp, find it by id and call\n"
-            << "     Setup_" << SanitizeIdentifier(name) << "(...).\n";
-  return 0;
-}
-
 } // namespace
 
 // `artisan-cli build <project-dir> [--build-dir <dir>] [-o <output>]
-// [--run]` - always a project directory; its pages/src or goapp/app.js
-// get discovered instead of named one by one (see DiscoverProject).
+// [--run]` - always a project directory; its app.tsx/app.js(x) get
+// discovered instead of named one by one (see DiscoverProject).
 int RunBuild(int argc, char *argv[]) {
   if (argc < 3) {
     PrintBuildUsage();
@@ -1047,11 +586,10 @@ int RunBuild(int argc, char *argv[]) {
     }
   }
 
-  return ConfigureAndBuild(discovered.htmlEntries, discovered.cppPaths,
-                            discovered.jsPath, discovered.jsxPath,
-                            discovered.jsPreludePath, discovered.goPath,
-                            discovered.artPath, buildDirStr,
-                            outputPathStr, run);
+  return ConfigureAndBuild(discovered.htmlEntries, discovered.jsPath,
+                            discovered.jsxPath, discovered.jsPreludePath,
+                            discovered.artPath, buildDirStr, outputPathStr,
+                            run);
 }
 
 int main(int argc, char *argv[]) {
@@ -1063,9 +601,6 @@ int main(int argc, char *argv[]) {
   std::string command = argv[1];
   if (command == "new") {
     return RunNew(argc, argv);
-  }
-  if (command == "component") {
-    return RunComponent(argc, argv);
   }
   if (command == "build") {
     return RunBuild(argc, argv);

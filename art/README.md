@@ -48,11 +48,12 @@ The easiest way to use ART is through `artisan-cli`, which never
 requires touching this directory directly:
 
 ```bash
-artisan-cli new my-app  # --lang art is the default
+artisan-cli new my-app
 artisan-cli build my-app --run
 ```
 
-That scaffolds a single `app.tsx`: a clean `import { Node, Event } from
+That scaffolds `app.tsx` (alongside `app.jsx` - see the root README's
+"Using JavaScript" section): a clean `import { Node, Event } from
 "art";` plus a small JSX-driven counter, which is where your own code
 goes (`.tsx` rather than plain `.ts` so it can use JSX - see [JSX
 (.tsx)](#jsx-tsx) below - and `pages/index.html` is deliberately just a

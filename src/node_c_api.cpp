@@ -2,9 +2,6 @@
 
 #include "css.h"
 #include "dom_node.h"
-#include "node_c_api_bridge.h"
-
-#include <SDL2/SDL.h>
 
 #include <algorithm>
 #include <cctype>
@@ -27,55 +24,9 @@ ArtisanNode *FromNode(Node *node) {
 
 char *CopyString(const std::string &s) { return strdup(s.c_str()); }
 
-// A copyable handle to a Go closure, for Node::ClickHandler
-// (std::function<void()>, which type-erases via a copyable target) - the
-// Go-side counterpart to JsCallback in js_engine.cpp. Unlike a JSValue, a
-// cgo.Handle has no "dup" operation (Delete()-ing it twice panics), so
-// this shares one release across every copy via shared_ptr's refcounting
-// instead of manually duplicating/freeing on every copy/destroy the way
-// JsCallback does with JS_DupValue/JS_FreeValue. Used for both
-// ArtisanNodeSetOnClick and ArtisanNodeAddEventListener below - unlike
-// JS (which needs a real {type, target} event object per call, hence
-// js_engine.cpp's JsCallback/JsTimerCallback split), every Go handler is
-// uniformly zero-arg regardless of what registered it, so one class
-// covers both - it has both a zero-arg operator() (for
-// Node::ClickHandler/SetOnClick) and an Event-taking one that just
-// ignores the argument (for Node::EventHandler/AddEventListener), rather
-// than one of the two call sites wrapping this in an adapter lambda:
-// ArtisanNodeRemoveEventListener needs `handler.target<GoCallback>()` to
-// actually recover a GoCallback (see JsCallback::Matches in
-// js_engine.cpp for the same requirement on the JS side), which only
-// works if a GoCallback is literally what got stored in the
-// std::function, not some lambda wrapping one.
-class GoCallback {
-public:
-  explicit GoCallback(uintptr_t handle)
-      : handle_(new uintptr_t(handle), [](uintptr_t *h) {
-          ArtisanGoReleaseHandler(*h);
-          delete h;
-        }) {}
-
-  void operator()() const { ArtisanGoInvokeHandler(*handle_); }
-  void operator()(const artisan::Event &) const { ArtisanGoInvokeHandler(*handle_); }
-  void operator()(double timestampMs) const {
-    ArtisanGoInvokeAnimationFrameHandler(*handle_, timestampMs);
-  }
-
-  // Whether `handle` is the exact value this GoCallback was constructed
-  // with - what ArtisanNodeRemoveEventListener's "same handler" matching
-  // needs (a cgo.Handle is already a stable, comparable identity, unlike
-  // JsCallback::Matches in js_engine.cpp, which has to compare a JSValue
-  // by tag+pointer instead).
-  bool Matches(uintptr_t handle) const { return *handle_ == handle; }
-
-private:
-  std::shared_ptr<uintptr_t> handle_;
-};
-
-// classList's "class" attribute token manipulation - a Go-side
-// duplicate of js_engine.cpp's SplitClassTokens/JoinClassTokens/
-// WriteClassTokens (same reasoning as GoCallback vs JsCallback above:
-// small and self-contained enough that keeping the two bindings
+// classList's "class" attribute token manipulation - own copy of
+// js_engine.cpp's SplitClassTokens/JoinClassTokens/WriteClassTokens
+// (small and self-contained enough that keeping the two bindings
 // independent beats sharing it through a new css.h entry point).
 std::vector<std::string> SplitClassTokens(const std::string &classAttr) {
   std::vector<std::string> tokens;
@@ -106,7 +57,7 @@ void WriteClassTokens(Node &node, const std::vector<std::string> &tokens) {
   }
 }
 
-// dataset's data-* convention - a Go-side duplicate of js_engine.cpp's
+// dataset's data-* convention - own copy of js_engine.cpp's
 // DataNameToAttribute, same reasoning as above.
 std::string DataNameToAttribute(const std::string &name) {
   std::string result = "data-";
@@ -155,24 +106,7 @@ std::unique_ptr<Node> TakePending(Node *child) {
   return owned;
 }
 
-// What ArtisanSetTimeout/SetInterval/RequestAnimationFrame schedule
-// into - set by SetGoTimerContext (node_c_api_bridge.h) before
-// ArtisanSetupApp runs, same "one instance at a time" precedent
-// g_pendingNodes above already establishes. nullptr (the pre-SetupApp
-// default) makes those three functions safe, id-0-returning no-ops.
-artisan::TimerQueue *g_timerQueue = nullptr;
-artisan::AnimationFrameQueue *g_animationFrames = nullptr;
-
 } // namespace
-
-namespace artisan {
-
-void SetGoTimerContext(TimerQueue &timers, AnimationFrameQueue &animationFrames) {
-  g_timerQueue = &timers;
-  g_animationFrames = &animationFrames;
-}
-
-} // namespace artisan
 
 extern "C" {
 
@@ -311,31 +245,6 @@ ArtisanNode *ArtisanNodeCloneNode(ArtisanNode *node, bool deep) {
   return RegisterPending(ToNode(node)->CloneNode(deep));
 }
 
-void ArtisanNodeAddEventListener(ArtisanNode *node, const char *eventType,
-                                  uintptr_t handle, bool capture) {
-  ToNode(node)->AddEventListener(eventType, GoCallback(handle), capture);
-}
-
-void ArtisanNodeRemoveEventListener(ArtisanNode *node, const char *eventType,
-                                     uintptr_t handle, bool capture) {
-  ToNode(node)->RemoveEventListener(
-      eventType, capture, [handle](const artisan::EventHandler &h) {
-        const GoCallback *cb = h.target<GoCallback>();
-        return cb != nullptr && cb->Matches(handle);
-      });
-}
-
-bool ArtisanNodeDispatchEvent(ArtisanNode *node, const char *eventType,
-                               bool bubbles, bool cancelable) {
-  bool defaultPrevented =
-      ToNode(node)->DispatchEvent(eventType, bubbles, cancelable);
-  return !defaultPrevented;
-}
-
-void ArtisanNodeSetOnClick(ArtisanNode *node, uintptr_t handle) {
-  ToNode(node)->SetOnClick(GoCallback(handle));
-}
-
 void ArtisanNodeClassListAdd(ArtisanNode *node, const char *name) {
   Node *n = ToNode(node);
   const std::string *classAttr = n->GetAttribute("class");
@@ -405,43 +314,6 @@ char *ArtisanNodeGetData(ArtisanNode *node, const char *name) {
 void ArtisanNodeSetData(ArtisanNode *node, const char *name,
                          const char *value) {
   ToNode(node)->SetAttribute(DataNameToAttribute(name), value);
-}
-
-int ArtisanSetTimeout(uintptr_t handle, double delayMs) {
-  if (g_timerQueue == nullptr) {
-    return 0;
-  }
-  return g_timerQueue->Schedule(
-      GoCallback(handle), SDL_GetTicks(),
-      delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/false);
-}
-
-int ArtisanSetInterval(uintptr_t handle, double delayMs) {
-  if (g_timerQueue == nullptr) {
-    return 0;
-  }
-  return g_timerQueue->Schedule(
-      GoCallback(handle), SDL_GetTicks(),
-      delayMs > 0 ? static_cast<uint32_t>(delayMs) : 0, /*repeating=*/true);
-}
-
-void ArtisanClearTimer(int id) {
-  if (g_timerQueue != nullptr) {
-    g_timerQueue->Cancel(id);
-  }
-}
-
-int ArtisanRequestAnimationFrame(uintptr_t handle) {
-  if (g_animationFrames == nullptr) {
-    return 0;
-  }
-  return g_animationFrames->Schedule(GoCallback(handle));
-}
-
-void ArtisanCancelAnimationFrame(int id) {
-  if (g_animationFrames != nullptr) {
-    g_animationFrames->Cancel(id);
-  }
 }
 
 void ArtisanFreeString(char *str) { free(str); }

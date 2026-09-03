@@ -3,22 +3,24 @@
 A framework for building native desktop apps from HTML-like markup. Markup
 is compiled ahead-of-time (by `artisanc`) into a widget tree baked straight
 into the binary, and rendered with Skia - no browser, no webview. App
-behavior can be ART (a statically typed, TypeScript-like language compiled
-ahead of time via LLVM - the default), plain C++ (`SetupApp(Node&)`), a
-compiled Go app, or an embedded JavaScript file - all four drive the same
-mutable DOM (`Node`) at runtime, and none of them know the others exist.
+behavior comes from two languages working together, both driving the same
+mutable DOM (`Node`) at runtime, neither aware the other exists: ART (a
+statically typed, TypeScript-like language, compiled ahead of time via
+LLVM) and JavaScript/JSX (interpreted at runtime via QuickJS).
 
 `artisan-cli` is the single command that ties the workflow together:
-scaffold a project, add components, and build it into one native binary.
+scaffold a project and build it into one native binary.
 
 ## Prerequisites
 
 - CMake 3.20+, a C++20 compiler, Python 3, Ninja
 - `pkg-config` packages: `freetype2`, `fontconfig`, `sdl2`
 - Git submodules: Skia, lexbor, QuickJS
-- Go 1.21+ - needed if a project uses a Go app (see [Using Go](#using-go)),
-  or `app.jsx` (real JSX - see [Using JavaScript](#using-javascript)),
-  which needs it to build `tools/jsx_transform`
+- LLVM 18 (`llvm-18-dev` or equivalent) and the
+  [Boehm-Demers-Weiser GC](https://www.hboehm.info/gc/) (`libgc-dev`) -
+  for the ART compiler (see [Using ART](#using-art))
+- Go 1.21+ - for `tools/jsx_transform`'s JSX-to-plain-JS build step (see
+  [Using JavaScript](#using-javascript))
 
 ```bash
 git submodule update --init --recursive
@@ -45,88 +47,37 @@ path, for everything below.
 artisan-cli new my-app
 ```
 
-`--lang art` is the default, so this scaffolds an ART project (see [Using
-ART](#using-art)):
+Scaffolds a project using both of artisan's app languages together, so
+they can be seen working side by side from the start:
 
 ```
 my-app/
-  pages/index.html   # a bare mount point (<div id="root">) - see app.tsx
-  app.tsx            # ART app - your own startup code goes here
+  pages/index.html   # a bare mount point (<div id="art-root">/<div id="js-root">)
+  app.tsx             # ART app - see "Using ART" below
+  app.jsx             # JSX app - see "Using JavaScript" below
 ```
 
 `app.tsx` starts with `import { Node, Event } from "art";` - the DOM
 bridge (Node/Event, `document`, ...) is ART's standard library, not
-something copied into your project (see "Using ART" below). It's `.tsx`
-rather than plain `.ts` so the UI itself can be built with JSX
-(`<div>...</div>`, a real expression compiling straight to
-`document.createElement`/`.appendChild` calls) right in the entry point -
-`pages/index.html` is deliberately just a mount point, the same way a
-bundler-based React app's own `index.html` usually is too.
+something copied into your project (see [Using ART](#using-art) below).
+`app.jsx` is real JSX, compiled to plain JS at build time, against a
+built-in `h`/`Fragment` element builder - no UI library needed (see
+[Using JavaScript](#using-javascript) below). Both mount into their own
+`<div>` in `pages/index.html`, which is otherwise just a bare shell -
+the same way a bundler-based React app's own `index.html` usually is
+too - since the real UI is built at runtime, in code, by both.
+
+Either file can be deleted afterward - a project with only `app.tsx` is
+ART-only; only `app.jsx` (or `app.js`, plain JS with no JSX) is
+JS-only; deleting both (and `pages/index.html`'s now-unused mount
+points) leaves a markup-only project with no app logic at all. See
+[Building a project](#building-a-project) for exactly what gets
+discovered.
 
 Add more pages under `pages/` - nested folders become nested routes,
 Next.js-style (`pages/settings/profile.html` becomes the route
 `settings/profile`; a folder's own `index.html` is that folder's route).
 Link between pages from markup with `<a href="...">`.
-
-Pass `--lang cpp` to scaffold a C++ project instead:
-
-```bash
-artisan-cli new my-app --lang cpp
-```
-
-```
-my-app/
-  pages/index.html
-  src/main.cpp        # SetupApp(Node&) - native startup code
-  CMakeLists.txt      # builds this project directly, no artisan-cli needed
-```
-
-A C++ project also gets its own `CMakeLists.txt` (ART/Go projects don't),
-so `cmake -S my-app -B my-app/build && cmake --build my-app/build
---target artisan` works on its own - no `artisan-cli` involved at build
-time. It discovers `pages/**/*.html`/`src/**/*.cpp`/`app.js` itself (same
-conventions as `artisan-cli build`, just re-implemented in CMake) and
-`add_subdirectory()`s this checkout to pull in the real build - so Skia
-still needs to be built there first (`./build_skia.sh`), same
-prerequisite either way. If this checkout moves, update the
-`ARTISAN_CHECKOUT_DIR` cache variable at the top of the generated file
-(same constraint `goapp/go.mod`'s `replace` line has for a Go project).
-Add more `.cpp` files anywhere under `src/` and they're compiled in
-automatically - no need to list them anywhere.
-
-Pass `--lang go` to scaffold a Go project instead (see [Using
-Go](#using-go)):
-
-```bash
-artisan-cli new my-app --lang go
-```
-
-```
-my-app/
-  pages/index.html
-  goapp/
-    go.mod   # replace artisango => <this checkout>/go/artisango
-    main.go  # SetupApp(artisango.Node) - native startup code
-```
-
-Pass `--lang js` to scaffold a project with no native language at all -
-just real JSX, against a built-in, zero-dependency JSX target (see
-[Using JavaScript](#using-javascript)):
-
-```bash
-artisan-cli new my-app --lang js
-```
-
-```
-my-app/
-  pages/index.html   # a bare mount point (<div id="root">) - see app.jsx
-  app.jsx             # your own startup code goes here
-```
-
-A project uses one native language, never more than one (`--lang js`
-uses none at all) - `new` always scaffolds exactly one, and
-`artisan-cli build` refuses to build a project that somehow ends up with
-more than one of `app.ts`/`app.tsx`, `src/**/*.cpp`, and `goapp/`.
 
 ## Building a project
 
@@ -136,143 +87,16 @@ artisan-cli build my-app --run
 
 There's no mode for naming individual files by hand - it's always a project
 directory, and its files are discovered automatically: every
-`pages/**/*.html`, and exactly one native language - an ART app
-(`app.tsx`, see [Using ART](#using-art) below), every `src/**/*.cpp`, or a
-Go app under `goapp/` (see [Using Go](#using-go) below), or none at all -
-plus an optional `app.js`/`app.jsx` at the project root (embedded and
-run once at startup, alongside whichever native language the project
-uses, or on its own - see [Using JavaScript](#using-javascript)). Flags:
+`pages/**/*.html`, an optional ART app (`app.tsx`, see [Using
+ART](#using-art) below), and an optional `app.js`/`app.jsx` at the
+project root (embedded and run once at startup - see [Using
+JavaScript](#using-javascript)). ART and JS/JSX are fully independent -
+a project can have either, both, or (with at least one page) neither.
+Flags:
 
 - `--build-dir <dir>` - where to configure/build (default `./build`)
 - `-o, --output <path>` - copy the built binary here
 - `--run` - run the binary after a successful build
-
-## Adding a component
-
-```bash
-artisan-cli component my-app my-widget
-```
-
-Scaffolds a reusable pairing within an existing project:
-
-- `components/my-widget.html` - a markup fragment, meant to be pasted into
-  any page under `pages/` wherever you want it to appear (it isn't itself a
-  routable page)
-- `src/components/my-widget.cpp` - `Setup_my_widget(Node&)`, which the
-  page's own `SetupApp` calls explicitly with the `Node` the fragment
-  landed in
-
-The generated `Setup_my_widget` includes an example of using `UseState`
-(`include/hooks.h`) - a small `useState`-style helper for giving a
-component's event handlers shared state (e.g. a counter) without a class
-or a hand-rolled `shared_ptr`:
-
-```cpp
-auto [count, setCount] = UseState(0);
-button->SetOnClick([=]() mutable {
-  setCount(count() + 1);
-  label->SetTextContent(std::to_string(count()));
-});
-```
-
-Note there's no re-render loop here: `Setup_<name>` runs once at startup,
-so `setCount` just stores the new value - updating the DOM in response
-(`SetTextContent`, `SetAttribute`, ...) is still up to the handler, same as
-any other mutation via the `Node` API (see `include/dom_node.h`).
-
-## Using Go
-
-A project can drive its DOM from a native Go app instead of C++, compiled
-ahead-of-time into a static archive (`go build -buildmode=c-archive`) and
-linked straight into the binary - it never runs interpreted, and requires a
-Go toolchain only for projects that use it.
-
-```bash
-artisan-cli new my-app --lang go
-```
-
-scaffolds `goapp/go.mod` (with a `replace artisango => ...` already
-pointing at this checkout) and `goapp/main.go`:
-
-```go
-package main
-
-import "C"
-import (
-	"unsafe"
-
-	"artisango"
-)
-
-func SetupApp(doc artisango.Node) {
-	// Your native startup code goes here, e.g.:
-	//
-	//   button := doc.FindById("my-button")
-	//   if button != nil {
-	//     button.SetOnClick(func() {
-	//       // ...
-	//     })
-	//   }
-}
-
-//export ArtisanSetupApp
-func ArtisanSetupApp(doc unsafe.Pointer) {
-	SetupApp(artisango.WrapNode(doc))
-}
-
-func main() {}
-```
-
-`artisan-cli build` auto-discovers `goapp/` the same way it discovers
-`app.js` - no flag needed. `artisango.Node` mirrors the same `Node` API
-C++/JS get: `FindById`, `NodeType()` (`artisango.ElementNode`/
-`TextNode`), `TagName`, `TextContent`/`SetTextContent`,
-`GetAttribute`/`SetAttribute`/`HasAttribute`/`RemoveAttribute`,
-`ParentNode`/`NextSibling`/`PreviousSibling`/`Children`,
-`Matches(selector)`/`Closest(selector)`,
-`QuerySelector`/`QuerySelectorAll` (same bounded selector grammar as
-[Using CSS](#using-css) below), `RemoveChild`/`Remove()` (the removed
-node stays alive and re-appendable), `CloneNode(deep)`, `ClassList()`
-(`Add`/`Remove`/`Contains`/`Toggle`/`ToggleForce`), `Style()`
-(`Get`/`Set`, the same five properties [Using CSS](#using-css) supports),
-`GetData`/`SetData` (`fooBar` <-> `data-foo-bar`), `SetOnClick`,
-`AddEventListener(type, fn, capture)` (any type string works; `"click"`,
-`"change"` (checkbox/radio), and `"input"` (text fields) fire on their
-own, and `DispatchEvent` below fires any other type) plus
-`RemoveEventListener(type, handle, capture)` - `AddEventListener` returns
-a `ListenerHandle` token for this (Go func values aren't comparable the
-way JS passes the same function reference to both calls, so removal
-keys off this instead), and `DispatchEvent(type, bubbles, cancelable)`
-fires the same capturing/target/bubbling walk internally-fired events
-use, returning `false` if the event was cancelable and some listener
-called `preventDefault()` (JS-side only - a Go listener's `fn` is
-zero-arg, with no way to call it itself) - see `go/artisango/node.go`
-and the C ABI it wraps, `include/node_c_api.h`.
-
-Package-level (not node-scoped, like `CreateElement`):
-`artisango.SetTimeout(fn, delayMs)`/`SetInterval(fn, delayMs)`/
-`ClearTimer(handle)`, and `RequestAnimationFrame(fn)`/
-`CancelAnimationFrame(handle)` (`fn` gets a timestamp; the normal way to
-animate is for `fn` to call `RequestAnimationFrame` again itself, which
-schedules for the *next* repaint, never the current one) - the same
-`TimerQueue`/`AnimationFrameQueue` JS's `setTimeout`/
-`requestAnimationFrame` schedule into. `SetTimeout`/`SetInterval`/
-`RequestAnimationFrame` each return a handle for
-`ClearTimer`/`CancelAnimationFrame` - Go func values aren't comparable,
-so there's no "pass the same `fn` back" the way JS's `clearTimeout`
-conceptually could.
-
-`artisango.CreateElement(tag)`/`CreateTextNode(text)` create a detached
-node; `parent.AppendChild(child)`/`parent.InsertBefore(child, before)`
-attach it. A created (or removed, via `RemoveChild`/`Remove()`) node
-that's never (re-)appended anywhere leaks until process exit - there's
-no garbage collector on the Go side to catch an abandoned one the way
-JS's engine does, so always append (or just don't create) rather than
-let one go unused.
-
-If moving this checkout later breaks the build, update the `replace` line
-in `goapp/go.mod` to point at the new location (same underlying constraint
-`ARTISAN_PROJECT_SOURCE_DIR` already has for the C++ path).
 
 ## Using ART
 
@@ -283,23 +107,23 @@ machine code via LLVM (see `art/`) rather than interpreted. A project's
 `app.ts`/`app.tsx` - one file at the project root by default, like
 `app.js`, but optionally the entry point into a real multi-file project
 via `import`/`export` (see "Modules" below) - is compiled by the
-standalone `art` compiler and linked straight into the binary, the same
-"runs compiled, not interpreted" deal `ARTISAN_APP_CPP_SOURCES`/
-`ARTISAN_APP_GO_SOURCE` get. The scaffold specifically writes `app.tsx`
-(`.tsx`, not `.ts`), so the entry point can use JSX to build its own UI
-directly - see "JSX (.tsx)" below.
+standalone `art` compiler and linked straight into the binary, run
+once per page load, not interpreted. The scaffold specifically writes
+`app.tsx` (`.tsx`, not `.ts`), so the entry point can use JSX to build
+its own UI directly - see "JSX (.tsx)" below.
 
 ```bash
-artisan-cli new my-app  # --lang art is the default
+artisan-cli new my-app
 ```
 
-scaffolds a single `app.tsx`: a clean `import { Node, Event } from
+scaffolds `app.tsx` (alongside `app.jsx` - see [Using
+JavaScript](#using-javascript)): a clean `import { Node, Event } from
 "art";` (the DOM bridge below, already `declare`d and wrapped in
 `declare class Node`/`declare class Event` - see "Classes" below - but
 part of ART's own standard library, not copied into your project) plus
 a small JSX-driven counter that mounts into `pages/index.html`'s bare
-`<div id="root">`, which is where your own code goes. An ART app needs
-a `setupApp` - either an explicit function, or (the default the
+`<div id="art-root">`, which is where your own code goes. An ART app
+needs a `setupApp` - either an explicit function, or (the default the
 scaffold uses) just bare top-level statements, which the compiler
 collects into one for you:
 
@@ -328,10 +152,10 @@ function setupApp(): void {
 }
 ```
 
-Either way, `setupApp` runs once whenever a page loads, same as
-`SetupApp(Node&)`/Go's `ArtisanSetupApp`/a script's top-level code all
-are - main.cpp's C++ trampoline calls the exact same `setupApp` symbol
-regardless of which form produced it. A top-level `let`/`const` is
+Either way, `setupApp` runs once whenever a page loads, same as a
+script's top-level code does - main.cpp's C++ trampoline calls the
+exact same `setupApp` symbol (via `ArtisanSetupApp`) regardless of
+which form produced it. A top-level `let`/`const` is
 normally a *persistent global*, initialized once at process start,
 before any page has ever loaded - so `document` is unusable in one
 *except* for exactly this: a top-level declaration whose initializer
@@ -1341,20 +1165,21 @@ never frees it mid-dispatch (see `ArtisanNodeRemove`), so the ongoing
 capturing/bubbling walk keeps working off pointers that are still valid,
 just no longer attached to anything.
 
-Building an ART app needs LLVM 18 (`llvm-18-dev` or equivalent) and the
-Boehm GC (`libgc-dev`) installed - unlike Skia/lexbor/QuickJS neither is
-a git submodule, and unlike the rest of this framework's dependencies
-they're only ever required when `ARTISAN_APP_ART_SOURCE`/`app.ts`/
-`app.tsx` is
-actually configured: a C++/Go/JS-only project never pulls either in at
-all (see the root `CMakeLists.txt`'s conditional `add_subdirectory(art)`
-and `find_library(ARTISAN_GC_LIB ...)`).
+Building an ART app needs LLVM 18 and the Boehm GC (see
+[Prerequisites](#prerequisites)) - unlike Skia/lexbor/QuickJS neither is
+a git submodule. Both are only ever pulled in when
+`ARTISAN_APP_ART_SOURCE`/`app.ts`/`app.tsx` is actually configured (see
+the root `CMakeLists.txt`'s conditional `add_subdirectory(art)` and
+`find_library(ARTISAN_GC_LIB ...)`) - deleting `app.tsx` from a project
+(see [Building a project](#building-a-project)) makes it JS-only and
+avoids needing either.
 
 ## Using JavaScript
 
-An `app.js` at the project root is auto-discovered and embedded, same as
-`goapp/` - no flag needed. It runs against a DOM-like API, close to (but
-not) a browser's:
+An `app.js` at the project root is auto-discovered and embedded - no
+flag needed, and independent of whether the project also has an
+`app.tsx` (see [Using ART](#using-art)). It runs against a DOM-like
+API, close to (but not) a browser's:
 
 ```js
 var list = document.querySelector("#list");
@@ -1384,8 +1209,8 @@ requestAnimationFrame(function (timestampMs) {
 
 ### JSX (app.jsx)
 
-`--lang js` (see [Creating a project](#creating-a-project)) scaffolds
-`app.jsx` instead of `app.js` - real JSX, transformed to plain JS at
+`artisan-cli new` (see [Creating a project](#creating-a-project))
+scaffolds `app.jsx` - real JSX, transformed to plain JS at
 build time (`tools/jsx_transform`, built on
 [esbuild](https://github.com/evanw/esbuild)), against `h(tag, props,
 ...children)`/`Fragment(props)` - a built-in, zero-dependency element
@@ -2014,8 +1839,7 @@ here.
 the document at all, since `<head>` itself is discarded (see
 `html_document.cpp`). There's also no shared stylesheet across pages -
 each page's markup is compiled independently, so a `<style>` block
-meant for every page needs pasting into each one (or turned into a
-`components`-style fragment, see `artisan-cli component`).
+meant for every page needs pasting into each one.
 
 ## Using forms
 

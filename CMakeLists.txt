@@ -80,10 +80,10 @@ target_link_libraries(artisanc
     PRIVATE lexbor_static
 )
 
-# These three are the whole surface area artisan-cli's `--html`/`--cpp`/
-# `--js` flags configure (see src/cli/main.cpp) - set directly, building
-# with plain `cmake`/`ninja` gets you exactly the same project artisan-cli
-# would, just with an extra step. Defaults build this repo's own demo.
+# These are the whole surface area artisan-cli's `new`/`build` configure
+# (see src/cli/main.cpp) - set directly, building with plain
+# `cmake`/`ninja` gets you exactly the same project artisan-cli would,
+# just with an extra step. Defaults build this repo's own demo.
 #
 # ARTISAN_UI_SOURCES is a *bundle*: one or more markup files, each compiled
 # into its own named page (named after its stem - "about.html" becomes
@@ -91,18 +91,14 @@ target_link_libraries(artisanc
 # The first file given is the page the app opens on.
 set(ARTISAN_UI_SOURCES "${PROJECT_SOURCE_DIR}/assets/index.html;${PROJECT_SOURCE_DIR}/assets/about.html"
     CACHE STRING "Semicolon-separated markup file(s) compiled into the app's page bundle")
-set(ARTISAN_APP_CPP_SOURCES "${PROJECT_SOURCE_DIR}/src/app.cpp" CACHE STRING
-    "Semicolon-separated native C++ source(s) compiled into the app")
 set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
     "Optional script embedded into the app and run once at startup")
 set(ARTISAN_APP_JSX_SOURCE "" CACHE STRING
     "Optional .jsx counterpart to ARTISAN_APP_JS_SOURCE - real JSX, transformed to plain JS (tools/jsx_transform) before being embedded the same way. Mutually exclusive with ARTISAN_APP_JS_SOURCE.")
 set(ARTISAN_JS_PRELUDE_SOURCE "" CACHE STRING
     "Optional script embedded and run before ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE - e.g. a vendored UI library (see third_party/react/ for one ready-made example) a project wants as a global before its own app script runs")
-set(ARTISAN_APP_GO_SOURCE "" CACHE STRING
-    "Optional directory of a Go app (its own go.mod/main.go, see go/artisango) compiled and linked into the app")
-set(ARTISAN_APP_ART_SOURCE "" CACHE STRING
-    "Optional single .ts file (see art/), compiled ahead of time with the ART compiler and linked into the app")
+set(ARTISAN_APP_ART_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.tsx" CACHE STRING
+    "Optional single .ts/.tsx file (see art/), compiled ahead of time with the ART compiler and linked into the app")
 
 set(GENERATED_UI_CPP "${CMAKE_BINARY_DIR}/generated_ui.cpp")
 
@@ -212,58 +208,17 @@ else()
         "namespace artisan { const char *GetJsPreludeScript() { return \"\"; } }\n")
 endif()
 
-# ARTISAN_APP_GO_SOURCE is the Go counterpart to ARTISAN_APP_CPP_SOURCES/
-# ARTISAN_APP_JS_SOURCE above: a directory holding its own go.mod and a
-# `package main` that imports go/artisango (this repo's Go bindings over
-# node_c_api.h) and exports ArtisanSetupApp - compiled ahead of time into
-# a static archive (`go build -buildmode=c-archive`, the same "runs
-# compiled, not interpreted" deal ARTISAN_APP_CPP_SOURCES gets) and linked
-# straight into the artisan binary, exactly like Skia's own .a files
-# above.
-set(GENERATED_GO_STUB_CPP "${CMAKE_BINARY_DIR}/generated_go_stub.cpp")
-
-if(ARTISAN_APP_GO_SOURCE)
-    find_program(ARTISAN_GO_EXECUTABLE go REQUIRED)
-
-    file(GLOB_RECURSE ARTISAN_GO_SOURCE_FILES "${ARTISAN_APP_GO_SOURCE}/*.go")
-    set(GENERATED_GO_ARCHIVE "${CMAKE_BINARY_DIR}/libgoapp.a")
-    set(GENERATED_GO_HEADER "${CMAKE_BINARY_DIR}/libgoapp.h")
-
-    add_custom_command(
-        OUTPUT "${GENERATED_GO_ARCHIVE}" "${GENERATED_GO_HEADER}"
-        COMMAND "${ARTISAN_GO_EXECUTABLE}" build -buildmode=c-archive
-                -o "${GENERATED_GO_ARCHIVE}" .
-        WORKING_DIRECTORY "${ARTISAN_APP_GO_SOURCE}"
-        DEPENDS ${ARTISAN_GO_SOURCE_FILES} "${ARTISAN_APP_GO_SOURCE}/go.mod"
-        COMMENT "Compiling ${ARTISAN_APP_GO_SOURCE} into a native Go archive"
-        VERBATIM
-    )
-    add_custom_target(artisan_go_archive DEPENDS "${GENERATED_GO_ARCHIVE}")
-else()
-    # No Go app configured - the three callback hooks node_c_api.cpp's
-    # GoCallback always references, whether or not anything ends up
-    # calling ArtisanNodeSetOnClick/RequestAnimationFrame, still need to
-    # exist so the app links, the same way GetAppScript() above always
-    # exists whether or not a script was configured. ArtisanSetupApp
-    # itself is handled separately below, since an ART app (not just "no
-    # native app at all") can also provide it.
-    file(WRITE "${GENERATED_GO_STUB_CPP}"
-        "#include \"node_c_api.h\"\n"
-        "extern \"C\" void ArtisanGoInvokeHandler(uintptr_t) {}\n"
-        "extern \"C\" void ArtisanGoReleaseHandler(uintptr_t) {}\n"
-        "extern \"C\" void ArtisanGoInvokeAnimationFrameHandler(uintptr_t, double) {}\n")
-endif()
-
-# ARTISAN_APP_ART_SOURCE is the ART counterpart to ARTISAN_APP_GO_SOURCE
-# above: a single entry-point .ts file (mirroring ARTISAN_APP_JS_SOURCE's
-# "one file at the project root" convention, not Go's whole-module-
-# directory one - though it can still pull in other .ts files itself via
-# `import`, see art/module_resolver.cpp) compiled ahead of time with
-# the ART compiler (art/ - a separate CMake project, only pulled in here
-# when actually needed, since it requires LLVM) into a native object file
-# and linked straight into the artisan binary, same as Skia's/Go's own
-# prebuilt artifacts above. See art_bridge.h for the `declare`-able DOM
-# API it can call, and README.md's "Using ART" section.
+# ARTISAN_APP_ART_SOURCE is the compiled counterpart to
+# ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE above: a single entry-point
+# .ts/.tsx file (mirroring ARTISAN_APP_JS_SOURCE's "one file at the
+# project root" convention - though it can still pull in other .ts files
+# itself via `import`, see art/module_resolver.cpp) compiled ahead of
+# time with the ART compiler (art/ - a separate CMake project, only
+# pulled in here when actually needed, since it requires LLVM) into a
+# native object file and linked straight into the artisan binary, same as
+# Skia's own prebuilt artifacts above. See art_bridge.h for the
+# `declare`-able DOM API it can call, and README.md's "Using ART"
+# section.
 set(GENERATED_ART_OBJECT "${CMAKE_BINARY_DIR}/generated_art_app.o")
 
 if(ARTISAN_APP_ART_SOURCE)
@@ -292,47 +247,31 @@ if(ARTISAN_APP_ART_SOURCE)
     find_path(ARTISAN_GC_INCLUDE_DIR NAMES gc.h REQUIRED)
 endif()
 
-# ArtisanSetupApp itself: a real Go archive (above) provides it if
-# configured; otherwise an ART app's compiled `setupApp` (see
+# ArtisanSetupApp itself: an ART app's compiled `setupApp` (see
 # GENERATED_ART_OBJECT above) is adapted to it here (ART's own codegen
 # never names anything "ArtisanSetupApp" - only the driver's naming
 # convention, "setupApp", ties the two together); otherwise a plain
 # no-op, the same "always exists, whether or not anything configured it"
-# pattern GetAppScript()/the stub above use.
+# pattern GetAppScript() above uses.
 set(GENERATED_SETUP_APP_STUB_CPP "${CMAKE_BINARY_DIR}/generated_setup_app_stub.cpp")
 
-if(NOT ARTISAN_APP_GO_SOURCE)
-    if(ARTISAN_APP_ART_SOURCE)
-        # setupApp takes no parameter of its own - main.cpp already calls
-        # SetArtDocumentContext(document.get()) before ArtisanSetupApp
-        # runs (see its own navigate() lambda), so ART's ambient
-        # `document` identifier (sugar for ArtDocument() - see
-        # art/sema.cpp's kAmbientGlobals) already resolves correctly
-        # inside setupApp, the same way it does in any other handler -
-        # no separate parameter-threading mechanism needed just for this
-        # one function.
-        file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
-            "#include \"node_c_api.h\"\n"
-            "extern \"C\" void setupApp(void);\n"
-            "extern \"C\" void ArtisanSetupApp(ArtisanNode *) { setupApp(); }\n")
-    else()
-        file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
-            "#include \"node_c_api.h\"\n"
-            "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n")
-    endif()
-endif()
-
-# A project using Go (or one with no native app code at all) has nothing
-# defining SetupApp(Node&) - main.cpp calls it unconditionally, so it
-# needs a no-op stub here the same way ArtisanSetupApp/GetAppScript get
-# one above, rather than silently falling back to ARTISAN_APP_CPP_SOURCES'
-# own CACHE default (this repo's demo src/app.cpp).
-set(GENERATED_CPP_STUB "${CMAKE_BINARY_DIR}/generated_cpp_stub.cpp")
-
-if(NOT ARTISAN_APP_CPP_SOURCES)
-    file(WRITE "${GENERATED_CPP_STUB}"
-        "#include \"app.h\"\n"
-        "namespace artisan { void SetupApp(Node &) {} }\n")
+if(ARTISAN_APP_ART_SOURCE)
+    # setupApp takes no parameter of its own - main.cpp already calls
+    # SetArtDocumentContext(document.get()) before ArtisanSetupApp
+    # runs (see its own navigate() lambda), so ART's ambient
+    # `document` identifier (sugar for ArtDocument() - see
+    # art/sema.cpp's kAmbientGlobals) already resolves correctly
+    # inside setupApp, the same way it does in any other handler -
+    # no separate parameter-threading mechanism needed just for this
+    # one function.
+    file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
+        "#include \"node_c_api.h\"\n"
+        "extern \"C\" void setupApp(void);\n"
+        "extern \"C\" void ArtisanSetupApp(ArtisanNode *) { setupApp(); }\n")
+else()
+    file(WRITE "${GENERATED_SETUP_APP_STUB_CPP}"
+        "#include \"node_c_api.h\"\n"
+        "extern \"C\" void ArtisanSetupApp(ArtisanNode *) {}\n")
 endif()
 
 # The app itself never links lexbor or parses markup - it only walks the
@@ -346,8 +285,7 @@ endif()
 # js_engine.cpp embeds QuickJS and exposes a minimal DOM-like API against
 # that same Node tree, so script can drive the UI too - this is the only
 # place QuickJS is linked in; artisanc has no need for a JS engine at
-# build time. ARTISAN_APP_CPP_SOURCES is the native-C++ counterpart: plain
-# compiled code against the same Node API, no interpreter involved.
+# build time.
 add_executable(artisan
     src/main.cpp
     src/widget_renderer.cpp
@@ -360,19 +298,11 @@ add_executable(artisan
     src/css.cpp
     src/timer_queue.cpp
     src/animation_frame_queue.cpp
-    ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"
     "${GENERATED_JS_PRELUDE_CPP}"
+    "${GENERATED_SETUP_APP_STUB_CPP}"
 )
-
-if(NOT ARTISAN_APP_GO_SOURCE)
-    target_sources(artisan PRIVATE "${GENERATED_GO_STUB_CPP}" "${GENERATED_SETUP_APP_STUB_CPP}")
-endif()
-
-if(NOT ARTISAN_APP_CPP_SOURCES)
-    target_sources(artisan PRIVATE "${GENERATED_CPP_STUB}")
-endif()
 
 if(ARTISAN_APP_ART_SOURCE)
     target_sources(artisan PRIVATE "${GENERATED_ART_OBJECT}")
@@ -388,17 +318,10 @@ target_link_libraries(artisan
   PRIVATE skia PkgConfig::SDL2 qjs
 )
 
-if(ARTISAN_APP_GO_SOURCE)
-    add_dependencies(artisan artisan_go_archive)
-    # cgo's runtime needs pthread regardless of platform specifics the Go
-    # app itself touches - same reason skia already links it above.
-    target_link_libraries(artisan PRIVATE "${GENERATED_GO_ARCHIVE}" pthread)
-endif()
-
 if(ARTISAN_APP_ART_SOURCE)
     target_link_libraries(artisan PRIVATE "${ARTISAN_GC_LIB}")
     # Gates src/art_bridge.cpp's own use of GC_malloc (see its own doc
-    # comments) - that file is always compiled, even for a C++/Go/JS-only
+    # comments) - that file is always compiled, even for a JS-only
     # project with no ART involved at all, so it can't unconditionally
     # #include <gc.h>/require libgc-dev the way GENERATED_ART_OBJECT
     # above can (that object file only exists in the first place when
@@ -464,7 +387,6 @@ set(ARTISAN_INSTALL_SOURCE_DIR "lib/artisan")
 install(FILES CMakeLists.txt DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}")
 install(DIRECTORY include/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/include")
 install(DIRECTORY src/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/src")
-install(DIRECTORY go/ DESTINATION "${ARTISAN_INSTALL_SOURCE_DIR}/go")
 # The ART compiler's own source (see art/CMakeLists.txt) - needed at
 # `artisan-cli build` time for any project with an app.ts
 # (ARTISAN_APP_ART_SOURCE), the same reason src/ above is. `build`

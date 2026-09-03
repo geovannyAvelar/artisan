@@ -1,4 +1,3 @@
-#include "app.h"
 #include "app_script.h"
 #include "art_bridge_context.h"
 #include "compiled_document.h"
@@ -6,7 +5,6 @@
 #include "dom_node.h"
 #include "js_engine.h"
 #include "node_c_api.h"
-#include "node_c_api_bridge.h"
 #include "skia_renderer.h"
 #include "widget.h"
 #include "widget_renderer.h"
@@ -77,19 +75,17 @@ void UncheckOtherRadiosInGroup(Node &subtree, Node *justChecked) {
 // page. Whichever page is currently live gets its behavior from two
 // independent sources that both re-run every time a page loads (first at
 // startup, then again on every Navigate()) and both drive that tree
-// through the same Node API: SetupApp (app.h), plain compiled C++ from
-// whichever sources the build was configured with
-// (ARTISAN_APP_CPP_SOURCES / --cpp); GetAppScript() (below), interpreted
-// by JsEngine, from whichever .js file it was configured with
-// (ARTISAN_APP_JS_SOURCE / --js, "" if none); and ArtisanSetupApp
-// (node_c_api.h), a Go app compiled ahead of time from whichever
-// directory it was configured with (ARTISAN_APP_GO_SOURCE / --go, a
-// no-op stub if none). None of the three knows the others exist - proof
-// that "native C++", "script", and "native Go" are just three ways to
-// drive the DOM, not a fork in the architecture. All three are shared
-// across every page in the bundle (there's exactly one app.cpp/app.js/Go
-// app configured, not one per page) - a page missing the ids they look
-// for is simply left alone, the same way SetupApp already tolerates that.
+// through the same Node API: ArtisanSetupApp (node_c_api.h), ART's
+// entry point, compiled ahead of time from whichever .ts/.tsx file the
+// build was configured with (ARTISAN_APP_ART_SOURCE, a no-op stub if
+// none); and GetAppScript()/GetJsPreludeScript() (below), interpreted
+// by JsEngine, from whichever .js/.jsx file it was configured with
+// (ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE, "" if none). Neither
+// knows the other exists - proof that "compiled" and "interpreted" are
+// just two ways to drive the DOM, not a fork in the architecture. Both
+// are shared across every page in the bundle (there's exactly one ART
+// app/script configured, not one per page) - a page missing the ids
+// they look for is simply left alone.
 
 // Erases the focus's selected range (if any) from `value` and collapses
 // the cursor to where the selection started. Returns whether there was
@@ -453,9 +449,7 @@ int main(int argc, char *argv[]) {
     artisan::SetArtDocumentContext(document.get());
     timerQueue = TimerQueue{};
     animationFrameQueue = AnimationFrameQueue{};
-    artisan::SetGoTimerContext(timerQueue, animationFrameQueue);
     artisan::SetArtTimerContext(timerQueue, animationFrameQueue);
-    artisan::SetupApp(*document);
     ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue,
                                                      animationFrameQueue);
