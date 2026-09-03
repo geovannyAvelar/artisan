@@ -43,6 +43,38 @@ void Parser::Fail(const std::string &message, SourceLoc loc) {
   throw ParseError(oss.str());
 }
 
+namespace {
+// A raw, pre-resolution counterpart to Sema::ExprUsesAmbientDocument:
+// that one matches the *resolved* form (a Call whose resolvedCalleeName
+// is "ArtDocument"), which doesn't exist until Sema::CheckExpr runs -
+// this one runs at parse time instead, so it has to match the bare
+// spelling directly (an Identifier named "document", per
+// kAmbientGlobals - see ast.h) rather than what it desugars to. Same
+// recursive shape as ExprUsesAmbientDocument (lhs/rhs/operand/elements/
+// fields - see ast.h's Expr field comments for what each covers,
+// including call args and JSX children/attributes), just checked
+// earlier and less precisely: with no symbol table yet, this can't tell
+// a real local/global literally named "document" (which would legally
+// shadow the ambient sugar - see kAmbientGlobals's own doc comment)
+// from the ambient identifier itself. Accepted as a rare false positive
+// (an unrelated global happening to be named "document" and used in
+// another global's initializer becomes a per-page-load local
+// needlessly) rather than worth building a parser-level symbol table
+// for - see Parser::ParseProgram's own use of this.
+bool ExprMayReferenceAmbientGlobal(const Expr *expr) {
+  if (!expr) return false;
+  if (expr->kind == ExprKind::Identifier && kAmbientGlobals.count(expr->name)) return true;
+  if (ExprMayReferenceAmbientGlobal(expr->lhs.get())) return true;
+  if (ExprMayReferenceAmbientGlobal(expr->rhs.get())) return true;
+  if (ExprMayReferenceAmbientGlobal(expr->operand.get())) return true;
+  for (auto &e : expr->elements)
+    if (ExprMayReferenceAmbientGlobal(e.get())) return true;
+  for (auto &f : expr->fields)
+    if (ExprMayReferenceAmbientGlobal(f.second.get())) return true;
+  return false;
+}
+} // namespace
+
 Program Parser::ParseProgram() {
   Program program;
   try {
@@ -76,7 +108,25 @@ Program Parser::ParseProgram() {
       } else if (Check(TokenKind::KwLet) || Check(TokenKind::KwConst)) {
         auto decl = ParseVarDecl();
         decl->isExported = exported;
-        program.globals.push_back(std::move(decl));
+        // A non-exported declaration whose initializer touches an
+        // ambient global (document - see kAmbientGlobals in ast.h) can
+        // never be a real persistent global (Sema::CheckGlobalDecl
+        // would reject it - document doesn't exist yet at process
+        // start), so route it into topLevelStmts instead, right here,
+        // to preserve its exact position relative to sibling top-level
+        // statements (globals/topLevelStmts are two independently-
+        // ordered lists by the time Sema runs - this split can only
+        // happen correctly in this one sequential loop). Exactly as if
+        // the user had wrapped it in a bare `{ }` block themselves - no
+        // ceremony, same per-page-load-local result either way. An
+        // exported one stays in `globals`, where Sema's existing check
+        // still (correctly) rejects it: an export promises a real
+        // persistent global, which this can't be.
+        if (!exported && ExprMayReferenceAmbientGlobal(decl->expr.get())) {
+          program.topLevelStmts.push_back(std::move(decl));
+        } else {
+          program.globals.push_back(std::move(decl));
+        }
       } else if (Check(TokenKind::KwDeclare)) {
         pos++; // consume 'declare'
         if (Check(TokenKind::KwType)) {

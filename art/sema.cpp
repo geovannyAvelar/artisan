@@ -6,23 +6,8 @@
 
 namespace ART {
 
-namespace {
-// Bare identifiers that are pure call-site sugar for a zero-arg function
-// call, e.g. `document` for `ArtDocument()` - see CheckExpr's Identifier
-// case for how this is actually applied (rewriting the Expr in place) and
-// its own doc comment for the precedence rule (a real local/global always
-// shadows this). Every entry's backing function still has to be declared
-// by the project itself (this table doesn't declare anything on its
-// own) - unlike a true builtin (e.g. numberToString), `ArtDocument` isn't
-// self-contained: it depends on the project's own `Node`/`declare
-// function ArtDocument` and the artisan runtime's C++ symbol behind it.
-// `window` isn't included here yet - nothing in the DOM bridge is
-// window-level (no timers/alerts/location/... exposed to ART yet), so
-// there's nothing to desugar it to.
-const std::unordered_map<std::string, std::string> kAmbientGlobals = {
-    {"document", "ArtDocument"},
-};
-}
+// kAmbientGlobals now lives in ast.h - Parser needs it too (see its own
+// doc comment there).
 
 void Sema::Error(SourceLoc loc, const std::string &message) {
   std::ostringstream oss;
@@ -547,15 +532,23 @@ bool Sema::Check(Program &program,
 
   // Checked like any function body would be, just with no enclosing
   // FunctionDecl (currentFunction stays null - see CheckStmt's Return
-  // case) and no scope of its own to push: each statement's own
-  // identifiers resolve via the ordinary global lookup path (Lookup
-  // falls through to the `globals` map when no local scope is active),
-  // so a top-level statement referencing an earlier global "just works"
-  // with no extra machinery.
+  // case). One shared scope for the whole sequence, matching
+  // Codegen::GenSetupAppBody's own PushScope/PopScope around its
+  // identical loop - needed now that a bare top-level `let`/`const`
+  // can land directly here (see Parser::ParseProgram: a document-
+  // touching one is reclassified out of `globals` into here instead of
+  // being rejected), since CheckStmt's VarDecl case declares into
+  // `scopes.back()` unconditionally (Declare) - nothing to push into
+  // without this. A statement referencing an *earlier* global still
+  // "just works" the same way it always has: Lookup falls through to
+  // the `globals` map only after this scope (and any it nests) comes
+  // up empty.
+  PushScope();
   for (auto &s : program.topLevelStmts) {
     currentFile = s->sourceFile;
     CheckStmt(s.get());
   }
+  PopScope();
   currentFile.clear();
 
   return diagnostics.empty();
@@ -582,12 +575,23 @@ void Sema::CheckGlobalDecl(Stmt *stmt) {
   ResolvedType actual = CheckExpr(stmt->expr.get(), hasDeclared ? &declared : nullptr);
   stmt->resolvedVarType = hasDeclared ? declared : actual;
 
+  // A plain (non-exported) top-level `let`/`const` whose initializer
+  // uses `document` never reaches this check at all - Parser::
+  // ParseProgram already reclassified it into a per-page-load local
+  // instead (program.topLevelStmts, not program.globals - see its own
+  // doc comment). What's left here is the one case that can't be
+  // rescued that way: `export`ed. An export is a promise of a real,
+  // cross-file-visible persistent global - initialized once, at
+  // process start, before any page has ever loaded, so 'document' is
+  // always unusable there, not just in the narrow window ArtIsNull
+  // covers elsewhere - and a document-touching declaration is a
+  // per-call local by nature, which can't be exported.
   if (ExprUsesAmbientDocument(stmt->expr.get())) {
-    Error(stmt->loc, "a top-level global's initializer can't use 'document' (directly) - a global is "
-                      "initialized once, at process start, before any page has ever loaded, so 'document' is "
-                      "always unusable there, not just in the narrow window ArtIsNull covers elsewhere. Wrap "
-                      "this in a bare top-level block ('{ ... }') instead - see README.md's note on top-level "
-                      "statements vs. globals");
+    Error(stmt->loc, "an exported global's initializer can't use 'document' - exports are for real persistent "
+                      "globals (initialized once, at process start, before any page has ever loaded), and a "
+                      "'document'-touching declaration is a per-page-load local by nature, which can't be "
+                      "exported. Remove 'export', or restructure so nothing needing 'document' has to be shared "
+                      "across files - see README.md's note on top-level statements vs. globals");
   }
 
   if (!hasDeclared && actual.tag == TypeTag::Unknown) {

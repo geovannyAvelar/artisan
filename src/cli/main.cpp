@@ -525,9 +525,10 @@ constexpr const char *kAppArtTemplate = R"art(// Your app's own ART code goes he
 import { Node, Event } from "art";
 
 // A top-level `let`/`const` is state that survives across calls - e.g. a
-// click handler's own counter. Its initializer must be a literal number/
-// boolean/string (no calls, arithmetic, or other globals - see
-// README.md's "Using ART" section for why).
+// click handler's own counter. Its initializer runs once, before any
+// page has ever loaded, so it can be any expression EXCEPT one that
+// touches `document` (which doesn't exist yet at that point) - see
+// README.md's "Using ART" section for why.
 let clickCount: number = 0;
 
 // Every node.addEventListener handler - click included, since there's no
@@ -552,28 +553,23 @@ function onButtonClick(event: Event): void {
 // setupApp(): void { ... }` instead - the two are interchangeable, but
 // not combinable in the same project.
 //
-// Wrap it in a block, like below - NOT a bare top-level `let`: an
-// unwrapped one is always a *persistent global* (see the `clickCount`
-// note above), initialized once at process start, before any page has
-// ever loaded, so anything touching `document` there - `document`
-// itself included - fails to compile (a global's initializer can never
-// use it). A block's own `let`s are ordinary locals instead, re-run
-// fresh every time this code runs, exactly like everywhere else `{ }`
-// already means that in ART.
+// A `let` here, unlike `clickCount` above, touches `document` - so it's
+// automatically a per-page-load local instead of a persistent global,
+// re-run fresh every time this code runs. No `{ }` needed just for that
+// (still legal, e.g. to deliberately scope a group of locals - just not
+// required here).
 //
 // pages/index.html is deliberately just a mount point (a bare <div
 // id="root">) - the actual UI is built here, in code, the same way a
 // bundler-based React app's own index.html usually just has one too.
-{
-  let root: Node = document.getElementById("root");
-  if (!root.isNull()) {
-    root.appendChild(
-      <div>
-        <p id="count-label">{"Clicked 0 times"}</p>
-        <button onclick={onButtonClick}>{"Click me"}</button>
-      </div>
-    );
-  }
+let root: Node = document.getElementById("root");
+if (!root.isNull()) {
+  root.appendChild(
+    <div>
+      <p id="count-label">{"Clicked 0 times"}</p>
+      <button onclick={onButtonClick}>{"Click me"}</button>
+    </div>
+  );
 }
 )art";
 

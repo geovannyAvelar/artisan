@@ -291,12 +291,10 @@ function onButtonClick(event: Event): void {
   // ...
 }
 
-{
-  let button: Node = document.getElementById("my-button");
-  if (!button.isNull()) {
-    button.addEventListener("click", onButtonClick, false);
-    button.textContent = "Ready";
-  }
+let button: Node = document.getElementById("my-button");
+if (!button.isNull()) {
+  button.addEventListener("click", onButtonClick, false);
+  button.textContent = "Ready";
 }
 ```
 
@@ -316,14 +314,20 @@ function setupApp(): void {
 Either way, `setupApp` runs once whenever a page loads, same as
 `SetupApp(Node&)`/Go's `ArtisanSetupApp`/a script's top-level code all
 are - main.cpp's C++ trampoline calls the exact same `setupApp` symbol
-regardless of which form produced it. The block around the top-level
-version above isn't decorative: a *bare* top-level `let` (unwrapped) is
-always a persistent global (see "Top-level state" below), initialized
-once at process start, before any page has ever loaded - so `document`
-is always unusable directly in one (a compile error, not a runtime
-surprise). A block's own `let`s are ordinary locals, re-run fresh every
-time `setupApp` runs, exactly like `{ }` already means everywhere else
-in ART - wrap any procedural setup code that touches `document` in one.
+regardless of which form produced it. A top-level `let`/`const` is
+normally a *persistent global*, initialized once at process start,
+before any page has ever loaded - so `document` is unusable in one
+*except* for exactly this: a top-level declaration whose initializer
+touches `document` (directly, e.g. `document.getElementById(id)` above,
+or indirectly, buried in a larger expression) is automatically treated
+as an ordinary per-page-load local instead, re-run fresh every time
+`setupApp` runs - exactly as if it had been wrapped in a `{ }` block,
+just without having to write that yourself. `{ }` is still legal (e.g.
+to deliberately scope a group of locals together) - just no longer
+required for this specific reason. The one case this can't rescue is
+`export` - an exported global is a promise of a real, cross-file-visible
+persistent global, which a `document`-touching declaration can't be; see
+"Modules (import/export)" below.
 
 `document` is ambient - always just there, the same way a real
 browser's own global `document` is, not something `setupApp` (or
@@ -626,7 +630,12 @@ the same one. This is access control only, not real per-file
 namespacing: every top-level name in a whole project (across every file
 reachable from the entry point) must still be globally unique, the same
 as a single flat file today - `import` decides who's *allowed* to
-reference a name, not which of several same-named things they get.
+reference a name, not which of several same-named things they get. An
+exported top-level `let`/`const` can't touch `document` in its
+initializer, even indirectly - `export` promises a real,
+cross-file-visible persistent global, and a `document`-touching
+declaration is always a per-page-load local instead (see "Using ART"
+above); a non-exported one has no such restriction.
 
 The entry point passed to `art` (or `app.ts`/`app.tsx` itself, for
 `artisan-cli build`) only needs `import`s at all for this multi-file

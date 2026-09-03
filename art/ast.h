@@ -3,11 +3,38 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "tokenizer.h"
 
 namespace ART {
+
+// Bare identifiers that are pure call-site sugar for a zero-arg function
+// call, e.g. `document` for `ArtDocument()` - see Sema::CheckExpr's
+// Identifier case for how this is actually applied (rewriting the Expr
+// in place) and its own doc comment for the precedence rule (a real
+// local/global always shadows this). Every entry's backing function
+// still has to be declared by the project itself (this table doesn't
+// declare anything on its own) - unlike a true builtin (e.g.
+// numberToString), `ArtDocument` isn't self-contained: it depends on the
+// project's own `Node`/`declare function ArtDocument` and the artisan
+// runtime's C++ symbol behind it. `window` isn't included here yet -
+// nothing in the DOM bridge is window-level (no timers/alerts/
+// location/... exposed to ART yet), so there's nothing to desugar it to.
+//
+// Lives here (not sema.cpp, where it originated) because Parser also
+// needs it - a raw, pre-resolution name check on a top-level `let`/
+// `const` initializer (see Parser::ParseProgram), to automatically treat
+// a document-touching one as a per-page-load local instead of rejecting
+// it as an illegal persistent-global initializer (Sema::CheckGlobalDecl
+// still rejects the one case that can't be rescued this way: an
+// `export`ed one, which needs to be a real global by definition).
+// `inline` so both translation units share one definition (C++17
+// inline variables), not two independent copies that could drift.
+inline const std::unordered_map<std::string, std::string> kAmbientGlobals = {
+    {"document", "ArtDocument"},
+};
 
 // ---------------------------------------------------------------------
 // Type syntax, as written in source (resolved into a ResolvedType by Sema)
@@ -349,30 +376,38 @@ struct Program {
   std::vector<std::unique_ptr<InterfaceDecl>> interfaces;
   std::vector<std::unique_ptr<FunctionDecl>> functions;
   std::vector<std::unique_ptr<FunctionDecl>> externFunctions; // `declare function ...;` - body is always null
-  // Top-level `let`/`const` (each a StmtKind::VarDecl) - handler state
-  // that outlives any single setupApp/function call. Any type, any
-  // initializer expression (see Sema::CheckGlobalDecl) - a bare number/
-  // boolean/string literal becomes a real compile-time constant;
-  // anything else (a call, an object/array literal, ...) is computed
-  // once, in declaration order, by a generated module constructor (see
-  // Codegen::GenGlobalInit) that runs before main/setupApp, the same
-  // "real code, run once, before anything else" mechanism the garbage
-  // collector's own initialization already uses.
+  // Top-level `let`/`const` (each a StmtKind::VarDecl) that's actually a
+  // real persistent global - handler state that outlives any single
+  // setupApp/function call. Any type, any initializer expression (see
+  // Sema::CheckGlobalDecl) - a bare number/boolean/string literal
+  // becomes a real compile-time constant; anything else (a call, an
+  // object/array literal, ...) is computed once, in declaration order,
+  // by a generated module constructor (see Codegen::GenGlobalInit) that
+  // runs before main/setupApp, the same "real code, run once, before
+  // anything else" mechanism the garbage collector's own initialization
+  // already uses. NOT every top-level `let`/`const` ends up here, see
+  // topLevelStmts below.
   std::vector<std::unique_ptr<Stmt>> globals;
-  // Bare top-level statements (an `if`/`while`/`for`/block/expression -
-  // never a VarDecl, which always goes to `globals` above instead) - the
-  // procedural alternative to writing an explicit `function setupApp():
-  // void { ... }`: collected, across every file in the merged program
-  // (dependency-first order, same as `globals`), into a generated
-  // function literally named "setupApp" (see Codegen::GenSetupAppBody) -
-  // main.cpp's existing trampoline already calls exactly that symbol
-  // once per page load, so nothing about the C++ integration needs to
-  // change. Mutually exclusive with an explicit `function setupApp()` -
-  // see Sema::Check. Unlike `globals` (initialized once, at process
-  // start, via a module constructor), these run every time the
-  // generated `setupApp` itself is called - the two lists exist
-  // specifically because those are different lifetimes, not
-  // interchangeable ways to write the same thing.
+  // Bare top-level statements (`if`/`while`/`for`/block/expression, plus
+  // one exception: a `let`/`const` whose initializer touches an ambient
+  // global like `document` - see kAmbientGlobals and
+  // Parser::ParseProgram - lands here too, instead of `globals` above,
+  // since it can't be a real persistent global (document doesn't exist
+  // yet at process start); this is exactly what wrapping it in a bare
+  // `{ }` block already meant, just without requiring the user to write
+  // that themselves) - the procedural alternative to writing an
+  // explicit `function setupApp(): void { ... }`: collected, across
+  // every file in the merged program (dependency-first order, same as
+  // `globals`), into a generated function literally named "setupApp"
+  // (see Codegen::GenSetupAppBody) - main.cpp's existing trampoline
+  // already calls exactly that symbol once per page load, so nothing
+  // about the C++ integration needs to change. Mutually exclusive with
+  // an explicit `function setupApp()` - see Sema::Check. Unlike
+  // `globals` (initialized once, at process start, via a module
+  // constructor), these run every time the generated `setupApp` itself
+  // is called - the two lists exist specifically because those are
+  // different lifetimes, not interchangeable ways to write the same
+  // thing.
   std::vector<std::unique_ptr<Stmt>> topLevelStmts;
 };
 
