@@ -1,12 +1,19 @@
 // jsx_transform is a build-time-only tool, independent of the ART
 // compiler: it turns one .jsx file (real JSX, real loosely-typed
 // JavaScript - not ART's own restricted, statically typed JSX) into
-// plain JS with every JSX element literal rewritten to a
-// React.createElement(...)/React.Fragment call, using esbuild's own
-// JSX transform (github.com/evanw/esbuild) rather than a hand-written
-// parser - the classic-runtime pragma, matching real React's own
-// classic transform, so the output only ever needs React itself as a
-// global (see third_party/react/), never a separate jsx-runtime import.
+// plain JS with every JSX element literal rewritten to an h(...)/
+// Fragment call - h/Fragment being the framework-agnostic, always-
+// native JSX target js_engine.cpp provides (see its own "h/Fragment"
+// section), not React or any other UI library specifically. Uses
+// esbuild's own JSX transform (github.com/evanw/esbuild) rather than a
+// hand-written parser - the classic-runtime pragma (JSXFactory/
+// JSXFragment below), the same mechanism React's own classic transform
+// uses, just pointed at h/Fragment instead - so the output only ever
+// needs those two (always-present) globals, never a separate
+// jsx-runtime import. A project wanting a real UI library (React or
+// otherwise) instead of the built-in h/Fragment reassigns those two
+// globals itself at runtime (see README.md's "Using JavaScript"
+// section) - this tool's own pragma target never changes.
 //
 // Everything that isn't a JSX element literal passes through
 // unchanged - this is a JSX-only transform, not a bundler: it doesn't
@@ -38,9 +45,9 @@ func main() {
 
 	result := api.Transform(string(source), api.TransformOptions{
 		Loader:      api.LoaderJSX,
-		JSX:         api.JSXTransform, // classic runtime - React.createElement/React.Fragment as globals, no jsx-runtime import
-		JSXFactory:  "React.createElement",
-		JSXFragment: "React.Fragment",
+		JSX:         api.JSXTransform, // classic runtime - h/Fragment as globals, no jsx-runtime import
+		JSXFactory:  "h",
+		JSXFragment: "Fragment",
 		Sourcefile:  inputPath,
 		LogLevel:    api.LogLevelSilent,
 	})

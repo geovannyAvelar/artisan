@@ -97,8 +97,8 @@ set(ARTISAN_APP_JS_SOURCE "${PROJECT_SOURCE_DIR}/assets/app.js" CACHE STRING
     "Optional script embedded into the app and run once at startup")
 set(ARTISAN_APP_JSX_SOURCE "" CACHE STRING
     "Optional .jsx counterpart to ARTISAN_APP_JS_SOURCE - real JSX, transformed to plain JS (tools/jsx_transform) before being embedded the same way. Mutually exclusive with ARTISAN_APP_JS_SOURCE.")
-set(ARTISAN_REACT_RUNTIME_SOURCE "" CACHE STRING
-    "Optional script embedded and run before ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE - typically a vendored React+ReactDOM build (see third_party/react/), so React/ReactDOM are globals by the time the app script runs")
+set(ARTISAN_JS_PRELUDE_SOURCE "" CACHE STRING
+    "Optional script embedded and run before ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE - e.g. a vendored UI library (see third_party/react/ for one ready-made example) a project wants as a global before its own app script runs")
 set(ARTISAN_APP_GO_SOURCE "" CACHE STRING
     "Optional directory of a Go app (its own go.mod/main.go, see go/artisango) compiled and linked into the app")
 set(ARTISAN_APP_ART_SOURCE "" CACHE STRING
@@ -137,7 +137,7 @@ add_executable(embed_text
 # ARTISAN_APP_JSX_SOURCE needs a build-time transform before it can be
 # embedded like ARTISAN_APP_JS_SOURCE - real JSX isn't plain JS. Built
 # only when actually configured (like art/'s own conditional
-# add_subdirectory below) so a non-React project never pays the Go/
+# add_subdirectory below) so a plain-JS-only project never pays the Go/
 # esbuild cost. See tools/jsx_transform/main.go.
 if(ARTISAN_APP_JSX_SOURCE)
     find_program(ARTISAN_GO_EXECUTABLE go REQUIRED)
@@ -190,25 +190,26 @@ else()
         "namespace artisan { const char *GetAppScript() { return \"\"; } }\n")
 endif()
 
-# ARTISAN_REACT_RUNTIME_SOURCE is a second, independent optional embedded
+# ARTISAN_JS_PRELUDE_SOURCE is a second, independent optional embedded
 # script, same GetAppScript()/embed_text pattern as above (see
-# main.cpp's navigate(), which runs this one first) - typically the
-# vendored React+ReactDOM build from third_party/react/, but not tied
-# to whether ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE is JSX or
-# plain JS.
-set(GENERATED_REACT_RUNTIME_CPP "${CMAKE_BINARY_DIR}/generated_react_runtime.cpp")
+# main.cpp's navigate(), which runs this one first) - e.g. a vendored UI
+# library a project wants as a global (see third_party/react/ for a
+# ready-made example) before its own app script runs, but not tied to
+# whether ARTISAN_APP_JS_SOURCE/ARTISAN_APP_JSX_SOURCE is JSX or plain
+# JS, or to any particular library.
+set(GENERATED_JS_PRELUDE_CPP "${CMAKE_BINARY_DIR}/generated_js_prelude.cpp")
 
-if(ARTISAN_REACT_RUNTIME_SOURCE)
+if(ARTISAN_JS_PRELUDE_SOURCE)
     add_custom_command(
-        OUTPUT "${GENERATED_REACT_RUNTIME_CPP}"
-        COMMAND embed_text "${ARTISAN_REACT_RUNTIME_SOURCE}" "${GENERATED_REACT_RUNTIME_CPP}" GetReactRuntimeScript
-        DEPENDS embed_text "${ARTISAN_REACT_RUNTIME_SOURCE}"
-        COMMENT "Embedding ${ARTISAN_REACT_RUNTIME_SOURCE}"
+        OUTPUT "${GENERATED_JS_PRELUDE_CPP}"
+        COMMAND embed_text "${ARTISAN_JS_PRELUDE_SOURCE}" "${GENERATED_JS_PRELUDE_CPP}" GetJsPreludeScript
+        DEPENDS embed_text "${ARTISAN_JS_PRELUDE_SOURCE}"
+        COMMENT "Embedding ${ARTISAN_JS_PRELUDE_SOURCE}"
         VERBATIM
     )
 else()
-    file(WRITE "${GENERATED_REACT_RUNTIME_CPP}"
-        "namespace artisan { const char *GetReactRuntimeScript() { return \"\"; } }\n")
+    file(WRITE "${GENERATED_JS_PRELUDE_CPP}"
+        "namespace artisan { const char *GetJsPreludeScript() { return \"\"; } }\n")
 endif()
 
 # ARTISAN_APP_GO_SOURCE is the Go counterpart to ARTISAN_APP_CPP_SOURCES/
@@ -362,7 +363,7 @@ add_executable(artisan
     ${ARTISAN_APP_CPP_SOURCES}
     "${GENERATED_UI_CPP}"
     "${GENERATED_SCRIPT_CPP}"
-    "${GENERATED_REACT_RUNTIME_CPP}"
+    "${GENERATED_JS_PRELUDE_CPP}"
 )
 
 if(NOT ARTISAN_APP_GO_SOURCE)

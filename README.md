@@ -16,7 +16,9 @@ scaffold a project, add components, and build it into one native binary.
 - CMake 3.20+, a C++20 compiler, Python 3, Ninja
 - `pkg-config` packages: `freetype2`, `fontconfig`, `sdl2`
 - Git submodules: Skia, lexbor, QuickJS
-- Go 1.21+ - only needed if a project uses a Go app (see [Using Go](#using-go))
+- Go 1.21+ - needed if a project uses a Go app (see [Using Go](#using-go)),
+  or `app.jsx` (real JSX - see [Using JavaScript](#using-javascript)),
+  which needs it to build `tools/jsx_transform`
 
 ```bash
 git submodule update --init --recursive
@@ -107,10 +109,24 @@ my-app/
     main.go  # SetupApp(artisango.Node) - native startup code
 ```
 
-A project uses one native language, never more than one - `new` always
-scaffolds exactly one, and `artisan-cli build` refuses to build a project
-that somehow ends up with more than one of `app.ts`/`app.tsx`,
-`src/**/*.cpp`, and `goapp/`.
+Pass `--lang js` to scaffold a project with no native language at all -
+just real JSX, against a built-in, zero-dependency JSX target (see
+[Using JavaScript](#using-javascript)):
+
+```bash
+artisan-cli new my-app --lang js
+```
+
+```
+my-app/
+  pages/index.html   # a bare mount point (<div id="root">) - see app.jsx
+  app.jsx             # your own startup code goes here
+```
+
+A project uses one native language, never more than one (`--lang js`
+uses none at all) - `new` always scaffolds exactly one, and
+`artisan-cli build` refuses to build a project that somehow ends up with
+more than one of `app.ts`/`app.tsx`, `src/**/*.cpp`, and `goapp/`.
 
 ## Building a project
 
@@ -122,9 +138,10 @@ There's no mode for naming individual files by hand - it's always a project
 directory, and its files are discovered automatically: every
 `pages/**/*.html`, and exactly one native language - an ART app
 (`app.tsx`, see [Using ART](#using-art) below), every `src/**/*.cpp`, or a
-Go app under `goapp/` (see [Using Go](#using-go) below) - plus an
-optional `app.js` at the project root (embedded and run once at startup,
-alongside whichever native language the project uses). Flags:
+Go app under `goapp/` (see [Using Go](#using-go) below), or none at all -
+plus an optional `app.js`/`app.jsx` at the project root (embedded and
+run once at startup, alongside whichever native language the project
+uses, or on its own - see [Using JavaScript](#using-javascript)). Flags:
 
 - `--build-dir <dir>` - where to configure/build (default `./build`)
 - `-o, --output <path>` - copy the built binary here
@@ -1365,8 +1382,78 @@ requestAnimationFrame(function (timestampMs) {
 });
 ```
 
+### JSX (app.jsx)
+
+`--lang js` (see [Creating a project](#creating-a-project)) scaffolds
+`app.jsx` instead of `app.js` - real JSX, transformed to plain JS at
+build time (`tools/jsx_transform`, built on
+[esbuild](https://github.com/evanw/esbuild)), against `h(tag, props,
+...children)`/`Fragment(props)` - a built-in, zero-dependency element
+builder, not a UI library:
+
+```jsx
+function Item({ label }) {
+  return <li class="item">{label}</li>;
+}
+
+let root = document.getElementById("root");
+if (root) {
+  root.appendChild(
+    <ul>
+      {["a", "b", "c"].map((label) => (
+        <Item label={label} />
+      ))}
+    </ul>
+  );
+}
+```
+
+`h`/`Fragment` build real DOM nodes directly against the same `Node` API
+documented below - not a virtual DOM, so there's no re-render-on-
+state-change model here on purpose: `h(...)` runs once, when called, the
+same as any other function call, and updating the DOM afterward (in an
+event handler, say) is an ordinary `node.textContent = ...`/etc., same
+as anywhere else in this API. A capitalized JSX tag (`<Item .../>`) is a
+component - an ordinary function called with one `props` object
+(`{label: ..., children: ...}`); a lowercase tag (`<li>`) builds a real
+element - `on<type>` (lowercase - `onclick`, not React's `onClick`,
+matching this API's real-HTML-attribute-name style throughout, e.g.
+`class` not `className`) adds an event listener, everything else sets a
+same-named attribute. Children are flattened: an array recurses (what
+makes the `.map()` above work), a string/number becomes a text node,
+`null`/`undefined`/`false` is skipped (`{condition && <li>...</li>}`
+works as expected). `<>...</>` (`Fragment`) has no wrapping element of
+its own - just its children, so a component can return several sibling
+nodes without an unwanted wrapper.
+
+`h`/`Fragment` are ordinary globals, not a hardcoded transform target -
+reassign them and every `.jsx` file in the project starts targeting
+whatever they now point to. This is how to bring in a real UI library
+(React or any other `createElement`-shaped one) instead of the built-in
+element builder: vendor its runtime as `js-prelude.js` (a second,
+independent optional embedded script, run before `app.js`/`app.jsx` -
+`third_party/react/` in this checkout is a ready-made example, already
+the right shape to concatenate and use this way), then have it reassign
+`h`/`Fragment` before your own code runs:
+
+```js
+// js-prelude.js, after the vendored react.development.js/
+// react-dom.development.js content:
+globalThis.h = React.createElement;
+globalThis.Fragment = React.Fragment;
+```
+
+From there, `app.jsx` is ordinary React code - real `React.useState`,
+real hooks, `ReactDOM.createRoot(...).render(<App />)` - since `h(...)`
+now *is* `React.createElement(...)`, and JSX already compiles to calls
+to `h`/`Fragment` regardless of what they point to.
+
 `Node` methods/properties: `tagName`, `nodeType` (1 element / 3 text -
-also `Node.ELEMENT_NODE`/`Node.TEXT_NODE`), `textContent`,
+also `Node.ELEMENT_NODE`/`Node.TEXT_NODE`), `textContent`/`nodeValue`
+(aliases - real DOM only defines `nodeValue` on a Text node, this model
+doesn't draw that distinction; exists because a real DOM reconciler,
+react-dom's included, updates an existing text node by setting this
+property directly, not a method call),
 `getAttribute`/`setAttribute`/`hasAttribute`/`removeAttribute`,
 `classList.add`/`remove`/`toggle`/`contains`/`length`, `style.color`/
 `backgroundColor`/`fontWeight`/`borderColor`/`borderWidth`/`cssText`

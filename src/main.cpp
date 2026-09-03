@@ -459,10 +459,10 @@ int main(int argc, char *argv[]) {
     ArtisanSetupApp(reinterpret_cast<ArtisanNode *>(document.get()));
     jsEngine = std::make_unique<artisan::JsEngine>(*document, timerQueue,
                                                      animationFrameQueue);
-    std::string reactRuntimeScript = artisan::GetReactRuntimeScript();
-    if (!reactRuntimeScript.empty() &&
-        !jsEngine->RunScript(reactRuntimeScript, "react-runtime.js")) {
-      std::cerr << "main: the React runtime script failed to run\n";
+    std::string jsPreludeScript = artisan::GetJsPreludeScript();
+    if (!jsPreludeScript.empty() &&
+        !jsEngine->RunScript(jsPreludeScript, "js-prelude.js")) {
+      std::cerr << "main: the JS prelude script failed to run\n";
     }
     std::string appScript = artisan::GetAppScript();
     if (!appScript.empty() && !jsEngine->RunScript(appScript, "app.js")) {

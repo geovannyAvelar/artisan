@@ -30,6 +30,19 @@ namespace artisan {
 //                                            also the ELEMENT_NODE/
 //                                            TEXT_NODE constants below)
 //   node.textContent                       (read/write)
+//   node.nodeValue                         (read/write; alias for
+//                                            textContent above - real
+//                                            DOM only defines this on a
+//                                            Text node, but this model
+//                                            doesn't draw that
+//                                            distinction. Exists
+//                                            because a real DOM
+//                                            reconciler - react-dom's
+//                                            included - updates an
+//                                            existing text node by
+//                                            setting this property
+//                                            directly, not a method
+//                                            call)
 //   node.parentNode / nextSibling / previousSibling
 //                                           (read-only; re-read from the
 //                                            tree on every access, so
@@ -158,6 +171,39 @@ namespace artisan {
 //   setTimeout(fn, delayMs) / clearTimeout(id)
 //   setInterval(fn, delayMs) / clearInterval(id)
 //   requestAnimationFrame(fn) -> fn(timestampMs) / cancelAnimationFrame(id)
+//   h(tag, props, ...children) / Fragment(props)
+//                                           -> the framework-agnostic
+//                                            JSX target every .jsx file
+//                                            compiles against (see
+//                                            tools/jsx_transform) - a
+//                                            plain element-builder over
+//                                            the same Node API above,
+//                                            not a virtual DOM. `tag` a
+//                                            string builds a real
+//                                            element (props: "on<type>"
+//                                            - lowercase, e.g. "onclick"
+//                                            - adds a listener,
+//                                            everything else sets a
+//                                            same-named attribute;
+//                                            children: an array
+//                                            recurses, string/number
+//                                            becomes a text node,
+//                                            null/undefined/boolean is
+//                                            skipped). `tag` a function
+//                                            (a component, or Fragment
+//                                            itself) is called with one
+//                                            `props` object (children
+//                                            merged in as
+//                                            `props.children`) and its
+//                                            return value passed
+//                                            through as-is. Plain,
+//                                            ordinary globals - a
+//                                            project wanting a real UI
+//                                            library (React or
+//                                            otherwise) instead just
+//                                            reassigns them itself, see
+//                                            README.md's "Using
+//                                            JavaScript" section.
 //
 // This is the runtime counterpart to artisanc: where artisanc turns
 // markup into Node-construction C++ at build time, JsEngine lets an

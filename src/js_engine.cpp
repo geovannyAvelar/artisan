@@ -1655,6 +1655,15 @@ const JSCFunctionListEntry kNodeProto[] = {
     JS_CFUNC_DEF("setData", 2, JsNodeSetData),
     JS_CGETSET_DEF("tagName", JsNodeGetTagName, nullptr),
     JS_CGETSET_DEF("textContent", JsNodeGetTextContent, JsNodeSetTextContent),
+    // Real DOM only defines nodeValue on a Text node (null on an
+    // element - textContent is the element one, a different, recursive
+    // concept) - this model doesn't draw that distinction (aliased to
+    // the exact same getter/setter as textContent above), since nothing
+    // here needs it to. Added specifically because react-dom's own
+    // reconciler updates an existing text node's content by setting
+    // `.nodeValue` directly (a property, not a method) - see
+    // README.md's "Using JavaScript" section for why this exists.
+    JS_CGETSET_DEF("nodeValue", JsNodeGetTextContent, JsNodeSetTextContent),
     JS_CGETSET_DEF("parentNode", JsNodeGetParentNode, nullptr),
     JS_CGETSET_DEF("ownerDocument", JsNodeGetOwnerDocument, nullptr),
     JS_CGETSET_DEF("nextSibling", JsNodeGetNextSibling, nullptr),
@@ -1787,6 +1796,160 @@ const JSCFunctionListEntry kDocumentFuncs[] = {
     JS_CFUNC_DEF("addEventListener", 2, JsDocumentAddEventListener),
     JS_CFUNC_DEF("removeEventListener", 2, JsDocumentRemoveEventListener),
 };
+
+// --- h/Fragment ---
+//
+// The framework-agnostic JSX target every .jsx file compiles against
+// (see tools/jsx_transform: JSXFactory/JSXFragment are hardcoded to
+// "h"/"Fragment", never React specifically) - a plain element-builder
+// over the same Node API document.createElement/etc. already use, not
+// a virtual DOM or a component re-render system. A project wanting a
+// real UI library (React or otherwise) instead just overwrites these
+// two globals itself (`globalThis.h = React.createElement;
+// globalThis.Fragment = React.Fragment;` in its own prelude script,
+// before app.jsx runs) - see README.md's "Using JavaScript" section.
+
+// Appends `child` into `parent`, flattening the value shapes real JSX
+// children commonly take: an array (recurse - what makes a
+// `.map()`-built list, or Fragment's own returned children, work),
+// string/number (JS_ToCString handles both via ordinary JS ToString
+// conversion - becomes a real text node), a Node this binding itself
+// created (appended directly, transferring ownership the same way
+// JsNodeAppendChild's own "owned" check already does), or
+// null/undefined/boolean (skipped - conditional-rendering ergonomics,
+// e.g. `{cond && <div/>}`). Anything else is silently skipped rather
+// than risking a confusing "[object Object]" text node.
+void AppendJsxChild(JSContext *ctx, Node *parent, JSValueConst child) {
+  if (JS_IsNull(child) || JS_IsUndefined(child) || JS_IsBool(child)) {
+    return;
+  }
+  if (JS_IsArray(child)) {
+    JSValue lengthVal = JS_GetPropertyStr(ctx, child, "length");
+    int64_t length = 0;
+    JS_ToInt64(ctx, &length, lengthVal);
+    JS_FreeValue(ctx, lengthVal);
+    for (int64_t i = 0; i < length; ++i) {
+      JSValue element = JS_GetPropertyUint32(ctx, child, static_cast<uint32_t>(i));
+      AppendJsxChild(ctx, parent, element);
+      JS_FreeValue(ctx, element);
+    }
+    return;
+  }
+  NodeHandle *handle = GetHandle(ctx, child);
+  if (handle != nullptr) {
+    // A Node not owned here (already attached elsewhere, same
+    // "re-parenting isn't supported" limitation JsNodeAppendChild has)
+    // is silently skipped - a child expression deep in a JSX tree has
+    // no good way to report an exception mid-build.
+    if (handle->owned) {
+      parent->AppendChild(std::move(handle->owned));
+    }
+    return;
+  }
+  const char *text = JS_ToCString(ctx, child);
+  if (text != nullptr) {
+    parent->AppendChild(Node::CreateText(text));
+    JS_FreeCString(ctx, text);
+  }
+}
+
+// Applies every own enumerable string key of `props` onto `element`:
+// `on<type>` (lowercase - "onclick", not React's camelCase "onClick",
+// matching ART's own JSX convention and this framework's real-HTML-
+// attribute-name style throughout, e.g. "class" not "className") adds
+// an event listener; everything else sets a same-named attribute.
+void ApplyJsxProps(JSContext *ctx, Node *element, JSValueConst props) {
+  if (!JS_IsObject(props)) {
+    return;
+  }
+  JSPropertyEnum *tab = nullptr;
+  uint32_t count = 0;
+  if (JS_GetOwnPropertyNames(ctx, &tab, &count, props,
+                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) {
+    return;
+  }
+  for (uint32_t i = 0; i < count; ++i) {
+    const char *name = JS_AtomToCString(ctx, tab[i].atom);
+    if (name == nullptr) {
+      continue;
+    }
+    std::string key = name;
+    JS_FreeCString(ctx, name);
+    if (key == "children") {
+      continue; // Merged in by the caller, not a real prop of its own.
+    }
+    JSValue value = JS_GetProperty(ctx, props, tab[i].atom);
+    bool isHandler = key.size() > 2 && key[0] == 'o' && key[1] == 'n';
+    if (isHandler && JS_IsFunction(ctx, value)) {
+      element->AddEventListener(key.substr(2), JsCallback(ctx, value), false);
+    } else {
+      const char *strValue = JS_ToCString(ctx, value);
+      if (strValue != nullptr) {
+        element->SetAttribute(key, strValue);
+        JS_FreeCString(ctx, strValue);
+      }
+    }
+    JS_FreeValue(ctx, value);
+  }
+  JS_FreePropertyEnum(ctx, tab, count);
+}
+
+// h(tag, props, ...children) - what every JSX element literal compiles
+// to (tools/jsx_transform). `tag` a function means a component (a
+// capitalized JSX tag, or Fragment itself - see JsFragment below): call
+// it with one `props` object (children merged in as `props.children`)
+// and return whatever it returns, as-is - this is what makes Fragment
+// work with zero special-casing here. `tag` a string means a real
+// element: build it, apply props (ApplyJsxProps), append children
+// (AppendJsxChild, each of the remaining arguments).
+JSValue JsCreateElement(JSContext *ctx, JSValueConst /*this_val*/, int argc,
+                         JSValueConst *argv) {
+  if (argc < 1) {
+    return JS_EXCEPTION;
+  }
+
+  JSValue props = (argc >= 2 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1]))
+                       ? JS_DupValue(ctx, argv[1])
+                       : JS_NewObject(ctx);
+  JSValue children = JS_NewArray(ctx);
+  for (int i = 2; i < argc; ++i) {
+    JS_SetPropertyUint32(ctx, children, static_cast<uint32_t>(i - 2),
+                          JS_DupValue(ctx, argv[i]));
+  }
+  JS_SetPropertyStr(ctx, props, "children", children);
+
+  if (JS_IsFunction(ctx, argv[0])) {
+    JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 1, &props);
+    JS_FreeValue(ctx, props);
+    return result;
+  }
+
+  const char *tag = JS_ToCString(ctx, argv[0]);
+  std::unique_ptr<Node> node = Node::CreateElement(tag != nullptr ? tag : "");
+  JS_FreeCString(ctx, tag);
+  Node *nodePtr = node.get();
+
+  ApplyJsxProps(ctx, nodePtr, props);
+  for (int i = 2; i < argc; ++i) {
+    AppendJsxChild(ctx, nodePtr, argv[i]);
+  }
+  JS_FreeValue(ctx, props);
+
+  return WrapOwnedNode(ctx, std::move(node));
+}
+
+// Fragment(props) - what `<>...</>` compiles to: h(Fragment, null,
+// ...children). Just hands back the children h already collected onto
+// `props.children` - h's own AppendJsxChild (in whatever called this
+// Fragment) flattens the returned array, so no dedicated sentinel or
+// special-casing is needed anywhere for fragments to work.
+JSValue JsFragment(JSContext *ctx, JSValueConst /*this_val*/, int argc,
+                    JSValueConst *argv) {
+  if (argc < 1 || !JS_IsObject(argv[0])) {
+    return JS_NewArray(ctx);
+  }
+  return JS_GetPropertyStr(ctx, argv[0], "children");
+}
 
 // --- console ---
 
@@ -2047,6 +2210,15 @@ JsEngine::JsEngine(Node &document, TimerQueue &timers,
   JS_SetPropertyStr(impl_->ctx, global, "document", documentObj);
   JS_SetPropertyStr(impl_->ctx, global, "console", consoleObj);
   JS_SetPropertyStr(impl_->ctx, global, "Node", nodeGlobal);
+  // The framework-agnostic JSX target every .jsx file compiles against
+  // - see their own doc comments above ("--- h/Fragment ---") for what
+  // they do and why. Plain, ordinary globals - like everything else
+  // here, a script (including a project's own prelude) can reassign
+  // them to forward to a real UI library instead.
+  JS_SetPropertyStr(impl_->ctx, global, "h",
+                     JS_NewCFunction(impl_->ctx, JsCreateElement, "h", 1));
+  JS_SetPropertyStr(impl_->ctx, global, "Fragment",
+                     JS_NewCFunction(impl_->ctx, JsFragment, "Fragment", 1));
   // Real browsers: `window === globalThis` (`globalThis` itself is a
   // language-level ES2020 builtin QuickJS already provides on its own -
   // this only adds the browser-specific alias on top of it). Real-world
