@@ -854,10 +854,10 @@ extra bookkeeping: the bridge always copies it into artisan's own
 
 ## Exceptions
 
-`try { ... } catch (name: Error) { ... }` and `throw expr;` are real,
-non-local control flow - a `throw` deep inside a call stack jumps
-directly to the nearest enclosing `catch`, skipping every ordinary
-`return` in between, exactly like real TS/JS.
+`try { ... } catch (name: Error) { ... } finally { ... }` and `throw
+expr;` are real, non-local control flow - a `throw` deep inside a call
+stack jumps directly to the nearest enclosing `catch`, skipping every
+ordinary `return` in between, exactly like real TS/JS.
 
 ```ts
 function mightFail(x: number): number {
@@ -876,26 +876,23 @@ function main(): number {
 }
 ```
 
-Two real, deliberate limits on this first version, both because
-generalizing them needs infrastructure ART doesn't have yet:
+One real, deliberate limit on this first version, because generalizing
+it needs infrastructure ART doesn't have yet:
 
 - **`Error` (`{ message: string }`) is the only throwable/catchable
   type.** `throw` always needs one; `catch (name: Type)` must always
   write `Error` as `Type`. Real, unrestricted polymorphic catching
   (`catch` selecting among several different thrown types by their
   actual runtime type) needs runtime type identification - ART has none
-  yet (no `any`, no dynamic dispatch - see
+  for this yet (`any`'s own `typeof` narrowing doesn't reach structs -
+  see [Dynamic typing](#dynamic-typing) - and there's still no
+  `instanceof`/downcasting either - see
   [What's not in ART](#whats-not-in-art)) - so with exactly one
   throwable type in flight, every active handler always matches
   whatever's thrown, and there's no type-tag check to get wrong. `Error`
   is a real, ordinary struct otherwise (built the normal way -
   `{ message: "..." }`), not compiler magic beyond being the one thing
   `throw`/`catch` recognize.
-- **No `finally` yet.** Its own codegen has to guarantee running on
-  every exit path out of a `try` - normal completion, an exception this
-  same `try` catches, one that propagates past it uncaught, *and* an
-  early `return`/`break`/`continue` fired from inside the `try` - a
-  distinct, substantial piece of work on top of the mechanism below.
 
 Mechanism: `setjmp`/`longjmp`, called directly (never through a wrapper
 function - `setjmp` only captures a resumable state for the function
@@ -929,6 +926,67 @@ bug. This is handled uniformly (see `Codegen::ScopeExit`/
 currently-active `try` frame, in real nesting order, so escaping past
 any number of nested ones - crossing loop, `switch`, and `try`
 boundaries all at once - still costs exactly one restore.
+
+`finally { ... }` is real too, and genuinely guaranteed to run - on
+normal completion, on an exception this same `try` catches, on one that
+propagates past it uncaught, on an early `return`/`break`/`continue`
+fired from inside the `try` (or its `catch`), and even when the `catch`
+body ITSELF throws a new exception:
+
+```ts
+function withCleanup(): number {
+  try {
+    return risky();
+  } catch (e: Error) {
+    return -1;
+  } finally {
+    cleanupResources(); // always runs, whichever path was taken
+  }
+}
+```
+
+Both `catch` and `finally` are individually optional now (`try { ... }
+finally { ... }` with no `catch` is legal, e.g. for cleanup code that
+doesn't care what went wrong) - but at least one of the two is still
+required, the same way real TS/JS's own catch-less `try` still needs a
+`finally` to be worth writing at all.
+
+One real, deliberate limit, again for simplicity rather than a missing
+mechanism: **`return`/`throw`/`break`/`continue` are rejected outright
+anywhere textually inside a `finally` block**, unless (for `break`/
+`continue` only) they target a loop/`switch` that's ITSELF inside that
+same `finally`. Real TS/JS instead lets any of these, written directly
+in a `finally`, silently override whatever the `try`/`catch` was already
+doing - an in-flight exception swallowed by a `finally`'s own `return`
+is a well-known footgun (see e.g. ESLint's `no-unsafe-finally` rule).
+ART deliberately doesn't reproduce that: rejecting it outright keeps a
+`finally` block's own behavior simple to reason about (it always runs
+to completion, then whatever was already happening continues) at the
+cost of a real, rare pattern - an early return specifically *from* a
+`finally` - not compiling. (A `return`/`throw` inside a nested
+function/closure *defined* inside a `finally` is unaffected - it exits
+that inner function, not the enclosing one, same as anywhere else.)
+
+Mechanism: when both `catch` and `finally` are present, this needs TWO
+real handler frames, not one - a `finally`'s guarantee has to hold even
+if the `catch` body itself throws a brand new exception, and the
+existing single-frame try/catch mechanism can't catch that on its own
+(a `catch` body's own errors must never be caught by the same `catch`,
+so its handler frame is already popped before the `catch` body even
+starts running). The OUTER frame's only job is guaranteeing the
+`finally` body runs - and whatever's in flight keeps propagating - no
+matter which of the try/catch's own paths triggered it; the INNER frame
+is the exact original try/catch mechanism, unmodified, nested one level
+inside the outer's own protected region. A `try`/`finally` with no
+`catch` needs only one frame (there's no separate `catch` body of its
+own that could throw and need further protection): an exception
+reaching it runs the `finally` directly, then keeps propagating to
+whatever handler is next. Either way, the `finally` body's own code
+gets emitted more than once (once for normal completion, once per early
+exit crossing it, ...) - safe specifically because of the limit above:
+Sema guarantees a `finally` body can never itself jump anywhere but
+straight through, so duplicating its code at each of these call sites
+can never run it twice for the same actual pass through the `try`.
 
 ## Nullable types
 

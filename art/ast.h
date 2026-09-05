@@ -426,12 +426,18 @@ enum class StmtKind {
   // `let x = 1, y = 2;` isn't legal in ART either, only one declaration
   // per statement).
   Destructure,
-  // `try { body } catch (name: Error) { catchBody }` - reuses `body` for
-  // the try block (same field While/DoWhile/If already use) and
-  // `elseBranch` for the catch block (same field If's own `else` uses -
-  // Try never needs an actual else, so this is free to reuse), plus
-  // VarDecl's own varName/declaredType/resolvedVarType for the catch
-  // binding. No `finally` yet, and `declaredType` must resolve to
+  // `try { body } catch (name: Error) { catchBody } finally {
+  // finallyBody }` - reuses `body` for the try block (same field While/
+  // DoWhile/If already use) and `elseBranch` for the catch block (same
+  // field If's own `else` uses - Try never needs an actual else, so this
+  // is free to reuse), plus VarDecl's own varName/declaredType/
+  // resolvedVarType for the catch binding, plus the new `finallyBody`
+  // field (below) for `finally`. Both catch and finally are individually
+  // optional (unlike real TS/JS's own catch-less `try`, which needs no
+  // `finally` either - ART requires at least one of the two, since a
+  // `try` with neither would do nothing a plain block doesn't already);
+  // `declaredType` non-null iff there's a catch clause, `finallyBody`
+  // non-null iff there's a `finally` one. `declaredType` must resolve to
   // exactly `Error` (Sema rejects anything else) - see the builtin
   // `Error` interface's own doc comment (Sema::SeedBuiltins) for why:
   // with only one throwable type possible, every active handler always
@@ -507,6 +513,20 @@ struct Stmt {
   std::unique_ptr<Expr> cond;
   std::unique_ptr<Stmt> body; // ForOf also uses this
   std::unique_ptr<Stmt> elseBranch;
+
+  // Try only - see StmtKind::Try's own doc comment. Null iff there's no
+  // `finally` clause. A block, same as `body`/`elseBranch` - Sema rejects
+  // any `return`/`throw` anywhere inside it, and resets loopDepth/
+  // switchDepth to 0 while checking it (same boundary a function body's
+  // own gets), so a `break`/`continue` inside it can never escape past
+  // this finally either, even nested several finallys deep - only one
+  // targeting a loop/switch that's ITSELF inside this same finally is
+  // legal. That guarantee is what lets Codegen safely emit this block's
+  // own code at more than one call site (normal completion, an early
+  // return/break/continue crossing this try, the try's own catch
+  // clause - if any - itself throwing, ...) - it can never jump anywhere
+  // other than straight through to whatever follows it at each site.
+  std::unique_ptr<Stmt> finallyBody;
 
   // For: optional VarDecl or ExprStmt initializer, and optional update expression
   std::unique_ptr<Stmt> initStmt;

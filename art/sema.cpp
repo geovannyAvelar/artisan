@@ -201,12 +201,14 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
       frameStack.push_back(instMethod);
       PushScope();
       for (auto &p : instMethod->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
-      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth, savedFinallyDepth = finallyDepth;
       loopDepth = 0;
       switchDepth = 0;
+      finallyDepth = 0;
       CheckStmt(instMethod->body.get());
       loopDepth = savedLoopDepth;
       switchDepth = savedSwitchDepth;
+      finallyDepth = savedFinallyDepth;
       PopScope();
       frameStack.pop_back();
       if (instMethod->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(instMethod->body.get())) {
@@ -1090,12 +1092,14 @@ void Sema::CheckFunctionBody(FunctionDecl *decl) {
   // explicitly anyway rather than relying on that, matching every other
   // body-checking site (see loopDepth's own doc comment for the other
   // three).
-  int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+  int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth, savedFinallyDepth = finallyDepth;
   loopDepth = 0;
   switchDepth = 0;
+  finallyDepth = 0;
   CheckStmt(decl->body.get());
   loopDepth = savedLoopDepth;
   switchDepth = savedSwitchDepth;
+  finallyDepth = savedFinallyDepth;
   PopScope();
   frameStack.pop_back();
   if (decl->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(decl->body.get())) {
@@ -1184,12 +1188,14 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
       frameStack.push_back(inst);
       PushScope();
       for (auto &p : inst->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
-      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth, savedFinallyDepth = finallyDepth;
       loopDepth = 0;
       switchDepth = 0;
+      finallyDepth = 0;
       CheckStmt(inst->body.get());
       loopDepth = savedLoopDepth;
       switchDepth = savedSwitchDepth;
+      finallyDepth = savedFinallyDepth;
       PopScope();
       frameStack.pop_back();
       if (inst->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(inst->body.get())) {
@@ -1270,13 +1276,17 @@ bool Sema::AlwaysReturns(Stmt *stmt) {
     }
     return true;
   }
-  // A try always-returns only if BOTH the try body and the catch body
-  // do - if either one can fall off the end, so can the whole
-  // statement (either by completing the try normally with no
-  // exception, or by an exception being caught and the catch body
-  // itself not returning).
+  // A try always-returns only if the try body does, AND - when there's a
+  // catch clause - the catch body does too (if either one can fall off
+  // the end, so can the whole statement: either by completing the try
+  // normally with no exception, or by an exception being caught and the
+  // catch body itself not returning). `finally` never contributes a
+  // return of its own (Sema's own Return case rejects one inside it), so
+  // it's irrelevant here either way - a `try { ... } finally { ... }`
+  // with no catch always-returns exactly when its try body does, same as
+  // an ordinary block would.
   case StmtKind::Try:
-    return AlwaysReturns(stmt->body.get()) && AlwaysReturns(stmt->elseBranch.get());
+    return AlwaysReturns(stmt->body.get()) && (!stmt->elseBranch || AlwaysReturns(stmt->elseBranch.get()));
   default:
     return false;
   }
@@ -1584,30 +1594,63 @@ void Sema::CheckStmt(Stmt *stmt) {
     // needed here for it.
     CheckStmt(stmt->body.get());
 
-    ResolvedType catchType = ResolveType(stmt->declaredType.get());
-    if (catchType.tag != TypeTag::Unknown &&
-        !(catchType.tag == TypeTag::Struct && catchType.structName == "Error")) {
-      Error(stmt->loc, "a catch clause can only catch 'Error' right now - '" + catchType.ToString() +
-                            "' isn't a throwable/catchable type yet (only one exception type exists so "
-                            "far - see README.md's own note on why)");
+    // Catch is optional now that `finally` exists (see StmtKind::Try's
+    // own doc comment) - Parser::ParseTry already guarantees at least one
+    // of the two is present, so `declaredType` non-null is exactly "has a
+    // catch clause" here.
+    if (stmt->declaredType) {
+      ResolvedType catchType = ResolveType(stmt->declaredType.get());
+      if (catchType.tag != TypeTag::Unknown &&
+          !(catchType.tag == TypeTag::Struct && catchType.structName == "Error")) {
+        Error(stmt->loc, "a catch clause can only catch 'Error' right now - '" + catchType.ToString() +
+                              "' isn't a throwable/catchable type yet (only one exception type exists so "
+                              "far - see README.md's own note on why)");
+      }
+      stmt->resolvedVarType = catchType;
+      // One scope for the catch variable itself, wrapping the catch
+      // body's own Block (which pushes its own separate inner scope for
+      // its own statements) - same shape a function body's own params +
+      // Block already has (see CheckFunctionBody).
+      PushScope();
+      Declare(stmt->loc, stmt->varName, catchType, /*isConst=*/false, nullptr, stmt);
+      CheckStmt(stmt->elseBranch.get());
+      PopScope();
     }
-    stmt->resolvedVarType = catchType;
-    // One scope for the catch variable itself, wrapping the catch
-    // body's own Block (which pushes its own separate inner scope for
-    // its own statements) - same shape a function body's own params +
-    // Block already has (see CheckFunctionBody).
-    PushScope();
-    Declare(stmt->loc, stmt->varName, catchType, /*isConst=*/false, nullptr, stmt);
-    CheckStmt(stmt->elseBranch.get());
-    PopScope();
+
+    if (stmt->finallyBody) {
+      // Same loopDepth/switchDepth boundary a function body's own gets
+      // (see finallyDepth's own doc comment for exactly why) - a
+      // break/continue inside this finally can only target a loop/switch
+      // that's itself inside it, never one further out.
+      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+      loopDepth = 0;
+      switchDepth = 0;
+      finallyDepth++;
+      CheckStmt(stmt->finallyBody.get());
+      finallyDepth--;
+      loopDepth = savedLoopDepth;
+      switchDepth = savedSwitchDepth;
+    }
     break;
   }
   case StmtKind::Throw: {
+    if (finallyDepth > 0) {
+      // See finallyDepth's own doc comment for why this is rejected
+      // outright rather than given real (but confusing) override
+      // semantics.
+      Error(stmt->loc, "'throw' is not allowed inside a 'finally' block");
+    }
     ResolvedType errorType = ResolvedType::Struct("Error");
     CheckExpr(stmt->expr.get(), &errorType);
     break;
   }
   case StmtKind::Return: {
+    if (finallyDepth > 0) {
+      // See finallyDepth's own doc comment for why this is rejected
+      // outright rather than given real (but confusing) override
+      // semantics.
+      Error(stmt->loc, "'return' is not allowed inside a 'finally' block");
+    }
     if (!currentFunction) {
       // Only possible from a top-level statement (see
       // Program::topLevelStmts) - a function body always has
@@ -2632,12 +2675,14 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     frameStack.push_back(fn);
     PushScope();
     for (auto &p : fn->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
-    int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+    int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth, savedFinallyDepth = finallyDepth;
     loopDepth = 0;
     switchDepth = 0;
+    finallyDepth = 0;
     CheckStmt(fn->body.get());
     loopDepth = savedLoopDepth;
     switchDepth = savedSwitchDepth;
+    finallyDepth = savedFinallyDepth;
     PopScope();
     frameStack.pop_back();
     currentFunction = savedCurrentFunction;

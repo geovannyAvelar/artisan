@@ -96,6 +96,26 @@ private:
   // same as real JS.
   int loopDepth = 0;
   int switchDepth = 0;
+  // How many `finally` blocks CheckStmt is currently nested inside,
+  // textually (a count, not a bool, since a try/catch/finally can nest
+  // inside another try's own finally) - `return`/`throw` are rejected
+  // unconditionally whenever this is nonzero (see CheckStmt's own Return/
+  // Throw cases): both inherently escape the ENTIRE finally, unlike
+  // `break`/`continue`, which stay legal as long as they target a loop/
+  // switch that's itself inside the same finally - see CheckStmt's own
+  // Try case, which resets loopDepth/switchDepth to 0 around checking a
+  // finallyBody (the same boundary a function body's own gets) to make
+  // that distinction fall out for free, with no separate tracking of its
+  // own. Real TS/JS instead let return/throw/break/continue inside a
+  // `finally` silently override whatever the try/catch was already doing
+  // (swallowing an in-flight exception or return value) - a widely-
+  // flagged footgun (see e.g. ESLint's `no-unsafe-finally` rule) ART
+  // deliberately doesn't reproduce: rejecting these outright, rather than
+  // giving them real-but-confusing override semantics, keeps a `finally`
+  // block simple to reason about (it always runs to completion, then
+  // whatever was already happening continues) at the cost of a real, rare
+  // pattern (an early return specifically FROM a finally) not compiling.
+  int finallyDepth = 0;
 
   // Names currently known non-null within an `if (x != null) { ... }`'s
   // own `then` body, or in the code following an `if (x == null) {

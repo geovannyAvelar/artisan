@@ -62,10 +62,6 @@ enum class TokenKind {
   KwTry,
   KwCatch,
   KwThrow,
-  // Reserved now even though ART has no `finally` yet (see StmtKind::Try's
-  // own doc comment for the exact v1 scope) - so a later addition of it
-  // isn't a breaking change to code that already used it as an ordinary
-  // identifier in the meantime.
   KwFinally,
   KwExtends,
   KwNull,

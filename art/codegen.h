@@ -168,23 +168,78 @@ private:
     // (earliest-pushed) of those N frames' own prev field, loaded once -
     // see GenExceptionHandlerCleanup.
     llvm::Value *framePtr = nullptr;
+
+    // Try, only when this frame's own try/catch/finally statement has a
+    // `finally` clause - the AST Stmt whose `statements` are that clause's
+    // body (see Stmt::finallyBody). Null for a Try frame with no finally,
+    // and for every Loop frame. Read by GenExceptionHandlerCleanup, which
+    // (re-)generates this exact Stmt's own code (via an ordinary GenStmt
+    // call - safe to do more than once, since Sema guarantees a finally
+    // body can never itself jump anywhere but straight through - see
+    // Stmt::finallyBody's own doc comment) at every early-exit call site
+    // that crosses this frame, in addition to the try's own "normal
+    // completion" and "an exception was caught here" call sites (see
+    // GenStmt's own Try case) - one of potentially several places the
+    // SAME source-level finally block's code gets emitted, each a
+    // genuinely different control-flow edge at runtime, never more than
+    // one of which actually executes on any given dynamic pass through
+    // this try statement.
+    Stmt *finallyBody = nullptr;
   };
   std::vector<ScopeExit> scopeStack;
 
   // Restores `@art.exception.currentHandler` to what it was before every
   // Try-kind ScopeExit frame at or above `stopBelow` on `scopeStack` was
   // pushed - i.e. "pop every try handler frame between here and (but not
-  // including) `stopBelow`". Called before any jump that leaves one or
-  // more try bodies early - Break/Continue (stopBelow: the target
-  // loop/switch's own stack index) and Return (stopBelow: 0, the whole
-  // current function). A no-op (no store emitted) if no Try frame is
-  // actually being skipped - skipping straight to a target with no try
-  // in between costs nothing. This is the one piece of bookkeeping that
-  // makes try/catch safe to jump out of early at all: without it, a
-  // LATER, completely unrelated `throw` elsewhere could `longjmp` into a
-  // stack frame that's already been reused by something else - real
-  // memory corruption, not a cosmetic bug.
+  // including) `stopBelow`" - AND, before doing so, runs each crossed
+  // frame's own `finally` body (if it has one - see ScopeExit::
+  // finallyBody), innermost first (real nesting order - the closest
+  // cleanup runs first, matching real TS/JS). Called before any jump that
+  // leaves one or more try bodies early - Break/Continue (stopBelow: the
+  // target loop/switch's own stack index) and Return (stopBelow: 0, the
+  // whole current function). A no-op (no store emitted, no finally run)
+  // if no Try frame is actually being skipped - skipping straight to a
+  // target with no try in between costs nothing. The handler-chain
+  // restoration itself is the one piece of bookkeeping that makes
+  // try/catch safe to jump out of early at all: without it, a LATER,
+  // completely unrelated `throw` elsewhere could `longjmp` into a stack
+  // frame that's already been reused by something else - real memory
+  // corruption, not a cosmetic bug.
   void GenExceptionHandlerCleanup(size_t stopBelow);
+  // Shared tail of both StmtKind::Throw's own codegen and every "this
+  // try/catch has no handler of its own for what just arrived - keep
+  // propagating it" path a `finally` needs (see GenTryFinallyOnly/
+  // GenTryWithFinallyAndCatch): loads `@art.exception.currentHandler`
+  // (already correctly pointing at the next-OUTER handler by the time any
+  // of these call this - see StmtKind::Throw's own "pop BEFORE jumping"
+  // comment), and either longjmps `errorVal` there or, if there is none,
+  // aborts (an uncaught exception). `errorVal` is always an Error* (ptr).
+  void GenRethrow(llvm::Value *errorVal);
+  // The exact try/catch mechanism from before `finally` existed -
+  // requires a catch clause (stmt->declaredType/elseBranch), no finally
+  // awareness of its own. Used directly for a `try`/`catch` with no
+  // `finally`, and reused UNMODIFIED as the inner, protected construct
+  // inside GenTryWithFinallyAndCatch when both are present.
+  void GenTryCatchOnly(Stmt *stmt);
+  // `try { ... } finally { ... }` with NO catch clause - one handler
+  // frame is enough (unlike GenTryWithFinallyAndCatch's two): there's no
+  // separate catch body of its own that could itself throw and need
+  // further protection, so this frame's own "something was thrown" path
+  // just runs the finally body directly, then re-propagates via
+  // GenRethrow, rather than declaring a catch variable and running a
+  // catch body the way GenTryCatchOnly's own does.
+  void GenTryFinallyOnly(Stmt *stmt);
+  // `try { ... } catch (...) { ... } finally { ... }` - both clauses
+  // present. Needs TWO real, separate handler frames: an OUTER one whose
+  // only job is guaranteeing the finally body runs (and whatever's in
+  // flight keeps propagating) even if the CATCH body itself throws -
+  // something a single frame can't do, since GenTryCatchOnly's own catch
+  // path already pops ITS OWN frame before the catch body ever runs (a
+  // catch block's own errors must never be caught by the same catch -
+  // see StmtKind::Throw's own "pop BEFORE jumping" comment) - wrapping an
+  // INNER frame that's the exact unmodified GenTryCatchOnly construct,
+  // nested one level inside the outer's own protected region.
+  void GenTryWithFinallyAndCatch(Stmt *stmt);
 
   void SetupTarget();
   llvm::Type *MapType(const ResolvedType &t);

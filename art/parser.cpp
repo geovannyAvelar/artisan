@@ -838,22 +838,33 @@ std::unique_ptr<Stmt> Parser::ParseSwitch() {
   return stmt;
 }
 
-// `try { body } catch (name: Type) { catchBody }` - no `finally` yet (see
-// StmtKind::Try's own doc comment), and exactly one catch clause is
-// required (not optional the way real TS/JS's own catch-less `try` is -
-// there's nothing else this could usefully do yet without one, since
-// there's no `finally` to fall back on either).
+// `try { body } (catch (name: Type) { catchBody })? (finally {
+// finallyBody })?` - both clauses are individually optional, but at
+// least one is required (same rule real TS/JS's own catch-less/finally-
+// less `try` variants each still have to satisfy on their own - a `try`
+// with neither would do nothing a plain block doesn't already).
 std::unique_ptr<Stmt> Parser::ParseTry() {
   auto stmt = MakeStmt(StmtKind::Try, Cur().loc);
   pos++; // consume 'try'
   stmt->body = ParseBlock();
-  Expect(TokenKind::KwCatch, "after a 'try' block's body - ART has no 'finally' yet, so a catch clause is required");
-  Expect(TokenKind::LParen, "after 'catch'");
-  stmt->varName = Expect(TokenKind::Identifier, "as the caught exception's own local name").text;
-  Expect(TokenKind::Colon, "after the catch variable's name - its type must be written explicitly");
-  stmt->declaredType = ParseType();
-  Expect(TokenKind::RParen, "to close the catch clause's parameter list");
-  stmt->elseBranch = ParseBlock();
+
+  if (Match(TokenKind::KwCatch)) {
+    Expect(TokenKind::LParen, "after 'catch'");
+    stmt->varName = Expect(TokenKind::Identifier, "as the caught exception's own local name").text;
+    Expect(TokenKind::Colon, "after the catch variable's name - its type must be written explicitly");
+    stmt->declaredType = ParseType();
+    Expect(TokenKind::RParen, "to close the catch clause's parameter list");
+    stmt->elseBranch = ParseBlock();
+  }
+
+  if (Match(TokenKind::KwFinally)) {
+    stmt->finallyBody = ParseBlock();
+  }
+
+  if (!stmt->declaredType && !stmt->finallyBody) {
+    Fail("expected 'catch' or 'finally' after a 'try' block's body - at least one is required", stmt->loc);
+  }
+
   return stmt;
 }
 

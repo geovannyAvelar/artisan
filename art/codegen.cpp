@@ -186,6 +186,17 @@ llvm::StructType *Codegen::GetExceptionFrameType() {
 
 // See this method's own doc comment in codegen.h.
 void Codegen::GenExceptionHandlerCleanup(size_t stopBelow) {
+  // Run every crossed try's own finally body first - innermost to
+  // outermost (scanning the stack top-down), real nesting order - BEFORE
+  // touching the handler chain at all, so a nested try inside one of
+  // these finally bodies still sees an accurate (if temporarily
+  // redundant) `@art.exception.currentHandler` while it runs.
+  for (size_t i = scopeStack.size(); i-- > stopBelow;) {
+    if (scopeStack[i].kind == ScopeExit::Kind::Try && scopeStack[i].finallyBody) {
+      GenStmt(scopeStack[i].finallyBody);
+    }
+  }
+
   llvm::Value *outermostTryFrame = nullptr;
   for (size_t i = stopBelow; i < scopeStack.size(); i++) {
     if (scopeStack[i].kind == ScopeExit::Kind::Try) {
@@ -1125,6 +1136,193 @@ void Codegen::GenClosureFunction(FunctionDecl *fn) {
 // Statements
 // ---------------------------------------------------------------------
 
+// See this method's own doc comment in codegen.h.
+void Codegen::GenRethrow(llvm::Value *errorVal) {
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  llvm::Value *handler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
+  llvm::Value *hasHandler = builder.CreateICmpNE(handler, llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)));
+
+  auto *handledBB = llvm::BasicBlock::Create(context, "rethrow.handled", currentFunction);
+  auto *uncaughtBB = llvm::BasicBlock::Create(context, "rethrow.uncaught", currentFunction);
+  builder.CreateCondBr(hasHandler, handledBB, uncaughtBB);
+
+  // No active handler anywhere - matches real JS's "an uncaught
+  // exception terminates the program" (no message printed yet - a
+  // real follow-up, not attempted here to keep this v1's actual
+  // control-flow mechanism the sole focus).
+  builder.SetInsertPoint(uncaughtBB);
+  builder.CreateCall(abortFn, {});
+  builder.CreateUnreachable();
+
+  builder.SetInsertPoint(handledBB);
+  llvm::StructType *frameTy = GetExceptionFrameType();
+  // Pop BEFORE jumping - once the target handler is entered, it is no
+  // longer "inside" its own try (matches GenTryCatchOnly's own Try case,
+  // which does NOT re-pop on the catch path, since this already did).
+  llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, handler, 1);
+  llvm::Value *prev = builder.CreateLoad(ptrTy, prevFieldPtr);
+  builder.CreateStore(prev, exceptionCurrentHandler);
+  llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, handler, 2);
+  builder.CreateStore(errorVal, thrownFieldPtr);
+  llvm::Value *jmpBufPtr = builder.CreateStructGEP(frameTy, handler, 0);
+  builder.CreateCall(longjmpFn, {jmpBufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 1)});
+  builder.CreateUnreachable();
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenTryCatchOnly(Stmt *stmt) {
+  llvm::StructType *frameTy = GetExceptionFrameType();
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  // Entry-block alloca, same convention every other local already
+  // uses - correct even under recursion or a try inside a loop, since
+  // `alloca` allocates fresh stack space on every actual call/iteration
+  // of the function that contains it; there's exactly one active copy
+  // of this frame per dynamically-active try, never shared.
+  llvm::AllocaInst *frame = CreateEntryAlloca(currentFunction, frameTy, "try.frame");
+
+  // Push: save the currently-active handler into this frame's own
+  // "prev" field, then make this frame the new active one.
+  llvm::Value *prevHandler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
+  llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, frame, 1);
+  builder.CreateStore(prevHandler, prevFieldPtr);
+  builder.CreateStore(frame, exceptionCurrentHandler);
+
+  llvm::Value *jmpBufPtr = builder.CreateStructGEP(frameTy, frame, 0);
+  llvm::Value *rc = builder.CreateCall(setjmpFn, {jmpBufPtr});
+  llvm::Value *isFirstEntry = builder.CreateICmpEQ(rc, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
+
+  auto *tryBB = llvm::BasicBlock::Create(context, "try.body", currentFunction);
+  auto *catchBB = llvm::BasicBlock::Create(context, "try.catch", currentFunction);
+  auto *endBB = llvm::BasicBlock::Create(context, "try.end", currentFunction);
+  builder.CreateCondBr(isFirstEntry, tryBB, catchBB);
+
+  builder.SetInsertPoint(tryBB);
+  scopeStack.push_back({.kind = ScopeExit::Kind::Try, .framePtr = frame});
+  GenStmt(stmt->body.get());
+  scopeStack.pop_back();
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    // Normal completion (no exception, no early exit - both of those
+    // are handled elsewhere: GenExceptionHandlerCleanup for an early
+    // exit, GenStmt's own Throw case for an exception). Restore the
+    // handler that was active before this try, so a later, unrelated
+    // try/throw doesn't see this now-inactive frame.
+    builder.CreateStore(prevHandler, exceptionCurrentHandler);
+    builder.CreateBr(endBB);
+  }
+
+  builder.SetInsertPoint(catchBB);
+  // The handler was already popped by GenRethrow before the longjmp that
+  // resumed execution here fired - nothing to restore on this path.
+  llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, frame, 2);
+  llvm::Value *thrownVal = builder.CreateLoad(ptrTy, thrownFieldPtr);
+  llvm::Type *catchVarTy = MapType(stmt->resolvedVarType);
+  // Same boxed-vs-plain split every other local declaration already
+  // has (see GenStmt's VarDecl case) - a closure capturing the caught
+  // exception variable needs a real heap cell, not a stack slot that's
+  // about to go out of scope.
+  if (stmt->isCapturedByClosure) {
+    llvm::AllocaInst *slot = CreateEntryAlloca(currentFunction, ptrTy, stmt->varName);
+    uint64_t bytes = module->getDataLayout().getTypeAllocSize(catchVarTy).getFixedValue();
+    llvm::Value *cellPtr = GenHeapAlloc(bytes);
+    builder.CreateStore(thrownVal, cellPtr);
+    builder.CreateStore(cellPtr, slot);
+    Declare(stmt->varName, slot, catchVarTy, /*isBoxed=*/true);
+  } else {
+    llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, catchVarTy, stmt->varName);
+    builder.CreateStore(thrownVal, alloca);
+    Declare(stmt->varName, alloca, catchVarTy);
+  }
+  GenStmt(stmt->elseBranch.get());
+  if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(endBB);
+
+  builder.SetInsertPoint(endBB);
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenTryFinallyOnly(Stmt *stmt) {
+  llvm::StructType *frameTy = GetExceptionFrameType();
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  llvm::AllocaInst *frame = CreateEntryAlloca(currentFunction, frameTy, "try.frame");
+
+  llvm::Value *prevHandler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
+  builder.CreateStore(prevHandler, builder.CreateStructGEP(frameTy, frame, 1));
+  builder.CreateStore(frame, exceptionCurrentHandler);
+
+  llvm::Value *rc = builder.CreateCall(setjmpFn, {builder.CreateStructGEP(frameTy, frame, 0)});
+  llvm::Value *isFirstEntry = builder.CreateICmpEQ(rc, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
+
+  auto *tryBB = llvm::BasicBlock::Create(context, "try.body", currentFunction);
+  auto *catchBB = llvm::BasicBlock::Create(context, "try.catch", currentFunction);
+  auto *endBB = llvm::BasicBlock::Create(context, "try.end", currentFunction);
+  builder.CreateCondBr(isFirstEntry, tryBB, catchBB);
+
+  builder.SetInsertPoint(tryBB);
+  scopeStack.push_back({.kind = ScopeExit::Kind::Try, .framePtr = frame, .finallyBody = stmt->finallyBody.get()});
+  GenStmt(stmt->body.get());
+  scopeStack.pop_back();
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateStore(prevHandler, exceptionCurrentHandler);
+    GenStmt(stmt->finallyBody.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(endBB);
+  }
+
+  builder.SetInsertPoint(catchBB);
+  // No catch clause of its own - just run the finally, then keep
+  // propagating whatever was thrown (GenRethrow already loads the
+  // now-correctly-restored `@art.exception.currentHandler` - see its own
+  // doc comment - so this needs no explicit pop of its own, same as
+  // GenTryCatchOnly's own catch path).
+  llvm::Value *thrownVal = builder.CreateLoad(ptrTy, builder.CreateStructGEP(frameTy, frame, 2));
+  GenStmt(stmt->finallyBody.get());
+  if (!builder.GetInsertBlock()->getTerminator()) GenRethrow(thrownVal);
+
+  builder.SetInsertPoint(endBB);
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenTryWithFinallyAndCatch(Stmt *stmt) {
+  llvm::StructType *frameTy = GetExceptionFrameType();
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  llvm::AllocaInst *outerFrame = CreateEntryAlloca(currentFunction, frameTy, "try.outer.frame");
+
+  llvm::Value *prevHandler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
+  builder.CreateStore(prevHandler, builder.CreateStructGEP(frameTy, outerFrame, 1));
+  builder.CreateStore(outerFrame, exceptionCurrentHandler);
+
+  llvm::Value *rc = builder.CreateCall(setjmpFn, {builder.CreateStructGEP(frameTy, outerFrame, 0)});
+  llvm::Value *isFirstEntry = builder.CreateICmpEQ(rc, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
+
+  auto *outerTryBB = llvm::BasicBlock::Create(context, "try.outer.body", currentFunction);
+  auto *outerCatchBB = llvm::BasicBlock::Create(context, "try.outer.catch", currentFunction);
+  auto *outerEndBB = llvm::BasicBlock::Create(context, "try.outer.end", currentFunction);
+  builder.CreateCondBr(isFirstEntry, outerTryBB, outerCatchBB);
+
+  builder.SetInsertPoint(outerTryBB);
+  // Covers BOTH the try body and the catch body (GenTryCatchOnly's own
+  // inner ScopeExit only ever covers the try body itself, matching the
+  // existing "the handler is already popped before the catch body even
+  // runs" semantics) - an early return/break/continue from EITHER one
+  // needs this outer frame's finally to run exactly once on its way out.
+  scopeStack.push_back({.kind = ScopeExit::Kind::Try, .framePtr = outerFrame, .finallyBody = stmt->finallyBody.get()});
+  GenTryCatchOnly(stmt); // unmodified - its own separate inner frame
+  scopeStack.pop_back();
+  if (!builder.GetInsertBlock()->getTerminator()) {
+    builder.CreateStore(prevHandler, exceptionCurrentHandler);
+    GenStmt(stmt->finallyBody.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(outerEndBB);
+  }
+
+  builder.SetInsertPoint(outerCatchBB);
+  // Reached only if the INNER catch body itself threw - the inner try
+  // body's own throw is already fully handled inside GenTryCatchOnly,
+  // without ever escaping to this outer frame at all.
+  llvm::Value *rethrowVal = builder.CreateLoad(ptrTy, builder.CreateStructGEP(frameTy, outerFrame, 2));
+  GenStmt(stmt->finallyBody.get());
+  if (!builder.GetInsertBlock()->getTerminator()) GenRethrow(rethrowVal);
+
+  builder.SetInsertPoint(outerEndBB);
+}
+
 void Codegen::GenStmt(Stmt *stmt) {
   switch (stmt->kind) {
   case StmtKind::VarDecl: {
@@ -1492,106 +1690,24 @@ void Codegen::GenStmt(Stmt *stmt) {
   }
 
   case StmtKind::Try: {
-    llvm::StructType *frameTy = GetExceptionFrameType();
-    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
-    // Entry-block alloca, same convention every other local already
-    // uses - correct even under recursion or a try inside a loop, since
-    // `alloca` allocates fresh stack space on every actual call/iteration
-    // of the function that contains it; there's exactly one active copy
-    // of this frame per dynamically-active try, never shared.
-    llvm::AllocaInst *frame = CreateEntryAlloca(currentFunction, frameTy, "try.frame");
-
-    // Push: save the currently-active handler into this frame's own
-    // "prev" field, then make this frame the new active one.
-    llvm::Value *prevHandler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
-    llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, frame, 1);
-    builder.CreateStore(prevHandler, prevFieldPtr);
-    builder.CreateStore(frame, exceptionCurrentHandler);
-
-    llvm::Value *jmpBufPtr = builder.CreateStructGEP(frameTy, frame, 0);
-    llvm::Value *rc = builder.CreateCall(setjmpFn, {jmpBufPtr});
-    llvm::Value *isFirstEntry = builder.CreateICmpEQ(rc, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
-
-    auto *tryBB = llvm::BasicBlock::Create(context, "try.body", currentFunction);
-    auto *catchBB = llvm::BasicBlock::Create(context, "try.catch", currentFunction);
-    auto *endBB = llvm::BasicBlock::Create(context, "try.end", currentFunction);
-    builder.CreateCondBr(isFirstEntry, tryBB, catchBB);
-
-    builder.SetInsertPoint(tryBB);
-    scopeStack.push_back({.kind = ScopeExit::Kind::Try, .framePtr = frame});
-    GenStmt(stmt->body.get());
-    scopeStack.pop_back();
-    if (!builder.GetInsertBlock()->getTerminator()) {
-      // Normal completion (no exception, no early exit - both of those
-      // are handled elsewhere: GenExceptionHandlerCleanup for an early
-      // exit, GenStmt's own Throw case for an exception). Restore the
-      // handler that was active before this try, so a later, unrelated
-      // try/throw doesn't see this now-inactive frame.
-      builder.CreateStore(prevHandler, exceptionCurrentHandler);
-      builder.CreateBr(endBB);
-    }
-
-    builder.SetInsertPoint(catchBB);
-    // The handler was already popped by Throw's own codegen before the
-    // longjmp that resumed execution here fired - nothing to restore on
-    // this path.
-    llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, frame, 2);
-    llvm::Value *thrownVal = builder.CreateLoad(ptrTy, thrownFieldPtr);
-    llvm::Type *catchVarTy = MapType(stmt->resolvedVarType);
-    // Same boxed-vs-plain split every other local declaration already
-    // has (see GenStmt's VarDecl case) - a closure capturing the caught
-    // exception variable needs a real heap cell, not a stack slot that's
-    // about to go out of scope.
-    if (stmt->isCapturedByClosure) {
-      llvm::AllocaInst *slot = CreateEntryAlloca(currentFunction, ptrTy, stmt->varName);
-      uint64_t bytes = module->getDataLayout().getTypeAllocSize(catchVarTy).getFixedValue();
-      llvm::Value *cellPtr = GenHeapAlloc(bytes);
-      builder.CreateStore(thrownVal, cellPtr);
-      builder.CreateStore(cellPtr, slot);
-      Declare(stmt->varName, slot, catchVarTy, /*isBoxed=*/true);
+    // See each helper's own doc comment in codegen.h for exactly why the
+    // finally-and-catch combination needs two real handler frames while
+    // the other two shapes need at most one.
+    bool hasCatch = stmt->declaredType != nullptr;
+    bool hasFinally = stmt->finallyBody != nullptr;
+    if (hasFinally && hasCatch) {
+      GenTryWithFinallyAndCatch(stmt);
+    } else if (hasFinally) {
+      GenTryFinallyOnly(stmt);
     } else {
-      llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, catchVarTy, stmt->varName);
-      builder.CreateStore(thrownVal, alloca);
-      Declare(stmt->varName, alloca, catchVarTy);
+      GenTryCatchOnly(stmt);
     }
-    GenStmt(stmt->elseBranch.get());
-    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(endBB);
-
-    builder.SetInsertPoint(endBB);
     break;
   }
 
   case StmtKind::Throw: {
     llvm::Value *errorVal = GenExpr(stmt->expr.get()); // an Error* (ptr)
-    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
-    llvm::Value *handler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
-    llvm::Value *hasHandler = builder.CreateICmpNE(handler, llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)));
-
-    auto *handledBB = llvm::BasicBlock::Create(context, "throw.handled", currentFunction);
-    auto *uncaughtBB = llvm::BasicBlock::Create(context, "throw.uncaught", currentFunction);
-    builder.CreateCondBr(hasHandler, handledBB, uncaughtBB);
-
-    // No active handler anywhere - matches real JS's "an uncaught
-    // exception terminates the program" (no message printed yet - a
-    // real follow-up, not attempted here to keep this v1's actual
-    // control-flow mechanism the sole focus).
-    builder.SetInsertPoint(uncaughtBB);
-    builder.CreateCall(abortFn, {});
-    builder.CreateUnreachable();
-
-    builder.SetInsertPoint(handledBB);
-    llvm::StructType *frameTy = GetExceptionFrameType();
-    // Pop BEFORE jumping - once the catch block is entered, it is no
-    // longer "inside" its own try (matches GenStmt's Try case, which
-    // does NOT re-pop on the catch path, since this already did).
-    llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, handler, 1);
-    llvm::Value *prev = builder.CreateLoad(ptrTy, prevFieldPtr);
-    builder.CreateStore(prev, exceptionCurrentHandler);
-    llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, handler, 2);
-    builder.CreateStore(errorVal, thrownFieldPtr);
-    llvm::Value *jmpBufPtr = builder.CreateStructGEP(frameTy, handler, 0);
-    builder.CreateCall(longjmpFn, {jmpBufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 1)});
-    builder.CreateUnreachable();
+    GenRethrow(errorVal);
     break;
   }
 

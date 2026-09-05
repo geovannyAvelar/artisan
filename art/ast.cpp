@@ -126,6 +126,7 @@ std::unique_ptr<Stmt> CloneStmt(const Stmt &stmt) {
   if (stmt.cond) out->cond = CloneExpr(*stmt.cond);
   if (stmt.body) out->body = CloneStmt(*stmt.body);
   if (stmt.elseBranch) out->elseBranch = CloneStmt(*stmt.elseBranch);
+  if (stmt.finallyBody) out->finallyBody = CloneStmt(*stmt.finallyBody);
   if (stmt.initStmt) out->initStmt = CloneStmt(*stmt.initStmt);
   if (stmt.update) out->update = CloneExpr(*stmt.update);
   if (stmt.expr) out->expr = CloneExpr(*stmt.expr);
