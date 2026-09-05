@@ -53,15 +53,28 @@ target_include_directories(skia INTERFACE
     "${SKIA_DIR}"
 )
 
-target_link_libraries(skia INTERFACE
-    -Wl,--start-group
-    ${SKIA_LIBS}
-    -Wl,--end-group
-    PkgConfig::FREETYPE
-    PkgConfig::FONTCONFIG
-    dl
-    pthread
-)
+if(APPLE)
+    # Apple's linker (both classic ld64 and the newer one) doesn't support
+    # --start-group/--end-group, and doesn't need it either - it already
+    # resolves circular references between static archives on its own.
+    target_link_libraries(skia INTERFACE
+        ${SKIA_LIBS}
+        PkgConfig::FREETYPE
+        PkgConfig::FONTCONFIG
+        dl
+        pthread
+    )
+else()
+    target_link_libraries(skia INTERFACE
+        -Wl,--start-group
+        ${SKIA_LIBS}
+        -Wl,--end-group
+        PkgConfig::FREETYPE
+        PkgConfig::FONTCONFIG
+        dl
+        pthread
+    )
+endif()
 
 # artisanc is a build-time-only tool: it parses UI markup with lexbor and
 # emits a .cpp defining artisan::RootWidget() as a static native Widget

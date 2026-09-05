@@ -1,0 +1,19 @@
+diff --git a/third_party/BUILD.gn b/third_party/BUILD.gn
+index 63fa748d16..d4b1954b71 100644
+--- a/third_party/BUILD.gn
++++ b/third_party/BUILD.gn
+@@ -4,10 +4,14 @@
+ # found in the LICENSE file.
+ 
+ declare_args() {
++  skia_system_fontconfig_include_path = ""
+ }
+ 
+ config("system_fontconfig") {
+   libs = [ "fontconfig" ]
++  if (skia_system_fontconfig_include_path != "") {
++    include_dirs = [ skia_system_fontconfig_include_path ]
++  }
+ }
+ group("fontconfig") {
+   public_configs = [ ":system_fontconfig" ]
