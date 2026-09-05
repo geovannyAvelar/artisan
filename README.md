@@ -101,9 +101,13 @@ Flags:
 ## Using ART
 
 ART is a small, statically typed language of this repo's own design -
-TypeScript-like syntax with the dynamic parts removed (no `any`, no
-prototypes, no dynamic property access), compiled ahead of time to native
-machine code via LLVM (see `art/`) rather than interpreted. A project's
+TypeScript-like syntax with most of the dynamic parts removed (no
+prototypes, no dynamic property access, no `instanceof`/downcasting),
+compiled ahead of time to native machine code via LLVM (see `art/`)
+rather than interpreted. A real, checked `any` does exist (see
+`art/README.md`'s own "Dynamic typing" section) - narrowed back to a
+concrete type via `typeof`, not the "trust it, find out at the call
+site" `any` real TS has. A project's
 `app.ts`/`app.tsx` - one file at the project root by default, like
 `app.js`, but optionally the entry point into a real multi-file project
 via `import`/`export` (see "Modules" below) - is compiled by the
@@ -491,11 +495,11 @@ private helper `math.ts` uses internally stays unreachable from
 
 `class`/`declare class` add methods - `obj.method(args)` - on top of what
 `interface`/`declare type` already give you (a heap-allocated struct of
-fields). A class is deliberately *not* real OOP: no inheritance, no
-virtual/dynamic dispatch, and a method can't be generic (yet) - a method
-call is pure call-site sugar, always resolved statically against the
-receiver's own declared type, for a plain call to that method with the
-receiver spliced in as the real first argument:
+fields) - a method still can't be generic (yet). A class that stands
+alone (no `extends` anywhere) keeps a method call as pure call-site
+sugar, resolved statically against the receiver's own declared type,
+for a plain call to that method with the receiver spliced in as the
+real first argument:
 
 ```ts
 class Counter {
@@ -553,6 +557,12 @@ extern-bound) - typically a one-line forward to the matching
 several bridge calls, ...). The underlying `Art*` functions keep their
 own names and still work as plain free functions too - the class is
 purely an additional, optional way to call them.
+
+A class touched by `class Dog extends Animal { ... }` is different -
+real single inheritance with virtual dispatch, not just this same
+call-site sugar - see [`art/README.md`'s own "Inheritance"
+section](art/README.md#inheritance) for the full story (upcasting,
+overriding, and the real limits: no downcasting/`instanceof` yet).
 
 A property (accessor method) name can't be a reserved word either -
 `get type(): string { ... }` doesn't parse any more than `function
@@ -752,10 +762,12 @@ exponent - the same lenient behavior real JS `parseFloat` has
 (`stringToNumber("42px")` -> `42`, not a failure), not real JS
 `Number()`, which requires the whole string to be numeric. A string
 with no numeric prefix at all (`stringToNumber("abc")`) returns `0`, not
-an error or `NaN` - ART has no exceptions and `number` has no
-`.isNull()`-style sentinel, so this keeps the same "no exceptions,
-simple default on failure" contract every other builtin already has,
-rather than needing a `NaN`/`isNaN` pair just for this one case. This is
+an error or `NaN` - `number` has no `.isNull()`-style sentinel, and
+`stringToNumber` deliberately doesn't throw either (even though ART now
+has real exceptions - see `art/README.md`'s own "Exceptions" section),
+keeping the same "simple default on failure" contract every other
+builtin already has, rather than needing a `NaN`/`isNaN` pair, or a
+`try`/`catch` at every call site, just for this one case. This is
 what reads a number back out of a text input's value or an attribute:
 
 ```ts
@@ -792,8 +804,10 @@ and `s[i]` indexing - immutable, no `s[i] = ...`), `T[]` arrays,
 structural interfaces (an object literal must match a declared
 `interface` exactly - no excess or missing fields), `class`/`declare
 class` (methods and `get`/`set` accessor properties on top of an
-interface/opaque type - see "Classes" above; no inheritance or dynamic
-dispatch), the parameterized handler type described above (`(p0: T0,
+interface/opaque type - see "Classes" above; real single inheritance
+with virtual dispatch for a class touched by `extends`, upcasting only -
+see `art/README.md`'s own "Inheritance" section), the parameterized
+handler type described above (`(p0: T0,
 p1: T1, ...) => void`, structural like everything else - parameter names
 are decorative, only the types and their order are checked), and
 generics - functions, interfaces/`declare type`, and classes/`declare
@@ -816,14 +830,19 @@ real expression (real branching + an LLVM `phi` selecting the result,
 not an eagerly-evaluated `select`, so only the taken branch's side
 effects actually run), same precedence real TS/JS gives it (lower than
 `||`, higher than `=` - `a || b ? c : d` is `(a || b) ? c : d`;
-`a ? b : c = 5` is a parse error, same as real TS/JS). No union types,
-so - unlike real TS/JS, which would widen to `number | string` - both
-branches must resolve to the exact same type: checked against an
+`a ? b : c = 5` is a parse error, same as real TS/JS). No general union
+types, so - unlike real TS/JS, which would widen to `number | string` -
+both branches must resolve to the exact same type: checked against an
 `expected` type when one's available (e.g. a `let`'s own declared
 type), otherwise inferred from the `then` branch and required of
-`else` too. No inheritance, real closures, `any`, or union types. See
-the doc comments in `art/*.h`/`art/*.cpp` for the exact grammar and
-type-checking rules.
+`else` too (an `expected` type of `any` is the one way around this -
+each branch boxes into `any` independently, so they genuinely can differ
+- see `art/README.md`'s own "Dynamic typing" section). Still no full
+general union types (see "Optional values" above for the workaround) -
+real closures and real single-inheritance
+virtual dispatch both exist now, though (see `art/README.md`'s own
+"Closures"/"Inheritance" sections). See the doc comments in
+`art/*.h`/`art/*.cpp` for the exact grammar and type-checking rules.
 
 Every array/object/string is a heap allocation, garbage-collected by the
 [Boehm-Demers-Weiser collector](https://www.hboehm.info/gc/) (`libgc`) -
@@ -1051,6 +1070,80 @@ indirect call (through the computed function-pointer value, not a
 symbol lookup - see `Expr::isIndirectCall`) - full run-time cost of one
 call, same as any other, just resolved through a value instead of a
 name.
+
+### Optional values
+
+ART now has a real `T | null` (see
+[art/README.md's "Nullable types"](art/README.md#nullable-types)), but
+it's narrow by design: no arrays of nullable element type, and
+narrowing only recognizes a bare local variable, never `obj.field` or a
+function call directly. `Optional<T>` is the general-purpose,
+library-level fallback for everything `T | null` doesn't reach -
+checked explicitly (never silently skipped) via `.hasValue`, the same
+`.isNull()` discipline the DOM bridge's own `Node` already has,
+generalized to any type at all, with no restriction on where it can
+appear (struct fields, array elements, ...). Not a compiler feature,
+same as `Signal<T>` above - an ordinary generic interface plus two tiny
+functions:
+
+```ts
+interface Optional<T> {
+  hasValue: boolean;
+  value: T;
+}
+
+function some<T>(v: T): Optional<T> {
+  return { hasValue: true, value: v };
+}
+
+// `placeholder` - a real value of type T to store in `.value` for the
+// "absent" case - is required for the same reason `makeArray<T>`'s own
+// `fill` parameter is (see "Runtime-sized arrays" below): generic code
+// has no way to conjure a T from nothing, only ever to be handed one.
+// Reading `.value` without checking `.hasValue` first just gets you
+// this placeholder back, not a crash - still your own bug to avoid,
+// exactly the same "isNull() being true is the whole story, check it
+// first" contract Node.isNull() already has.
+function none<T>(placeholder: T): Optional<T> {
+  return { hasValue: false, value: placeholder };
+}
+```
+
+```ts
+function findUser(id: number): Optional<string> {
+  if (id == 1) { return some::<string>("Ada"); }
+  return none::<string>("");
+}
+
+function greet(id: number): string {
+  let result: Optional<string> = findUser(id);
+  if (!result.hasValue) { return "no such user"; }
+  return "hello, " + result.value;
+}
+```
+
+Works for any type, `Node`/a class instance included -
+`Optional<Point>`, `Optional<Node>`, `Optional<Optional<number>>` are
+all ordinary generic instantiations, nothing special about `Optional`
+itself beyond being one more `interface<T>`.
+
+This gets you a real, checked "value or absent" - the data-modeling half
+of what `null`/`undefined` are usually reached for. It's a genuinely
+different tool from exceptions, not a substitute for them: `Optional<T>`
+says "no value, and that's an ordinary, expected outcome the caller
+already has to check" - `try`/`catch`/`throw` (see `art/README.md`'s own
+"Exceptions" section - real ones now exist, built on non-local control
+flow, not this) are for the *unexpected* case a caller wasn't
+necessarily prepared to handle inline. A `Result<T, E>` (the same
+pattern as `Optional<T>`, carrying an error value instead of just
+absence) is the middle ground - Rust/Go-style, explicit and checked -
+for a failure a caller should still handle locally rather than let
+propagate.
+
+In practice: reach for `T | null` first (a plain local variable, `!=
+null`/`== null` narrowing, no `.hasValue` boilerplate) and fall back to
+`Optional<T>` only where `T | null` can't go - a struct field, an array
+element, or narrowing something that isn't a bare local variable.
 
 ### Runtime-sized arrays
 

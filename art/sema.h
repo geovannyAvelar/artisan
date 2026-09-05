@@ -75,10 +75,110 @@ public:
 private:
   std::vector<std::string> diagnostics;
   std::unordered_map<std::string, InterfaceDecl *> interfaces;
+  std::unordered_map<std::string, EnumDecl *> enums;
   std::unordered_map<std::string, FunctionDecl *> functions;
   std::unordered_map<std::string, VarInfo> globals;
   std::vector<std::unordered_map<std::string, VarInfo>> scopes;
   FunctionDecl *currentFunction = nullptr;
+
+  // How many loops/switches CheckStmt is currently nested inside,
+  // textually - what validates `break`/`continue` (break: loopDepth > 0
+  // || switchDepth > 0; continue: loopDepth > 0 - a `continue` only ever
+  // means "the nearest enclosing LOOP", so it doesn't count switches at
+  // all, matching real JS: `continue` inside a `switch` inside a `while`
+  // continues the while, and a bare `continue` directly inside a switch
+  // with no enclosing loop is still an error). Both reset to 0 (saved and
+  // restored, same pattern currentFunction already uses) at every
+  // function/method/closure body boundary - see CheckFunctionBody and the
+  // three other body-checking sites (generic function/method
+  // instantiation, FunctionExpr) - because break/continue can never jump
+  // out of a nested function even if it's lexically inside a loop textually,
+  // same as real JS.
+  int loopDepth = 0;
+  int switchDepth = 0;
+
+  // Names currently known non-null within an `if (x != null) { ... }`'s
+  // own `then` body, or in the code following an `if (x == null) {
+  // <always exits> }` with no `else` (see CheckStmt's If case and
+  // TryGetNullCheckedVar) - checked by CheckExpr's own Identifier case,
+  // which resolves a member of this set (whose OWN declared type is
+  // Nullable(T)) as plain T instead, marking Expr::isNarrowedNonNull so
+  // Codegen knows to unbox it. Deliberately just a flat set of names,
+  // not itself scope-aware - every insertion is always paired with a
+  // removal in the same CheckStmt call that added it (or, for the
+  // "narrows the rest of the block" case, by the owning Block's own
+  // loop - see pendingNarrowAfterStmt), so it never needs its own
+  // separate save/restore machinery the way `scopes` does.
+  std::unordered_set<std::string> narrowedNonNull;
+  // Set by CheckStmt's own If case when `if (x == null) { <always
+  // exits> }` has no `else` - the enclosing Block's own statement loop
+  // reads this immediately after checking that If and, if non-empty,
+  // narrows that name for its own remaining statements (un-narrowing it
+  // again once the block itself ends). Empty means "no pending narrow" -
+  // always cleared by whoever reads it, never left set across a
+  // statement that didn't just produce one.
+  std::string pendingNarrowAfterStmt;
+  // True iff `cond` is exactly `identifier != null`/`identifier ==
+  // null` (either operand order) AND that identifier's own declared
+  // type is actually Nullable(T) - the ONE condition shape this narrows
+  // at all (see art/README.md's own "Nullable types" section for why
+  // deliberately just this: no `&&`-chained conditions, no arbitrary
+  // expressions, no `!x`-style truthiness). Fills `outName`/
+  // `outEqualsNull` on success.
+  bool TryGetNullCheckedVar(Expr *cond, std::string &outName, bool &outEqualsNull);
+  // Like AlwaysReturns, but answers a different question: does control
+  // ever fall through PAST this statement at all, regardless of whether
+  // it produces a return value - true for Return/Throw (AlwaysReturns
+  // already covers these) but ALSO Break/Continue, which AlwaysReturns
+  // deliberately does NOT count (a break doesn't return a value, but it
+  // just as surely means "nothing after this point in the current block
+  // runs"). This is what decides whether an `if (x == null) { ... }`
+  // with no `else` safely narrows `x` for the rest of the block - see
+  // CheckStmt's own If case.
+  bool AlwaysExits(Stmt *stmt);
+
+  // The `any`-flavored counterpart to narrowedNonNull/pendingNarrowAfterStmt
+  // above, for `typeof x === "..."`/`typeof x !== "..."` instead of `x ==
+  // null`/`x != null` - kept as a genuinely separate, parallel mechanism
+  // rather than generalizing the null-narrowing one to cover both, so
+  // this addition can't regress the already-shipped, already-tested
+  // nullable narrowing. Maps a currently-narrowed name to WHICH concrete
+  // AnyTag it's narrowed to (there's more than one possible target here,
+  // unlike Nullable(T)'s single "the wrapped T"), read by CheckExpr's own
+  // Identifier case to resolve as that concrete type instead of `any`,
+  // marking Expr::isNarrowedAny. Same flat-set-of-names, always-paired-
+  // insert/remove discipline narrowedNonNull already documents.
+  std::unordered_map<std::string, AnyTag> narrowedAny;
+  // Parallel to pendingNarrowAfterStmt, for the `typeof x === "..."`
+  // early-exit shape (`if (typeof x !== "string") { <always exits> }`
+  // with no `else`) - the enclosing Block's own loop reads BOTH this and
+  // pendingNarrowAfterStmt after each statement (a single statement can
+  // only ever set one of the two, never both). Empty name means "no
+  // pending narrow", same convention.
+  std::string pendingAnyNarrowAfterStmt;
+  AnyTag pendingAnyNarrowTag = AnyTag::Number; // meaningless unless pendingAnyNarrowAfterStmt is non-empty
+  // True iff `cond` is exactly `typeof identifier === "tag"`/`typeof
+  // identifier !== "tag"` (either operand order, and ART's `==`/`!=` -
+  // see art/README.md's own "Dynamic typing" section for why there's no
+  // separate `===`) where `identifier`'s own declared type is Any AND
+  // "tag" is a string literal spelling one of "number"/"boolean"/
+  // "string"/"object"/"function" - the ONE condition shape this
+  // recognizes, same deliberately-narrow scope TryGetNullCheckedVar's own
+  // doc comment explains for its own case. Fills `outName`/`outTag`/
+  // `outEqualsTag` on success; "object"/"function" are recognized as
+  // valid `typeof` results (the comparison itself always type-checks) but
+  // never narrow anything (see TypeTag::Any's own doc comment for why) -
+  // this returns false for those, same as if the condition shape didn't
+  // match at all.
+  bool TryGetTypeofCheckedVar(Expr *cond, std::string &outName, AnyTag &outTag, bool &outEqualsTag);
+  // True iff `t` is one of the tags a concrete value can be implicitly
+  // boxed into `any` FROM (see TypeTag::Any's own doc comment) - Void,
+  // Unknown, Nullable, and Any itself all excluded (Any needs no boxing
+  // at all; the other three are deliberate non-goals for v1, each with
+  // its own reason documented there). Shared by the boxing decision in
+  // CheckExpr's own tail check and GenBoxAny's own source-type switch, so
+  // the two can never disagree about what's boxable.
+  static bool IsAnyBoxable(TypeTag t);
 
   // One entry per enclosing function/method/closure currently being
   // checked, outermost first - a real STACK (not just `currentFunction`
@@ -102,6 +202,12 @@ private:
   // Codegen::GenBuiltinNumberToString). Owned here only so `functions`
   // has somewhere valid to point; never added to Program::functions.
   std::vector<std::unique_ptr<FunctionDecl>> builtins;
+  // Same deal as `builtins` above, for a builtin *interface* - right now
+  // just `Error` (see SeedBuiltins), the one throwable/catchable type
+  // `try`/`catch`/`throw` recognize (see StmtKind::Try's own doc
+  // comment). Never added to Program::interfaces; owned here only so
+  // `interfaces["Error"]` has somewhere valid to point.
+  std::vector<std::unique_ptr<InterfaceDecl>> builtinInterfaces;
   void SeedBuiltins();
 
   // Generic function/declare-function templates (`typeParams` non-empty),
@@ -211,10 +317,20 @@ private:
                Param *declParam = nullptr, Stmt *declStmt = nullptr);
 
   void CheckGlobalDecl(Stmt *stmt);
-  void RegisterFunctionSignature(FunctionDecl *fn);
+  void RegisterFunctionSignature(FunctionDecl *fn, bool allowRestParam = false);
   void CheckFunctionBody(FunctionDecl *decl);
   void CheckStmt(Stmt *stmt);
   ResolvedType CheckExpr(Expr *expr, const ResolvedType *expected);
+  // True iff a value of type `from` can be used wherever `to` is
+  // expected - either they're the exact same type (ResolvedType's own
+  // operator==), or both are Struct and `from`'s own class is `to`'s
+  // class or (transitively, via baseClass) a subclass of it - real
+  // upcasting, the one new kind of assignability inheritance adds.
+  // Deliberately NOT recursive into Array/Handler element types (a
+  // Dog[] is NOT assignable to an Animal[] here, even though a bare Dog
+  // is to a bare Animal) - real covariant collections are a real gap,
+  // scoped out for now the same way every other inheritance limit is.
+  bool IsAssignable(const ResolvedType &from, const ResolvedType &to);
 
   // Resolves and validates an assignment/increment target (Identifier not
   // declared const, an array element, a struct field, or a setter-backed
@@ -240,6 +356,21 @@ private:
   static std::string MangleGetter(const std::string &className, const std::string &propName);
   static std::string MangleSetter(const std::string &className, const std::string &propName);
   static std::string MangleMethod(const std::string &className, const std::string &propName);
+  // A static field/method's own namespace - deliberately separate from
+  // the instance one MangleMethod/MangleGetter/MangleSetter mangle into,
+  // so `ClassName.foo` (static) and `instance.foo` (a field/method/
+  // accessor) can share a bare name with no collision, matching real
+  // TS/JS's separate static/instance namespaces.
+  static std::string MangleStatic(const std::string &className, const std::string &propName);
+  static std::string MangleEnumMember(const std::string &enumName, const std::string &memberName);
+  // True iff `name` is a class Sema knows about with no local/global
+  // *variable* of the same name shadowing it - the exact condition that
+  // makes `name.member`/`name.member(...)` a static access
+  // (`ClassName.foo`) rather than an ordinary instance one on some
+  // variable (`obj.foo`). Checked wherever a Member/Call's own `lhs` is a
+  // bare Identifier - see CheckExpr's Member and Call cases, and
+  // CheckLValueTarget's Member case (for `ClassName.foo = value`).
+  bool IsStaticAccessTarget(const std::string &name);
 
   bool AlwaysReturns(Stmt *stmt);
 

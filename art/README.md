@@ -86,10 +86,11 @@ pulls either in.
 `number` (a double, same range/precision as real TypeScript's), 
 `boolean`, `string` (UTF-8 bytes, `+` concatenation, `==`/`!=`,
 `.length`, `s[i]` character indexing - immutable, no `s[i] = ...`), and
-`T[]` arrays (`.length`, `arr[i]`/`arr[i] = v`, `for...of`). No `any`,
-no union types, no `null`/`undefined` - see
-[What's not in ART](#whats-not-in-art) for how code that would reach for
-these gets by without them.
+`T[]` arrays (`.length`, `arr[i]`/`arr[i] = v`, `for...of`), and `any`
+(see [Dynamic typing](#dynamic-typing)). No GENERAL union types -
+`T | null` is the one exception (see [Nullable types](#nullable-types))
+- see [What's not in ART](#whats-not-in-art) for how code that would
+reach for the rest gets by without them.
 
 ```ts
 let n: number = 42;
@@ -277,13 +278,16 @@ let p: Point = { x: 1, y: 2 };
 ### Classes
 
 `class`/`declare class` add methods and `get`/`set` accessor properties
-on top of what an interface already gives - deliberately *not* real
-OOP: no inheritance, no virtual/dynamic dispatch. A method call is pure
-call-site sugar, always resolved statically against the receiver's own
-declared type, compiling to a plain call with the receiver spliced in as
-the real first argument. `this` is implicit, never written in a
-method's own parameter list; there's no `new` - a class instance is
-built the exact same way an interface's already is.
+on top of what an interface already gives. A method call on a class
+that stands alone (no `extends` anywhere in sight - the overwhelming
+majority of classes) is pure call-site sugar, resolved statically
+against the receiver's own declared type, compiling to a plain call
+with the receiver spliced in as the real first argument - same as
+always. A class actually touched by `extends` is different: see
+[Inheritance](#inheritance) below for real virtual dispatch. `this` is
+implicit, never written in a method's own parameter list; there's no
+`new` - a class instance is built the exact same way an interface's
+already is.
 
 ```ts
 class Signal<T> {
@@ -314,6 +318,67 @@ instead of a silent miscompile.
 into ergonomic calls instead of raw `ArtDoSomething(handle, ...)`
 C-style ones. This is exactly how the DOM bridge is exposed - see
 [The DOM bridge](#the-dom-bridge).
+
+### Inheritance
+
+`class Dog extends Animal { ... }` - single inheritance, real virtual
+dispatch: a method called through a base-typed reference reaches
+whichever override the *actual* runtime instance has, not just whatever
+was statically visible at the call site.
+
+```ts
+class Animal {
+  name: string;
+  function speak(): string { return this.name + " makes a sound"; }
+}
+
+class Dog extends Animal {
+  function speak(): string { return this.name + " barks"; }
+}
+
+function announce(a: Animal): string {
+  return a.speak(); // a Dog passed in here still barks, not "makes a sound"
+}
+```
+
+A derived class's own fields are its base's own (recursively, for a
+multi-level chain) followed by its own new ones, in that order - what
+makes upcasting a `Dog` to an `Animal` a pure, free pointer
+reinterpretation (the base's fields sit at the exact same offsets in
+both layouts) rather than needing any real conversion, and also why a
+derived class can't redeclare a name from anywhere in its base chain
+(no field shadowing). A derived instance is assignable anywhere its
+base is expected - a variable, a parameter, a return value, an array/
+struct element - the one new kind of assignability inheritance adds (a
+plain interface/class type otherwise still needs an *exact* match, no
+implicit widening beyond this).
+
+Only a class actually touched by `extends` - has a base, or is one for
+something else - pays for any of this: it alone gets a vtable pointer
+prepended to its own compiled layout, and only ITS methods compile to
+an indirect call through that pointer instead of a direct one. A class
+that stands alone is completely unaffected - same struct layout, same
+direct-call codegen as before this feature existed at all, which is
+also why virtual dispatch could be added without touching how a single
+existing (non-inheriting) class already worked.
+
+An override must match its ancestor's own signature exactly (same
+parameter types, same return type) - ART has no covariance/
+contravariance rules to make good on a mismatched one. `get`/`set`
+accessors and static members inherit (a derived class can read/write an
+inherited property, or call `Base.staticMethod()` by name) but can't be
+overridden yet - only a plain instance method participates in virtual
+dispatch in this first pass.
+
+**Real limits, not oversights**: no `implements`, no multiple
+inheritance, and - the big one - no downcasting or `instanceof`. Real
+`instanceof`/an unchecked cast both need runtime type identification (a
+type tag actually carried on the object, checked at the cast site) -
+ART has none yet, the same reason a `catch` clause can only catch one
+fixed type (see [Exceptions](#exceptions) above). Upcasting alone (the
+safe direction - a Dog is unconditionally usable as the Animal it
+already is) needs no such thing, which is exactly why it's the one
+piece implemented so far.
 
 ### Generics
 
@@ -470,9 +535,12 @@ call skips Sema's usual per-file visibility check entirely, since an
 ambient identifier gated behind an import wouldn't really be ambient.
 
 `.isNull()` is the only way to test a lookup for "no match" - ART has no
-null literal of its own to compare against. `ArtIsNull`/`.isNull()`
-being `true` is otherwise the whole story: no exceptions, no thrown
-errors anywhere in ART.
+null literal of its own to compare against. The DOM bridge itself never
+throws - `ArtIsNull`/`.isNull()` is the whole story for a failed lookup
+here - but ART does now have real exceptions elsewhere (see
+[Exceptions](#exceptions) below); `.isNull()` predates them and was
+never redone in terms of them, since a bridge-lookup failure isn't
+exceptional the way an actually-thrown error is.
 
 `classListAdd`/`classListRemove`/`classListContains`/`classListToggle`
 manage the `"class"` attribute's space-separated tokens - flattened
@@ -784,18 +852,257 @@ A heap-allocated ART value handed across the FFI boundary (e.g. an
 extra bookkeeping: the bridge always copies it into artisan's own
 (unrelated) memory before doing anything that could outlive the call.
 
+## Exceptions
+
+`try { ... } catch (name: Error) { ... }` and `throw expr;` are real,
+non-local control flow - a `throw` deep inside a call stack jumps
+directly to the nearest enclosing `catch`, skipping every ordinary
+`return` in between, exactly like real TS/JS.
+
+```ts
+function mightFail(x: number): number {
+  if (x < 0) { throw { message: "x must be non-negative" }; }
+  return x * 2;
+}
+
+function main(): number {
+  try {
+    return mightFail(-1);
+  } catch (e: Error) {
+    let label: Node = document.getElementById("error");
+    if (!label.isNull()) { label.textContent = e.message; }
+    return 0;
+  }
+}
+```
+
+Two real, deliberate limits on this first version, both because
+generalizing them needs infrastructure ART doesn't have yet:
+
+- **`Error` (`{ message: string }`) is the only throwable/catchable
+  type.** `throw` always needs one; `catch (name: Type)` must always
+  write `Error` as `Type`. Real, unrestricted polymorphic catching
+  (`catch` selecting among several different thrown types by their
+  actual runtime type) needs runtime type identification - ART has none
+  yet (no `any`, no dynamic dispatch - see
+  [What's not in ART](#whats-not-in-art)) - so with exactly one
+  throwable type in flight, every active handler always matches
+  whatever's thrown, and there's no type-tag check to get wrong. `Error`
+  is a real, ordinary struct otherwise (built the normal way -
+  `{ message: "..." }`), not compiler magic beyond being the one thing
+  `throw`/`catch` recognize.
+- **No `finally` yet.** Its own codegen has to guarantee running on
+  every exit path out of a `try` - normal completion, an exception this
+  same `try` catches, one that propagates past it uncaught, *and* an
+  early `return`/`break`/`continue` fired from inside the `try` - a
+  distinct, substantial piece of work on top of the mechanism below.
+
+Mechanism: `setjmp`/`longjmp`, called directly (never through a wrapper
+function - `setjmp` only captures a resumable state for the function
+that calls it directly), not LLVM's own Itanium-ABI `invoke`/
+`landingpad` machinery real C++ exceptions use. This is the right
+choice specifically *for ART*, not a shortcut: the usual reason that
+machinery is so complex is running destructors correctly for every
+stack frame being unwound past, and ART has no destructors at all -
+everything is GC'd (see [Memory management](#memory-management)) - so
+none of that complexity buys anything here. A global stack of
+handler-frame structs (one `jmp_buf` plus a link to the next-outer
+active one, stack-allocated per dynamically-active `try` - correct even
+under recursion, since `alloca` allocates fresh space on every real call
+into the function that owns it) rooted at one module-global pointer is
+the entire runtime; `throw` walks it, `try` pushes/pops it, all as
+hand-generated LLVM IR (see `Codegen::GenStmt`'s own `Try`/`Throw`
+cases), the same "no separate C++ runtime file, the standalone `art`
+compiler stays self-contained" approach `makeArray<T>` already uses.
+
+An uncaught `throw` - no active handler anywhere - calls `abort()`,
+matching real JS's "an uncaught exception terminates the program" (no
+message is printed yet).
+
+A `return`/`break`/`continue` that exits a `try` body early has to
+correctly restore the handler stack on its way out, or a *later*,
+completely unrelated `throw` could `longjmp` into a stack frame that's
+already been reused elsewhere - real memory corruption, not a cosmetic
+bug. This is handled uniformly (see `Codegen::ScopeExit`/
+`GenExceptionHandlerCleanup`): the same stack that already tracks
+`break`/`continue` targets for loops/`switch` also tracks every
+currently-active `try` frame, in real nesting order, so escaping past
+any number of nested ones - crossing loop, `switch`, and `try`
+boundaries all at once - still costs exactly one restore.
+
+## Nullable types
+
+`T | null` is ART's one and only union shape - not general `T1 | T2`
+unions (see [What's not in ART](#whats-not-in-art)), just this one
+specific pattern, matching the single most common use of union types in
+real TS code.
+
+```ts
+function findUser(id: number): User | null {
+  if (id == 0) { return null; }
+  return notNull::<User>({ id: id, name: "..." });
+}
+
+function greet(id: number): string {
+  let user: User | null = findUser(id);
+  if (user != null) {
+    return "hello, " + user.name; // `user` is a plain `User` here
+  }
+  return "no such user";
+}
+```
+
+`null` is a real literal, but only where an expected `T | null` type is
+already known (a `let`'s own declared type, a parameter, a return type)
+- like an empty array literal, there's nothing to infer a type *from* in
+`null` on its own. `notNull<T>(v: T): T | null` is the one and only way
+to produce a *present* `T | null` value from a plain `T` - there's no
+implicit widening anywhere (no assigning a plain `T` where `T | null` is
+expected without going through it), trading a bit of ceremony at
+call sites for never having to insert an implicit boxing coercion at
+every assignment/parameter/return site in Codegen.
+
+**Narrowing** - using a `T | null` value as a plain `T` - is recognized
+in exactly two shapes, both requiring the checked value to be a bare
+local variable (not `obj.field`, not a function call):
+
+- `if (x != null) { /* x is T here */ }` - narrowed for the `then`
+  branch only.
+- `if (x == null) { <this branch always returns/throws/breaks/
+  continues> }` - with no `else` - narrows `x` to `T` for the rest of
+  the enclosing block, since the only way past the `if` is through that
+  narrowing already having been proven true.
+
+Reassigning `x` anywhere inside its narrowed region - even back to a
+provably non-null value - invalidates the narrowing for the rest of
+that region: the compiler doesn't re-verify the new value, so it
+conservatively goes back to treating `x` as `T | null` and requires
+narrowing it again before further plain-`T` use.
+
+Representation: every `T | null`, regardless of `T`'s own natural shape
+(a `double`, an `i1`, a pointer), is a small boxed heap cell holding
+exactly one `T` - `null` is a real null pointer to that box, "present"
+is a non-null pointer to a box holding the value. This uniform
+representation is what makes narrowing's own codegen a single, small
+piece of logic (one extra load, in exactly one place -
+`Codegen::GenExpr`'s `Identifier` case) rather than needing a distinct
+strategy per underlying type.
+
+Two real, deliberate limits, same "ceremony over generality" trade the
+rest of this section makes:
+
+- **No arrays of nullable element type.** `(T | null)[]` needs
+  parenthesized types in element position, and ART's type grammar
+  doesn't have those - `T | null` only appears as a whole declared
+  type (a variable, parameter, or return type), never nested inside
+  another type. A function returning `T | null` per lookup, called
+  once per element, gets the same result without needing the array
+  itself to hold nullable slots.
+- **No narrowing through fields or function calls.** `if (obj.field !=
+  null)` or `if (getValue() != null)` don't narrow anything - only a
+  bare local variable's own identifier is recognized, so `obj.field`
+  must be assigned to a local first if it needs narrowing.
+
+## Dynamic typing
+
+`any` is real, TS-style dynamic typing - a value that carries its own
+runtime type tag and accepts anything, checked (never silently trusted)
+via `typeof`:
+
+```ts
+function describe(x: any): string {
+  if (typeof x == "number") { return "a number: " + numberToString(x); }
+  if (typeof x == "string") { return "a string: " + x; }
+  if (typeof x == "boolean") { return x ? "true" : "false"; }
+  return "something else: " + typeof x;
+}
+
+function main(): number {
+  let n: any = 42;
+  let s: any = "hello";
+  if (describe(n) != "a number: 42") { return 1; }
+  if (describe(s) != "a string: hello") { return 1; }
+  return 0;
+}
+```
+
+Assigning a plain, concrete value where `any` is expected (a `let`'s own
+declared type, a parameter, a return type, an array/struct element)
+widens IMPLICITLY - no ceremony, unlike `T | null`'s own `notNull<T>`
+requirement (see [Nullable types](#nullable-types)): that ceremony-free
+widening is `any`'s entire reason to exist, matching real TS exactly.
+`null` widens into `any` too, same as real TS/JS.
+
+Getting a concrete value back OUT needs `typeof x === "..."` narrowing
+first - there's no implicit narrowing the other direction, same "prove
+it first" discipline `T | null` already has. Narrowing recognizes
+exactly the same two condition shapes `T | null` does (see its own
+section above for the full "one bare local variable, checked one way,
+not compound conditions" scope), just testing `typeof x` against a
+string literal instead of comparing `x` to `null`:
+
+- `if (typeof x === "...") { /* x is that concrete type here */ }` -
+  narrowed for the `then` body only.
+- `if (typeof x !== "...") { <always exits> }` - with no `else` -
+  narrows `x` for the rest of the enclosing block.
+
+(ART's `==`/`!=` already mean strict, no-coercion equality - see
+[Types](#types) - so there's no separate `===`/`!==` to write; plain
+`==`/`!=` are what real TS's `===`/`!==` would be here.) Reassigning `x`
+anywhere inside its narrowed region invalidates the narrowing for the
+rest of that region, exactly the same real hazard (and the same fix)
+`T | null`'s own narrowing has - the compiler doesn't re-verify a new
+value, so it conservatively requires re-narrowing before further
+concrete-typed use.
+
+Representation: every `any` is a boxed `ptr` - a fresh GC cell `{ tag,
+payload }`, `tag` saying what's actually in it right now. A
+number/boolean gets its own tiny heap cell (neither has a spare
+pointer-shaped bit pattern to reuse); a string/struct/array/function
+reuses its own already-`ptr`-shaped value directly as `payload`, no
+extra allocation.
+
+Two real, deliberate limits, both because generalizing them needs
+runtime type identification ART doesn't have (see "What's not in ART"'s
+own "no downcasting or instanceof" bullet) - `any` can always hold
+either of these, `typeof` always correctly reports them, but neither
+narrows back out to anything usable:
+
+- **`typeof x === "object"` never narrows.** Both a struct instance and
+  an array report `"object"` (indistinguishable via `typeof` alone,
+  exactly like real JS's own `typeof [1, 2, 3] === "object"`), and even
+  restricted to just structs, `any` alone can't say WHICH struct type
+  was boxed - there could be any number of candidates.
+- **`typeof x === "function"` never narrows either.** `any` erases
+  exactly which handler signature (`(x: number) => void` vs `() =>
+  void`, say) was boxed - narrowing to some signature-less "it's a
+  function" wouldn't be safely callable, and ART has no real `Function`
+  type to narrow to in the first place.
+- **A `T | null` value can't be assigned into `any` directly.** `any`
+  and `T | null` are two separate, non-interacting escape hatches in
+  this version - narrow the `T | null` down to plain `T` first (`if (x
+  != null) { let a: any = x; ... }`), then it boxes the same as any
+  other concrete value.
+
 ## What's not in ART
 
 Deliberate omissions, not oversights - each traded for something else
 (usually: simple enough to actually finish, or a native ahead-of-time
 compiler with no runtime being able to make good on it at all):
 
-- **No inheritance or dynamic dispatch.** A method call is always
-  resolved statically against the receiver's declared type.
+- **No downcasting or `instanceof`.** Real inheritance and virtual
+  dispatch do exist now (see [Inheritance](#inheritance)) - upcasting a
+  derived instance to a base type is safe and needs no runtime type
+  info at all, but the reverse direction (or checking an object's actual
+  type at runtime) does, and ART has none yet.
 - **No type inference for generics.** Every instantiation is explicit
   (`::<T>` or `<T>`).
-- **No `any`, no union types, no `null`/`undefined`.** A lookup that can
-  fail returns something `.isNull()`-checkable instead.
+- **No general union types.** `any` (see [Dynamic typing](#dynamic-typing))
+  and `T | null` (see [Nullable types](#nullable-types)) are the two
+  exceptions - a real `number | string`-style union with more than one
+  named alternative isn't supported. A lookup that can fail and isn't
+  worth a `T | null` return still returns something `.isNull()`-checkable
+  instead.
 - **No manual memory management.** Everything is GC'd (see
   [Memory management](#memory-management)) - there's no `free`/`delete`
   to omit accidentally, but also none available if you wanted it.

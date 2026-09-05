@@ -50,6 +50,34 @@ enum class TokenKind {
   KwFrom,
   KwExport,
   KwClass,
+  KwBreak,
+  KwContinue,
+  KwDo,
+  KwSwitch,
+  KwCase,
+  KwDefault,
+  KwEnum,
+  KwStatic,
+  KwReadonly,
+  KwTry,
+  KwCatch,
+  KwThrow,
+  // Reserved now even though ART has no `finally` yet (see StmtKind::Try's
+  // own doc comment for the exact v1 scope) - so a later addition of it
+  // isn't a breaking change to code that already used it as an ordinary
+  // identifier in the meantime.
+  KwFinally,
+  KwExtends,
+  KwNull,
+  // `any` - see TypeTag::Any's own doc comment for the runtime
+  // representation (a tagged box), and `typeof` below for the one way
+  // to narrow one back to a concrete type.
+  KwAny,
+  // `typeof x` - valid only on an `any`-typed operand, yields a string
+  // among "number"/"boolean"/"string"/"object"/"function" - see
+  // Sema::TryGetTypeofCheckedVar for the `typeof x === "..."` narrowing
+  // pattern this exists to support.
+  KwTypeof,
 
   // Punctuation
   LParen,
@@ -63,6 +91,7 @@ enum class TokenKind {
   Colon,
   ColonColon,
   Dot,
+  Ellipsis, // '...' - a rest parameter (`function f(...args: T[])`)
   Question,
 
   // Operators
@@ -84,6 +113,18 @@ enum class TokenKind {
   PlusPlus,
   MinusMinus,
   FatArrow,
+  Amp,    // '&' (bitwise AND) - not to be confused with AndAnd ('&&')
+  Pipe,   // '|' (bitwise OR) - not to be confused with OrOr ('||')
+  Caret,  // '^' (bitwise XOR)
+  Tilde,  // '~' (bitwise NOT, unary)
+  Shl,    // '<<' (shift left)
+  // '>>' (arithmetic shift right) and '>>>' (unsigned/logical shift
+  // right) deliberately have NO tokens of their own - they're each just
+  // two/three adjacent Gt tokens, merged only when ParseShift's operator
+  // loop actually needs one (see its own doc comment for why: merging
+  // them here, at the tokenizer level, would silently break every
+  // existing `Box<Box<T>>`-shaped nested generic close, which relies on
+  // two separate Gt tokens).
 };
 
 struct SourceLoc {

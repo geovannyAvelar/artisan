@@ -46,6 +46,7 @@ private:
 
   std::unique_ptr<ImportDecl> ParseImport();
   std::unique_ptr<InterfaceDecl> ParseInterface();
+  std::unique_ptr<EnumDecl> ParseEnum();
   std::unique_ptr<FunctionDecl> ParseFunction();
   std::unique_ptr<InterfaceDecl> ParseDeclareType();
   std::unique_ptr<FunctionDecl> ParseDeclareFunction();
@@ -60,19 +61,28 @@ private:
   std::unique_ptr<Stmt> ParseStmt();
   std::unique_ptr<Stmt> ParseBlock();
   std::unique_ptr<Stmt> ParseVarDecl();
+  std::unique_ptr<Stmt> ParseDestructureVarDecl();
   std::unique_ptr<Stmt> ParseIf();
   std::unique_ptr<Stmt> ParseWhile();
+  std::unique_ptr<Stmt> ParseDoWhile();
   std::unique_ptr<Stmt> ParseFor();
   std::unique_ptr<Stmt> ParseForOf(SourceLoc loc);
   std::unique_ptr<Stmt> ParseReturn();
+  std::unique_ptr<Stmt> ParseSwitch();
+  std::unique_ptr<Stmt> ParseTry();
+  std::unique_ptr<Stmt> ParseThrow();
 
   std::unique_ptr<Expr> ParseExpr();
   std::unique_ptr<Expr> ParseAssignment();
   std::unique_ptr<Expr> ParseConditional();
   std::unique_ptr<Expr> ParseLogicalOr();
   std::unique_ptr<Expr> ParseLogicalAnd();
+  std::unique_ptr<Expr> ParseBitwiseOr();
+  std::unique_ptr<Expr> ParseBitwiseXor();
+  std::unique_ptr<Expr> ParseBitwiseAnd();
   std::unique_ptr<Expr> ParseEquality();
   std::unique_ptr<Expr> ParseRelational();
+  std::unique_ptr<Expr> ParseShift();
   std::unique_ptr<Expr> ParseAdditive();
   std::unique_ptr<Expr> ParseMultiplicative();
   std::unique_ptr<Expr> ParseUnary();

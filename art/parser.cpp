@@ -101,6 +101,10 @@ Program Parser::ParseProgram() {
         auto decl = ParseClass(/*isOpaque=*/false);
         decl->isExported = exported;
         program.interfaces.push_back(std::move(decl));
+      } else if (Check(TokenKind::KwEnum)) {
+        auto decl = ParseEnum();
+        decl->isExported = exported;
+        program.enums.push_back(std::move(decl));
       } else if (Check(TokenKind::KwFunction)) {
         auto decl = ParseFunction();
         decl->isExported = exported;
@@ -145,7 +149,8 @@ Program Parser::ParseProgram() {
           Fail("expected 'type', 'function', or 'class' after 'declare'", Cur().loc);
         }
       } else if (exported) {
-        Fail("expected 'function', 'interface', 'class', 'let', 'const', or 'declare' after 'export'", Cur().loc);
+        Fail("expected 'function', 'interface', 'class', 'enum', 'let', 'const', or 'declare' after 'export'",
+             Cur().loc);
       } else if (Check(TokenKind::KwImport)) {
         Fail("'import' must come before every other declaration in a file", Cur().loc);
       } else {
@@ -200,6 +205,8 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
   while (!Check(TokenKind::RBrace)) {
     InterfaceField field;
     field.loc = Cur().loc;
+    field.isReadonly = Check(TokenKind::KwReadonly);
+    if (field.isReadonly) pos++; // consume 'readonly'
     field.name = Expect(TokenKind::Identifier, "as a field name").text;
     Expect(TokenKind::Colon, "after field name");
     field.type = ParseType();
@@ -207,6 +214,39 @@ std::unique_ptr<InterfaceDecl> Parser::ParseInterface() {
     decl->fields.push_back(std::move(field));
   }
   Expect(TokenKind::RBrace, "to close the interface body");
+  return decl;
+}
+
+// `enum Name { Member, Member2 = 5, Member3 }` - see EnumDecl's own doc
+// comment for the auto-numbering rule. An explicit value is a plain
+// (optionally negative) number literal, computed right here rather than
+// deferred to Sema as a general expression - real TS restricts enum
+// member initializers similarly (a constant expression, not an arbitrary
+// runtime one), and keeping it a literal is what makes the "continue
+// auto-numbering from here" rule a simple, always-available `+1` in
+// Sema's own registration pass, with no constant-folding step needed.
+std::unique_ptr<EnumDecl> Parser::ParseEnum() {
+  auto decl = std::make_unique<EnumDecl>();
+  decl->loc = Cur().loc;
+  Expect(TokenKind::KwEnum, "to start an enum declaration");
+  decl->name = Expect(TokenKind::Identifier, "as the enum name").text;
+  Expect(TokenKind::LBrace, "to open the enum body");
+  if (!Check(TokenKind::RBrace)) {
+    do {
+      EnumMember member;
+      member.loc = Cur().loc;
+      member.name = Expect(TokenKind::Identifier, "as an enum member name").text;
+      if (Match(TokenKind::Assign)) {
+        bool negative = Match(TokenKind::Minus);
+        const Token &numTok = Expect(TokenKind::NumberLiteral, "as an enum member's explicit value - a plain "
+                                                                 "(optionally negative) number literal");
+        member.hasExplicitValue = true;
+        member.explicitValue = negative ? -numTok.numberValue : numTok.numberValue;
+      }
+      decl->members.push_back(std::move(member));
+    } while (Match(TokenKind::Comma));
+  }
+  Expect(TokenKind::RBrace, "to close the enum body");
   return decl;
 }
 
@@ -292,28 +332,70 @@ std::unique_ptr<FunctionDecl> Parser::ParseAccessor(InterfaceDecl *decl, bool is
 void Parser::ParseClassBody(InterfaceDecl *decl, bool isOpaque) {
   Expect(TokenKind::LBrace, "to open the class body");
   while (!Check(TokenKind::RBrace)) {
+    bool isStatic = Check(TokenKind::KwStatic);
+    if (isStatic) pos++; // consume 'static'
+    // `static readonly x` (readonly reuses a static field's own VarDecl
+    // Stmt's existing `isConst`, below) or plain `readonly x` (an
+    // instance field's own new isReadonly) - either order relative to
+    // `static` isn't supported, only 'static' then 'readonly', matching
+    // real TS convention.
+    bool isReadonly = Check(TokenKind::KwReadonly);
+    if (isReadonly) pos++; // consume 'readonly'
+
     bool isGetter = Check(TokenKind::Identifier) && Cur().text == "get" &&
                      PeekAt(1).kind == TokenKind::Identifier && PeekAt(2).kind == TokenKind::LParen;
     bool isSetter = !isGetter && Check(TokenKind::Identifier) && Cur().text == "set" &&
                      PeekAt(1).kind == TokenKind::Identifier && PeekAt(2).kind == TokenKind::LParen;
     if (isGetter || isSetter) {
+      if (isStatic) Fail("'static' isn't supported on a get/set accessor yet - use a static method instead", Cur().loc);
+      if (isReadonly) Fail("'readonly' isn't supported on a get/set accessor - just omit the setter for a "
+                            "read-only property",
+                            Cur().loc);
       decl->methods.push_back(ParseAccessor(decl, isGetter));
     } else if (Check(TokenKind::KwFunction)) {
+      if (isReadonly) Fail("'readonly' only applies to a field, not a method", Cur().loc);
       auto method = ParseFunction();
       if (!method->typeParams.empty()) {
         Fail("a class method can't be generic yet", method->loc);
       }
-      InjectImplicitThis(method.get(), decl);
+      if (isStatic) {
+        // No implicit `this` - a static method has no receiver at all
+        // (see FunctionDecl::isStatic's own doc comment).
+        method->isStatic = true;
+      } else {
+        InjectImplicitThis(method.get(), decl);
+      }
       decl->methods.push_back(std::move(method));
     } else if (isOpaque) {
       Fail("'declare class' can only contain methods/accessors - it has no accessible fields, same as "
            "'declare type'",
            Cur().loc);
+    } else if (isStatic) {
+      // `static name: Type = initExpr;` - see InterfaceDecl::staticFields'
+      // own doc comment for why this is a real VarDecl Stmt, not an
+      // InterfaceField the way an instance field is. `readonly` reuses
+      // this Stmt's own pre-existing `isConst` - a static field already
+      // has exactly the same "assignable once, at initialization, never
+      // again" semantics a top-level `const` does, so there's no need
+      // for a second, parallel immutability flag the way an instance
+      // field needs its own (see InterfaceField::isReadonly).
+      auto field = MakeStmt(StmtKind::VarDecl, Cur().loc);
+      field->isConst = isReadonly;
+      field->varName = Expect(TokenKind::Identifier, "as a static field name").text;
+      Expect(TokenKind::Colon, "after a static field's name");
+      field->declaredType = ParseType();
+      Expect(TokenKind::Assign, "to initialize a static field (a static field always needs an initializer, "
+                                 "unlike an instance field)");
+      field->expr = ParseExpr();
+      Expect(TokenKind::Semicolon, "after a static field declaration");
+      decl->staticFields.push_back(std::move(field));
     } else {
       InterfaceField field;
       field.loc = Cur().loc;
+      field.isReadonly = isReadonly;
       field.name =
-          Expect(TokenKind::Identifier, "as a field name, or 'function'/'get'/'set' to start a method").text;
+          Expect(TokenKind::Identifier, "as a field name, or 'function'/'get'/'set'/'static'/'readonly' to start a "
+                                         "method or field").text;
       Expect(TokenKind::Colon, "after field name");
       field.type = ParseType();
       if (Check(TokenKind::Semicolon) || Check(TokenKind::Comma)) pos++;
@@ -330,6 +412,14 @@ std::unique_ptr<InterfaceDecl> Parser::ParseClass(bool isOpaque) {
   decl->isOpaque = isOpaque;
   decl->name = Expect(TokenKind::Identifier, "as the class name").text;
   ParseOptionalTypeParams(decl->typeParams);
+  if (Match(TokenKind::KwExtends)) {
+    if (isOpaque) {
+      Fail("'declare class' can't extend anything yet - inheritance is only supported between two plain "
+           "classes",
+           Cur().loc);
+    }
+    decl->baseClassName = Expect(TokenKind::Identifier, "as the base class name").text;
+  }
   ParseClassBody(decl.get(), isOpaque);
   return decl;
 }
@@ -357,10 +447,20 @@ void Parser::ParseParamsAndReturnType(FunctionDecl *decl) {
     do {
       Param p;
       p.loc = Cur().loc;
+      p.isRest = Match(TokenKind::Ellipsis);
       p.name = Expect(TokenKind::Identifier, "as a parameter name").text;
       Expect(TokenKind::Colon, "after parameter name");
       p.type = ParseType();
+      if (p.isRest && p.type->kind != TypeSyntaxKind::Array) {
+        Fail("a rest parameter's own declared type must be an array ('" + p.name + ": T[]', not '" + p.name +
+                 ": T')",
+             p.loc);
+      }
+      bool wasRest = p.isRest;
       decl->params.push_back(std::move(p));
+      if (wasRest && !Check(TokenKind::RParen)) {
+        Fail("a rest parameter must be the last one in the parameter list", Cur().loc);
+      }
     } while (Match(TokenKind::Comma));
   }
   Expect(TokenKind::RParen, "to close the parameter list");
@@ -446,6 +546,8 @@ std::unique_ptr<TypeNode> Parser::ParseType() {
     node->kind = TypeSyntaxKind::String;
   } else if (Match(TokenKind::KwVoid)) {
     node->kind = TypeSyntaxKind::Void;
+  } else if (Match(TokenKind::KwAny)) {
+    node->kind = TypeSyntaxKind::Any;
   } else if (Check(TokenKind::LParen)) {
     // ART's only function type: a void-returning handler, e.g. `() =>
     // void` or `(event: Event) => void`. A parameter name is required for
@@ -480,7 +582,7 @@ std::unique_ptr<TypeNode> Parser::ParseType() {
       Expect(TokenKind::Gt, "to close a generic type's argument list");
     }
   } else {
-    Fail("expected a type ('number', 'boolean', 'string', 'void', '() => void', or an interface name)", Cur().loc);
+    Fail("expected a type ('number', 'boolean', 'string', 'void', 'any', '() => void', or an interface name)", Cur().loc);
   }
 
   while (Check(TokenKind::LBracket) && PeekAt(1).kind == TokenKind::RBracket) {
@@ -492,6 +594,21 @@ std::unique_ptr<TypeNode> Parser::ParseType() {
     node = std::move(arr);
   }
 
+  // `T | null` - ART's one and only union shape (see TypeTag::Nullable's
+  // own doc comment for why not general `T1 | T2` unions), so this
+  // binds looser than the array suffix above (`number[] | null` is
+  // `(number[]) | null`, not `number[ | null ]`, matching real TS
+  // precedence) but is otherwise a plain, single optional suffix - no
+  // loop, since anything past one `| null` isn't meaningful here.
+  if (Match(TokenKind::Pipe)) {
+    Expect(TokenKind::KwNull, "after '|' in a type - ART only supports 'T | null', not general union types");
+    auto nullable = std::make_unique<TypeNode>();
+    nullable->kind = TypeSyntaxKind::Nullable;
+    nullable->loc = node->loc;
+    nullable->element = std::move(node);
+    node = std::move(nullable);
+  }
+
   return node;
 }
 
@@ -501,11 +618,34 @@ std::unique_ptr<TypeNode> Parser::ParseType() {
 
 std::unique_ptr<Stmt> Parser::ParseStmt() {
   if (Check(TokenKind::LBrace)) return ParseBlock();
+  // `let {`/`const {` - object destructuring (see ParseDestructureVarDecl's
+  // own doc comment) - distinguished from a plain `let`/`const` by
+  // lookahead (an ordinary declared type never starts with '{', so this
+  // is unambiguous one token past 'let'/'const').
+  if ((Check(TokenKind::KwLet) || Check(TokenKind::KwConst)) && PeekAt(1).kind == TokenKind::LBrace) {
+    return ParseDestructureVarDecl();
+  }
   if (Check(TokenKind::KwLet) || Check(TokenKind::KwConst)) return ParseVarDecl();
   if (Check(TokenKind::KwIf)) return ParseIf();
   if (Check(TokenKind::KwWhile)) return ParseWhile();
+  if (Check(TokenKind::KwDo)) return ParseDoWhile();
   if (Check(TokenKind::KwFor)) return ParseFor();
   if (Check(TokenKind::KwReturn)) return ParseReturn();
+  if (Check(TokenKind::KwSwitch)) return ParseSwitch();
+  if (Check(TokenKind::KwTry)) return ParseTry();
+  if (Check(TokenKind::KwThrow)) return ParseThrow();
+  if (Check(TokenKind::KwBreak)) {
+    auto stmt = MakeStmt(StmtKind::Break, Cur().loc);
+    pos++; // consume 'break'
+    Expect(TokenKind::Semicolon, "after 'break'");
+    return stmt;
+  }
+  if (Check(TokenKind::KwContinue)) {
+    auto stmt = MakeStmt(StmtKind::Continue, Cur().loc);
+    pos++; // consume 'continue'
+    Expect(TokenKind::Semicolon, "after 'continue'");
+    return stmt;
+  }
 
   auto stmt = MakeStmt(StmtKind::ExprStmt, Cur().loc);
   stmt->expr = ParseExpr();
@@ -537,6 +677,38 @@ std::unique_ptr<Stmt> Parser::ParseVarDecl() {
   return stmt;
 }
 
+// `let { a, b: renamed } = expr;` - object (interface/class struct)
+// destructuring, deliberately scoped to just that: no array destructuring
+// (`let [a, b] = arr;`), no default values (`let { a = 5 } = obj;` -
+// meaningless in ART anyway, since an interface/class instance always has
+// every one of its fields, there's never a "missing" one to default), no
+// nested patterns, and no rest element (`...rest`). See
+// StmtKind::Destructure's own doc comment for the AST shape this builds -
+// one Stmt carrying every binding, not desugared into several sibling
+// Stmts (which would need bigger, riskier parser-wide changes to support
+// "one statement becomes several" and isn't needed at all this way).
+std::unique_ptr<Stmt> Parser::ParseDestructureVarDecl() {
+  auto stmt = MakeStmt(StmtKind::Destructure, Cur().loc);
+  stmt->isConst = Check(TokenKind::KwConst);
+  pos++; // consume 'let'/'const'
+  Expect(TokenKind::LBrace, "to start a destructuring pattern");
+  do {
+    DestructureBinding binding;
+    binding.loc = Cur().loc;
+    binding.fieldName = Expect(TokenKind::Identifier, "as a field name in a destructuring pattern").text;
+    binding.localName = binding.fieldName;
+    if (Match(TokenKind::Colon)) {
+      binding.localName = Expect(TokenKind::Identifier, "as the renamed local name").text;
+    }
+    stmt->destructureBindings.push_back(std::move(binding));
+  } while (Match(TokenKind::Comma));
+  Expect(TokenKind::RBrace, "to close a destructuring pattern");
+  Expect(TokenKind::Assign, "to initialize a destructuring pattern (declarations must have an initializer)");
+  stmt->expr = ParseExpr();
+  Expect(TokenKind::Semicolon, "after a destructuring declaration");
+  return stmt;
+}
+
 std::unique_ptr<Stmt> Parser::ParseIf() {
   auto stmt = MakeStmt(StmtKind::If, Cur().loc);
   pos++; // consume 'if'
@@ -557,6 +729,21 @@ std::unique_ptr<Stmt> Parser::ParseWhile() {
   stmt->cond = ParseExpr();
   Expect(TokenKind::RParen, "after while condition");
   stmt->body = ParseStmt();
+  return stmt;
+}
+
+// `do { body } while (cond);` - the trailing `;` (unlike While/For) is
+// required, matching real TS/JS: there's no statement/block after the
+// condition to make it optional the way it is elsewhere.
+std::unique_ptr<Stmt> Parser::ParseDoWhile() {
+  auto stmt = MakeStmt(StmtKind::DoWhile, Cur().loc);
+  pos++; // consume 'do'
+  stmt->body = ParseStmt();
+  Expect(TokenKind::KwWhile, "after a 'do' block's body");
+  Expect(TokenKind::LParen, "after 'while'");
+  stmt->cond = ParseExpr();
+  Expect(TokenKind::RParen, "after do-while condition");
+  Expect(TokenKind::Semicolon, "after 'do ... while (...)'");
   return stmt;
 }
 
@@ -613,6 +800,68 @@ std::unique_ptr<Stmt> Parser::ParseReturn() {
     stmt->expr = ParseExpr();
   }
   Expect(TokenKind::Semicolon, "after return statement");
+  return stmt;
+}
+
+// `switch (expr) { case v1: stmts* case v2: stmts* default: stmts* }` -
+// each arm is its own StmtKind::Case, collected into the Switch node's
+// own `statements` (see ast.h's own doc comment on StmtKind::Switch for
+// why no dedicated fields were needed). An arm's body runs until the
+// next `case`/`default`/closing `}` - real fallthrough, same as TS/JS -
+// so there's no per-arm block/brace of its own to parse.
+std::unique_ptr<Stmt> Parser::ParseSwitch() {
+  auto stmt = MakeStmt(StmtKind::Switch, Cur().loc);
+  pos++; // consume 'switch'
+  Expect(TokenKind::LParen, "after 'switch'");
+  stmt->expr = ParseExpr();
+  Expect(TokenKind::RParen, "after switch discriminant");
+  Expect(TokenKind::LBrace, "to start a switch body");
+
+  bool sawDefault = false;
+  while (Check(TokenKind::KwCase) || Check(TokenKind::KwDefault)) {
+    auto arm = MakeStmt(StmtKind::Case, Cur().loc);
+    if (Check(TokenKind::KwDefault)) {
+      if (sawDefault) Fail("a 'switch' can have at most one 'default' arm", Cur().loc);
+      sawDefault = true;
+      pos++; // consume 'default'
+    } else {
+      pos++; // consume 'case'
+      arm->expr = ParseExpr();
+    }
+    Expect(TokenKind::Colon, "after a switch arm's own 'case value'/'default'");
+    while (!Check(TokenKind::KwCase) && !Check(TokenKind::KwDefault) && !Check(TokenKind::RBrace)) {
+      arm->statements.push_back(ParseStmt());
+    }
+    stmt->statements.push_back(std::move(arm));
+  }
+  Expect(TokenKind::RBrace, "to close a switch body");
+  return stmt;
+}
+
+// `try { body } catch (name: Type) { catchBody }` - no `finally` yet (see
+// StmtKind::Try's own doc comment), and exactly one catch clause is
+// required (not optional the way real TS/JS's own catch-less `try` is -
+// there's nothing else this could usefully do yet without one, since
+// there's no `finally` to fall back on either).
+std::unique_ptr<Stmt> Parser::ParseTry() {
+  auto stmt = MakeStmt(StmtKind::Try, Cur().loc);
+  pos++; // consume 'try'
+  stmt->body = ParseBlock();
+  Expect(TokenKind::KwCatch, "after a 'try' block's body - ART has no 'finally' yet, so a catch clause is required");
+  Expect(TokenKind::LParen, "after 'catch'");
+  stmt->varName = Expect(TokenKind::Identifier, "as the caught exception's own local name").text;
+  Expect(TokenKind::Colon, "after the catch variable's name - its type must be written explicitly");
+  stmt->declaredType = ParseType();
+  Expect(TokenKind::RParen, "to close the catch clause's parameter list");
+  stmt->elseBranch = ParseBlock();
+  return stmt;
+}
+
+std::unique_ptr<Stmt> Parser::ParseThrow() {
+  auto stmt = MakeStmt(StmtKind::Throw, Cur().loc);
+  pos++; // consume 'throw'
+  stmt->expr = ParseExpr();
+  Expect(TokenKind::Semicolon, "after a throw statement");
   return stmt;
 }
 
@@ -676,8 +925,62 @@ std::unique_ptr<Expr> Parser::ParseLogicalOr() {
 }
 
 std::unique_ptr<Expr> Parser::ParseLogicalAnd() {
-  auto lhs = ParseEquality();
+  auto lhs = ParseBitwiseOr();
   while (Check(TokenKind::AndAnd)) {
+    SourceLoc loc = Cur().loc;
+    std::string op = Cur().text;
+    pos++;
+    auto rhs = ParseBitwiseOr();
+    auto e = MakeExpr(ExprKind::Binary, loc);
+    e->op = op;
+    e->lhs = std::move(lhs);
+    e->rhs = std::move(rhs);
+    lhs = std::move(e);
+  }
+  return lhs;
+}
+
+// Bitwise OR/XOR/AND sit between the logical operators and equality, same
+// precedence order real JS gives them: `||` > `&&` > `|` > `^` > `&` >
+// `==`/`!=` > relational - each binds TIGHTER than `&&` but LOOSER than
+// `==`, so `a | b == c` parses as `a | (b == c)`. Three separate levels
+// (not one, the way `+`/`-` share ParseAdditive) because `|`, `^`, and
+// `&` are NOT equal precedence to each other in JS, unlike `+`/`-`.
+std::unique_ptr<Expr> Parser::ParseBitwiseOr() {
+  auto lhs = ParseBitwiseXor();
+  while (Check(TokenKind::Pipe)) {
+    SourceLoc loc = Cur().loc;
+    std::string op = Cur().text;
+    pos++;
+    auto rhs = ParseBitwiseXor();
+    auto e = MakeExpr(ExprKind::Binary, loc);
+    e->op = op;
+    e->lhs = std::move(lhs);
+    e->rhs = std::move(rhs);
+    lhs = std::move(e);
+  }
+  return lhs;
+}
+
+std::unique_ptr<Expr> Parser::ParseBitwiseXor() {
+  auto lhs = ParseBitwiseAnd();
+  while (Check(TokenKind::Caret)) {
+    SourceLoc loc = Cur().loc;
+    std::string op = Cur().text;
+    pos++;
+    auto rhs = ParseBitwiseAnd();
+    auto e = MakeExpr(ExprKind::Binary, loc);
+    e->op = op;
+    e->lhs = std::move(lhs);
+    e->rhs = std::move(rhs);
+    lhs = std::move(e);
+  }
+  return lhs;
+}
+
+std::unique_ptr<Expr> Parser::ParseBitwiseAnd() {
+  auto lhs = ParseEquality();
+  while (Check(TokenKind::Amp)) {
     SourceLoc loc = Cur().loc;
     std::string op = Cur().text;
     pos++;
@@ -708,11 +1011,49 @@ std::unique_ptr<Expr> Parser::ParseEquality() {
 }
 
 std::unique_ptr<Expr> Parser::ParseRelational() {
-  auto lhs = ParseAdditive();
+  auto lhs = ParseShift();
   while (Check(TokenKind::Lt) || Check(TokenKind::LtEq) || Check(TokenKind::Gt) || Check(TokenKind::GtEq)) {
     SourceLoc loc = Cur().loc;
     std::string op = Cur().text;
     pos++;
+    auto rhs = ParseShift();
+    auto e = MakeExpr(ExprKind::Binary, loc);
+    e->op = op;
+    e->lhs = std::move(lhs);
+    e->rhs = std::move(rhs);
+    lhs = std::move(e);
+  }
+  return lhs;
+}
+
+// `<<`/`>>`/`>>>`. `<<` is a real Shl token (see Tokenizer), but `>>`/
+// `>>>` are each just two/three adjacent Gt tokens - see TokenKind::Shl's
+// own doc comment for why the tokenizer never merges those itself. This
+// loop is the one place that merges them, and it's safe to do
+// unconditionally here (no need to first rule out "closing two levels of
+// a generic instead"): a bare `<T>`/`Box<T>` type reference is only ever
+// parsed by ParseType or the `::<T>` turbofish path, neither of which is
+// reachable through this operator-precedence chain, so any `>` this
+// function ever sees genuinely means the operator, never a generic close.
+std::unique_ptr<Expr> Parser::ParseShift() {
+  auto lhs = ParseAdditive();
+  for (;;) {
+    SourceLoc loc = Cur().loc;
+    std::string op;
+    int consume;
+    if (Check(TokenKind::Shl)) {
+      op = "<<";
+      consume = 1;
+    } else if (Check(TokenKind::Gt) && PeekAt(1).kind == TokenKind::Gt && PeekAt(2).kind == TokenKind::Gt) {
+      op = ">>>";
+      consume = 3;
+    } else if (Check(TokenKind::Gt) && PeekAt(1).kind == TokenKind::Gt) {
+      op = ">>";
+      consume = 2;
+    } else {
+      break;
+    }
+    for (int i = 0; i < consume; i++) pos++;
     auto rhs = ParseAdditive();
     auto e = MakeExpr(ExprKind::Binary, loc);
     e->op = op;
@@ -756,7 +1097,8 @@ std::unique_ptr<Expr> Parser::ParseMultiplicative() {
 }
 
 std::unique_ptr<Expr> Parser::ParseUnary() {
-  if (Check(TokenKind::Bang) || Check(TokenKind::Minus)) {
+  if (Check(TokenKind::Bang) || Check(TokenKind::Minus) || Check(TokenKind::Tilde) ||
+      Check(TokenKind::KwTypeof)) {
     SourceLoc loc = Cur().loc;
     std::string op = Cur().text;
     pos++;
@@ -882,6 +1224,9 @@ std::unique_ptr<Expr> Parser::ParsePrimary() {
     e->boolValue = false;
     return e;
   }
+  if (Match(TokenKind::KwNull)) {
+    return MakeExpr(ExprKind::NullLiteral, loc);
+  }
   if (Check(TokenKind::Identifier)) {
     auto e = MakeExpr(ExprKind::Identifier, loc);
     e->name = Cur().text;
@@ -918,7 +1263,7 @@ std::unique_ptr<Expr> Parser::ParsePrimary() {
 // grammar is.
 bool Parser::CheckJsxName() const {
   return Check(TokenKind::Identifier) ||
-         (Cur().kind >= TokenKind::KwFunction && Cur().kind <= TokenKind::KwClass);
+         (Cur().kind >= TokenKind::KwFunction && Cur().kind <= TokenKind::KwTypeof);
 }
 
 // A JSX tag or attribute name: one name segment (see CheckJsxName),
@@ -936,7 +1281,7 @@ std::string Parser::ParseJsxName(const char *context) {
   pos++;
   while (Check(TokenKind::Minus) &&
          (PeekAt(1).kind == TokenKind::Identifier ||
-          (PeekAt(1).kind >= TokenKind::KwFunction && PeekAt(1).kind <= TokenKind::KwClass))) {
+          (PeekAt(1).kind >= TokenKind::KwFunction && PeekAt(1).kind <= TokenKind::KwTypeof))) {
     pos++; // '-'
     name += "-";
     name += Cur().text;

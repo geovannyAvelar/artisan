@@ -40,13 +40,17 @@ inline const std::unordered_map<std::string, std::string> kAmbientGlobals = {
 // Type syntax, as written in source (resolved into a ResolvedType by Sema)
 // ---------------------------------------------------------------------
 
-enum class TypeSyntaxKind { Number, Boolean, String, Void, Array, Named, Handler };
+// Nullable: `T | null` - see ResolvedType's own TypeTag::Nullable doc
+// comment for the full story (this is the one and only union shape ART
+// supports - not general `T1 | T2` unions).
+// Any: `any` - see TypeTag::Any's own doc comment.
+enum class TypeSyntaxKind { Number, Boolean, String, Void, Array, Named, Handler, Nullable, Any };
 
 struct TypeNode {
   TypeSyntaxKind kind;
   SourceLoc loc;
   std::string name;                 // Named: interface/opaque type name
-  std::unique_ptr<TypeNode> element; // Array: element type
+  std::unique_ptr<TypeNode> element; // Array: element type; Nullable: the wrapped type (the `T` in `T | null`)
   std::vector<std::unique_ptr<TypeNode>> handlerParamTypes; // Handler: e.g. "(event: Event) => void"
   std::vector<std::unique_ptr<TypeNode>> genericArgs;       // Named: e.g. "Box<number>" - empty if not generic
 };
@@ -55,12 +59,74 @@ struct TypeNode {
 // Resolved types (filled in by Sema, consumed by Codegen)
 // ---------------------------------------------------------------------
 
-enum class TypeTag { Unknown, Number, Boolean, String, Void, Array, Struct, Handler };
+// Enum: a real, distinct type from Number - see EnumDecl's own doc
+// comment for exactly what that buys (mainly: `let c: Color = 5;` is a
+// type error, only `Color.Red`/another already-`Color`-typed value
+// works) - even though its runtime representation (MapType, Codegen) is
+// the exact same `double` a plain Number already is.
+//
+// Nullable: `T | null` - ART's ONE and only union shape (see
+// art/README.md's "Optional values"/"Nullable types" sections for why:
+// general `T1 | T2` unions need real member-access/narrowing rules
+// across arbitrarily many cases, which is a much bigger feature than
+// "this one specific type might be absent"). Represented uniformly as a
+// boxed `ptr` at the Codegen level - a fresh GC cell holding the real T,
+// or a null pointer for "absent" - REGARDLESS of what T's own
+// unwrapped representation would otherwise be (a plain `double`/`i1`
+// has no bit pattern that could double as "absent" without colliding
+// with a real value, unlike a pointer, where null already does). Reading
+// a Nullable(T) as a plain T needs narrowing first (see Expr::
+// isNarrowedNonNull) - there's no implicit "just trust it's there".
+// Any: `any` - the one type ART lets flow completely dynamically, real
+// TS-style. Represented uniformly (same "one box shape regardless of
+// what's inside" trick Nullable(T) already uses - see its own doc
+// comment) as a boxed `ptr`: a fresh GC cell `{ i32 tag, ptr payload }`,
+// `tag` one of AnyTag's values (below) saying what's actually in it right
+// now, `payload` the value itself - a heap cell holding a copy for
+// Number/Boolean/Enum (none of which have a spare pointer-shaped slot of
+// their own to reuse), or the value's OWN pointer directly for anything
+// that's already `ptr`-shaped (String/Struct/Array), or a heap cell
+// holding the {fn,env} pair for Handler (see GetHandlerStructType's own
+// doc comment for why that one's a 2-word aggregate, not a bare pointer).
+//
+// Unlike Nullable(T), assigning a plain, concrete value where `any` is
+// expected widens IMPLICITLY (see Sema::CheckExpr's own tail
+// actual-vs-expected check, and Expr::needsAnyBox/preBoxType) - that's
+// the entire point of `any` in real TS, and disallowing it would defeat
+// the feature. Getting a concrete value back OUT needs `typeof x ===
+// "..."` narrowing first (see AnyTag, Sema::TryGetTypeofCheckedVar) -
+// there's no implicit narrowing the other direction, same "prove it
+// first" discipline Nullable(T) already has.
+//
+// Two real, deliberate limits, both because generalizing them needs
+// runtime type identification ART doesn't have (see "What's not in
+// ART"'s own "no downcasting or instanceof" bullet):
+// - A `T | null` value can't be assigned into an `any` directly (box it
+//   as its own tag once narrowed to plain T first) - `any` and Nullable
+//   are two separate, non-interacting escape hatches in this version.
+// - `typeof x === "object"` / `"function"` never narrows anything (see
+//   AnyTag::Object's own doc comment for why: `any` erases exactly
+//   which struct/array/handler-signature was boxed, the same "no
+//   instanceof, no downcasting" gap real inheritance already has) -
+//   only `"number"`/`"boolean"`/`"string"`, the three tags with one
+//   single, unambiguous concrete type to narrow back to, actually do.
+enum class TypeTag { Unknown, Number, Boolean, String, Void, Array, Struct, Handler, Enum, Nullable, Any };
+
+// The runtime tag stored in every `any` value's own box (see TypeTag::
+// Any's own doc comment) - one entry per distinct `typeof` result ART
+// recognizes. Object covers BOTH a struct instance and an array -
+// indistinguishable via `typeof` alone, exactly like real JS's own
+// `typeof [1, 2, 3] === "object"` - and Null is `any`'s own `null`
+// literal (`let x: any = null;`), which real JS also reports as
+// `typeof null === "object"`, a deliberately-preserved quirk, not an
+// oversight, since ART's `any` otherwise tries to match real JS/TS
+// `typeof` behavior exactly.
+enum class AnyTag { Number, Boolean, String, Object, Function, Null };
 
 struct ResolvedType {
   TypeTag tag = TypeTag::Unknown;
   std::shared_ptr<ResolvedType> elementType;                    // Array
-  std::string structName;                                       // Struct (interface/opaque type name)
+  std::string structName;                                       // Struct (interface/opaque type name); Enum (its own name)
   std::shared_ptr<std::vector<ResolvedType>> handlerParamTypes; // Handler
 
   bool operator==(const ResolvedType &other) const;
@@ -71,15 +137,32 @@ struct ResolvedType {
   static ResolvedType Boolean() { return MakeSimple(TypeTag::Boolean); }
   static ResolvedType String() { return MakeSimple(TypeTag::String); }
   static ResolvedType Void() { return MakeSimple(TypeTag::Void); }
+  static ResolvedType Any() { return MakeSimple(TypeTag::Any); }
   static ResolvedType Struct(std::string name) {
     ResolvedType t;
     t.tag = TypeTag::Struct;
     t.structName = std::move(name);
     return t;
   }
+  static ResolvedType Enum(std::string name) {
+    ResolvedType t;
+    t.tag = TypeTag::Enum;
+    t.structName = std::move(name);
+    return t;
+  }
   static ResolvedType ArrayOf(ResolvedType elem) {
     ResolvedType t;
     t.tag = TypeTag::Array;
+    t.elementType = std::make_shared<ResolvedType>(std::move(elem));
+    return t;
+  }
+  // `T | null` - `elem` (reusing Array's own field) is the wrapped `T`.
+  // Nullable(Nullable(T)) is nonsensical and never constructed - Sema's
+  // own ResolveType rejects `T | null | null` at the syntax level before
+  // this could ever be called with an already-Nullable `elem`.
+  static ResolvedType NullableOf(ResolvedType elem) {
+    ResolvedType t;
+    t.tag = TypeTag::Nullable;
     t.elementType = std::make_shared<ResolvedType>(std::move(elem));
     return t;
   }
@@ -114,6 +197,10 @@ enum class ExprKind {
   NumberLiteral,
   BoolLiteral,
   StringLiteral,
+  // `null` - always needs an expected Nullable(T) type to resolve
+  // against (same "can't infer from nothing" deal an empty array
+  // literal has) - see Sema::CheckExpr's own NullLiteral case.
+  NullLiteral,
   Identifier,
   Binary,
   Unary,
@@ -190,6 +277,48 @@ struct Expr {
 
   bool isLengthAccess = false; // Member: true when field is the built-in `.length` on an array/string
   bool isPostfix = false; // IncDec: `x++`/`x--` (evaluates to the OLD value) vs `++x`/`--x` (the NEW value)
+
+  // Identifier only - true iff Sema's own narrowing (see its own
+  // narrowedNonNull member and CheckStmt's If case) proved, at THIS
+  // specific reference, that a Nullable(T)-declared variable can't
+  // actually be null right now (an `if (x != null) { ...here... }`
+  // check, or code after an `if (x == null) { <exits> }` with no
+  // `else`) - deliberately per-reference, not per-declaration: the SAME
+  // variable can be narrowed at one use and not another, and Sema
+  // proves it fresh each time rather than caching a blanket "this
+  // variable is now always non-null" fact. When true, `resolvedType` is
+  // already the UNWRAPPED T (not Nullable(T)) - Codegen reads this flag
+  // to know it must unbox the variable's own boxed-cell storage (an
+  // extra load through the pointer) to actually produce a T-typed
+  // value, rather than returning the raw boxed pointer the variable is
+  // really stored as. This is the ONLY place narrowing has any runtime
+  // effect at all - a deliberately narrow, single-choke-point design
+  // rather than threading a temporarily-different type through every
+  // other expression kind that might reference this variable.
+  bool isNarrowedNonNull = false;
+  // Identifier only - the `any`-flavored counterpart to isNarrowedNonNull
+  // above, set when Sema's own `typeof x === "..."` narrowing (see
+  // narrowedAny, TryGetTypeofCheckedVar) proved, at THIS specific
+  // reference, that an Any-declared variable currently holds one of the
+  // three narrowable concrete shapes (number/boolean/string - see
+  // TypeTag::Any's own doc comment for why not object/function too).
+  // Same per-reference, proven-fresh-each-time discipline
+  // isNarrowedNonNull already has, and the same "resolvedType is already
+  // the narrowed concrete type, Codegen just needs to know to unbox"
+  // shape: reads the variable's own boxed-any storage, then unwraps
+  // `payload` according to which concrete type this narrowed to.
+  bool isNarrowedAny = false;
+  // True when Sema's own actual-vs-expected tail check (see CheckExpr)
+  // widened a concrete, boxable value (see TypeTag::Any's own doc
+  // comment for exactly which tags qualify) into an `any` implicitly -
+  // `resolvedType` is already TypeTag::Any at that point, so `preBoxType`
+  // is where Codegen finds the ORIGINAL concrete type it actually needs
+  // to know how to box (GenBoxAny branches on it to decide the runtime
+  // AnyTag and how to build the payload). Never set alongside
+  // isNarrowedNonNull/isNarrowedAny (those UN-box; this BOXES) - the two
+  // directions never overlap on the same reference.
+  bool needsAnyBox = false;
+  ResolvedType preBoxType; // valid only when needsAnyBox is true
   // Call: true when `lhs` is a Handler-*valued* expression (a variable,
   // array element, ...) rather than a named function or class method -
   // Codegen evaluates `lhs` itself to get the callee (a computed
@@ -217,6 +346,19 @@ struct Expr {
   std::vector<std::unique_ptr<TypeNode>> typeArgs;
   std::string resolvedCalleeName;
 
+  // Call only, and only for an instance method call (`obj.method(args)`)
+  // whose resolved method is FunctionDecl::isVirtual - the vtable slot
+  // to dispatch through (same value as that method's own vtableSlot),
+  // rather than calling `resolvedCalleeName` directly the way every
+  // other Call does. -1 (the default) means "not virtual" - an ordinary
+  // direct call, unaffected by any of this (the overwhelming majority of
+  // calls, and the only kind that existed before inheritance did).
+  // `resolvedCalleeName` is still set alongside this (to whichever
+  // method's own implementation Sema resolved statically), but Codegen's
+  // own Call case ignores it in favor of the indirect dispatch this
+  // triggers - see its own doc comment for why it's kept anyway.
+  int virtualSlot = -1;
+
   // FunctionExpr only - owns the closure's own params/body, reusing
   // FunctionDecl's existing shape wholesale rather than inventing a
   // parallel node. Sema assigns `fn->name` a synthesized, globally-unique
@@ -240,7 +382,77 @@ inline std::unique_ptr<Expr> MakeExpr(ExprKind kind, SourceLoc loc) {
 // Statements
 // ---------------------------------------------------------------------
 
-enum class StmtKind { VarDecl, If, While, For, ForOf, Return, ExprStmt, Block };
+enum class StmtKind {
+  VarDecl,
+  If,
+  While,
+  For,
+  ForOf,
+  Return,
+  ExprStmt,
+  Block,
+  // `break;`/`continue;` - no fields of their own; see Sema's
+  // loopDepth/switchDepth (break: either > 0; continue: loopDepth > 0)
+  // for where each is validated, and Codegen's breakTargets stack for
+  // where each is actually generated.
+  Break,
+  Continue,
+  // `do { body } while (cond);` - reuses While's own cond/body fields;
+  // the only difference from While is Codegen running the body once
+  // before the first condition check (see Codegen::GenStmt's own
+  // DoWhile case) - Sema's own check is textually identical to While's.
+  DoWhile,
+  // `switch (expr) { case v1: stmts case v2: stmts default: stmts }` -
+  // `expr` (reusing Return/ExprStmt's own field) is the discriminant;
+  // `statements` (reusing Block's own field) holds one StmtKind::Case
+  // per arm, in source order. A real switch, not a chain of ifs: cases
+  // fall through into the next one unless a `break` ends them, matching
+  // real TS/JS semantics exactly now that `break` exists.
+  Switch,
+  // One arm of a Switch, always a direct child of its `statements` -
+  // never appears anywhere else. `expr` (null for `default:`) is the
+  // case's own value, checked for equality against the switch's
+  // discriminant; `statements` is this arm's own statement list, no
+  // implicit block scope of its own (matching real JS: `let x` in one
+  // case is visible to a later case it falls through into).
+  Case,
+  // `let { a, b: renamed } = expr;` - object (interface/class struct)
+  // destructuring only, see Stmt::destructureBindings' own doc comment
+  // for exactly what that means and why array destructuring/defaults
+  // aren't included. `expr` (reusing Return/ExprStmt's own field) is the
+  // struct being destructured, evaluated exactly once regardless of how
+  // many bindings read from it; `isConst` applies to every binding alike
+  // (there's no per-binding `let`/`const` mix - matching how a plain
+  // `let x = 1, y = 2;` isn't legal in ART either, only one declaration
+  // per statement).
+  Destructure,
+  // `try { body } catch (name: Error) { catchBody }` - reuses `body` for
+  // the try block (same field While/DoWhile/If already use) and
+  // `elseBranch` for the catch block (same field If's own `else` uses -
+  // Try never needs an actual else, so this is free to reuse), plus
+  // VarDecl's own varName/declaredType/resolvedVarType for the catch
+  // binding. No `finally` yet, and `declaredType` must resolve to
+  // exactly `Error` (Sema rejects anything else) - see the builtin
+  // `Error` interface's own doc comment (Sema::SeedBuiltins) for why:
+  // with only one throwable type possible, every active handler always
+  // matches whatever's thrown, so there's no type-tag-based selective
+  // catching to get wrong yet - real polymorphic catching needs runtime
+  // type identification, which doesn't exist in ART yet.
+  Try,
+  // `throw expr;` - reuses Return/ExprStmt's own `expr` field. `expr`
+  // must resolve to exactly `Error` - see StmtKind::Try's own doc
+  // comment for why only one throwable type exists right now.
+  Throw,
+};
+
+// One `name` or `name: renamed` inside a Destructure statement's `{...}`
+// pattern - see StmtKind::Destructure's own doc comment.
+struct DestructureBinding {
+  std::string fieldName; // the source struct's own field name
+  std::string localName; // the new local's name - == fieldName unless renamed
+  SourceLoc loc;
+  ResolvedType resolvedType; // filled in by Sema (the field's own type)
+};
 
 struct Stmt {
   StmtKind kind;
@@ -265,7 +477,31 @@ struct Stmt {
   // never infers this independently. Deliberately NOT copied by
   // CloneStmt, same as resolvedVarType isn't - see CloneStmt's own
   // top-of-file comment.
+  //
+  // Destructure also reuses this - but per WHOLE PATTERN, not per
+  // binding: if any one of a `let {a, b} = x;`'s locals is captured,
+  // Codegen boxes every binding from that statement, even ones that
+  // individually aren't (see its own Destructure case) - simpler than
+  // threading capture tracking through Declare/VarInfo on a per-binding
+  // basis, and safe (boxing unnecessarily is never wrong, just slightly
+  // wasteful).
   bool isCapturedByClosure = false;
+
+  // VarDecl (a Program::globals entry) only - true only for an enum
+  // member's own synthetic global (see Sema::Check's enum-registration
+  // pass, which constructs one per member, fully resolved already:
+  // resolvedVarType and expr->resolvedType are both set to the member's
+  // real Enum(enumName) type up front). Tells CheckGlobalDecl's own
+  // per-global loop to skip re-deriving/re-checking this one entirely -
+  // running it through the ordinary path would recompute its type from
+  // the bare NumberLiteral initializer alone (always plain `number`,
+  // CheckExpr's NumberLiteral case has no way to know it's "supposed to"
+  // be some Enum instead) and then reject its own already-correct
+  // Enum-typed resolvedVarType as a mismatch against that. Never true
+  // for anything else - an ordinary global (including a static field)
+  // always goes through the real check, since its initializer genuinely
+  // does need one.
+  bool isPreCheckedGlobal = false;
 
   // If / While / For share cond + body; If additionally uses elseBranch
   std::unique_ptr<Expr> cond;
@@ -276,11 +512,17 @@ struct Stmt {
   std::unique_ptr<Stmt> initStmt;
   std::unique_ptr<Expr> update;
 
-  // Return / ExprStmt / VarDecl init / ForOf (the iterable expression)
+  // Return / ExprStmt / VarDecl init / ForOf (the iterable expression) /
+  // Switch (the discriminant) / Case (the case value, null for
+  // `default:`) / Destructure (the struct being destructured)
   std::unique_ptr<Expr> expr;
 
-  // Block
+  // Block / Switch (one StmtKind::Case per arm) / Case (that arm's own
+  // statement list)
   std::vector<std::unique_ptr<Stmt>> statements;
+
+  // Destructure only - see StmtKind::Destructure's own doc comment.
+  std::vector<DestructureBinding> destructureBindings;
 };
 
 inline std::unique_ptr<Stmt> MakeStmt(StmtKind kind, SourceLoc loc) {
@@ -305,6 +547,23 @@ struct Param {
   // Stmt::isCapturedByClosure, just for a parameter instead of a
   // `let`/`const` local. See that field's own doc comment.
   bool isCapturedByClosure = false;
+
+  // `function f(...args: T[]): void` - only legal on a plain top-level
+  // function's own LAST parameter (see Sema::RegisterFunctionSignature;
+  // rejected on a class method/generic function/closure/`declare
+  // function` in this first pass - see its own error message for why).
+  // `type`/`resolvedType` are the parameter's own DECLARED type exactly
+  // as written (always `T[]`, same array type the body sees `args` as -
+  // there's no separate "element type" spelling the way real TS's
+  // `...args: T` shorthand has) - a call site's own trailing arguments
+  // (from this parameter's position onward) are collected into a real,
+  // freshly allocated array at the call, checked one at a time against
+  // the array's own element type (see CheckExpr's Call case) - not
+  // "spread" syntax at the call site, which this pass doesn't add (see
+  // README's own note on the gap that leaves: an existing `T[]` a caller
+  // already has can't be forwarded directly into a rest parameter,
+  // only a literal, fixed-at-the-call-site argument list can).
+  bool isRest = false;
 };
 
 struct FunctionDecl {
@@ -356,6 +615,37 @@ struct FunctionDecl {
   // generic declare-function template's instantiation.
   bool isExtern = false;
 
+  // True only for a class method parsed from `static function name(...)`
+  // (see Parser::ParseClassBody) - no implicit `this` receiver (the
+  // parser skips InjectImplicitThis for one of these), called as
+  // `ClassName.name(args)` instead of `instance.name(args)`. Mangled the
+  // same "$static$" way a static field is (see
+  // InterfaceDecl::staticFields' own doc comment and Sema::MangleStatic)
+  // rather than a plain method's "ClassName$name", so a static and an
+  // instance member can share a name with no collision - matching real
+  // TS/JS, where the two live in genuinely separate namespaces. Once
+  // qualified, a static method is registered/checked exactly like any
+  // other top-level function (see Sema::Check) - Codegen never needs to
+  // know a function is "static" at all, only that it has no implicit
+  // first parameter, which is already just what its own `params` list
+  // says.
+  bool isStatic = false;
+
+  // True only for a plain instance method (never a getter/setter/static/
+  // extern one - see Sema::Check's own inheritance pass) belonging to a
+  // class that's actually part of an inheritance relationship (has a
+  // base, or is one) - see InterfaceDecl::baseClass's own doc comment
+  // for why that scoping matters. `vtableSlot` is this method's own
+  // index into every class-in-that-family's vtable (the SAME slot
+  // number across the whole family - e.g. Animal's and Dog's own
+  // "speak" both live at slot 0 - is what makes an override actually
+  // override: calling through slot 0 on a Dog instance reaches Dog's
+  // own function pointer, on a plain Animal instance reaches Animal's).
+  // Assigned once, in base-to-derived order, when the family's own
+  // virtual method set is first computed - see Sema::Check.
+  bool isVirtual = false;
+  int vtableSlot = -1;
+
   // Non-empty only for a closure (ExprKind::FunctionExpr's own `fn`)
   // that actually references something from an enclosing frame - see
   // Sema::Lookup's own doc comment for exactly how/when this gets
@@ -385,6 +675,16 @@ struct InterfaceField {
   std::unique_ptr<TypeNode> type;
   ResolvedType resolvedType;
   SourceLoc loc;
+  // `readonly name: Type;` - still set the normal way, through a `{}`
+  // object literal at construction (an interface/class instance is
+  // never built any other way - see InterfaceDecl's own doc comment),
+  // but rejected as an assignment/increment-decrement TARGET afterward
+  // (see Sema::CheckLValueTarget's own Member case) - the read path
+  // (CheckExpr's Member case) is completely unaffected, same as a local
+  // `const`'s own read path already is. Purely a Sema-time restriction;
+  // Codegen needs no changes at all; since the write path this would
+  // reach is simply never generated for a rejected program.
+  bool isReadonly = false;
 };
 
 struct InterfaceDecl {
@@ -401,13 +701,69 @@ struct InterfaceDecl {
   // "this", typed as this very class) is its implicit receiver;
   // `obj.method(args)` is pure call-site sugar (see Sema::CheckExpr's
   // Call case) for a plain call to that method with `obj` spliced in as
-  // the actual first argument - resolved statically against obj's
-  // declared type, same as everything else in ART (no vtable, no
-  // dynamic dispatch, classes can't be generic yet). Sema qualifies each
+  // the actual first argument - classes still can't be generic. A class
+  // outside any inheritance relationship at all resolves this statically
+  // against obj's own declared type, same as always (Sema qualifies the
   // method's own `name` to "ClassName$methodName" and registers/checks
-  // it exactly like any other top-level function (see Sema::Check) -
-  // Codegen never needs to know a method came from a class at all.
+  // it exactly like any other top-level function - Codegen never needs
+  // to know a method came from a class at all). A class that DOES
+  // extend, or get extended, is different - see baseClassName/baseClass
+  // below for what changes for those.
   std::vector<std::unique_ptr<FunctionDecl>> methods;
+  // `class Dog extends Animal { ... }` - `baseClassName` is the raw
+  // source spelling ("Animal" above), empty if there's no `extends` at
+  // all; `baseClass` is Sema's own resolved pointer to it, filled in
+  // during class registration (see Sema::Check) once every class name is
+  // known. Single inheritance only, classes only - a plain `interface`
+  // or `declare class` can't extend anything, and a class can't extend
+  // either of those either (see Sema::Check's own validation).
+  //
+  // Only a class actually touched by *some* extends relationship (has a
+  // baseClass, or IS one for something else) gets real virtual dispatch
+  // - see FunctionDecl::isVirtual - so a class that stands alone
+  // (the overwhelming majority of existing code, and the only kind that
+  // existed before this) is completely unaffected: same direct-call
+  // codegen, same struct layout (no vtable pointer prepended), byte-for-
+  // byte identical to before inheritance existed at all.
+  //
+  // A derived class's own effective field list is its base's own
+  // (recursively, for a multi-level chain) followed by its own new
+  // fields, in that order - what makes upcasting a Dog* to an Animal*
+  // a pure no-op pointer reinterpretation (the base's own fields sit at
+  // the exact same struct offsets in both layouts) rather than needing
+  // any real conversion. A derived class's own new field can't reuse a
+  // name from anywhere in its base chain (Sema rejects it) - no field
+  // shadowing.
+  std::string baseClassName;
+  InterfaceDecl *baseClass = nullptr;
+  // True iff this class is actually part of an inheritance family - has
+  // a baseClass, or is one for some OTHER class (computed once every
+  // class's own baseClass is resolved - see Sema::Check). This is the
+  // one flag that decides whether Codegen gives this class's own
+  // instances a vtable-pointer field at all, and whether a call to one
+  // of its methods goes through that vtable (indirect, real dynamic
+  // dispatch) or stays a plain direct call the way every method call
+  // already worked before inheritance existed. A class untouched by any
+  // `extends` relationship anywhere always has this false, keeping it
+  // byte-for-byte identical (same struct layout, same call codegen) to
+  // before this feature existed at all.
+  bool hasVirtualDispatch = false;
+  // `static name: Type = initExpr;` - a class-scoped value, not part of
+  // any instance (never appears in a `{}` object literal, and isn't
+  // enumerable through one) - a real value that exists exactly once,
+  // same lifetime/initialization-order deal a top-level `let`/`const`
+  // has (see Program::globals' own doc comment: a literal is a real
+  // compile-time constant, anything else computed once via the same
+  // generated module-constructor). Requires an initializer (unlike an
+  // instance field, which never has one - an instance is always built
+  // structurally via `{}`, so there's nowhere for a default value to
+  // even go), which is also why this is a real VarDecl Stmt rather than
+  // an InterfaceField the way instance fields are - see
+  // Parser::ParseClassBody. Accessed as `ClassName.name`, mangled
+  // "ClassName$static$name" (see Sema::MangleStatic) - a distinct
+  // namespace from instance fields/methods, so a static and instance
+  // member can share a name with no collision, matching real TS/JS.
+  std::vector<std::unique_ptr<Stmt>> staticFields;
   SourceLoc loc;
   bool isOpaque = false; // `declare type Name;`/`declare class Name { ... }` -
                           // a foreign handle with no accessible fields, never
@@ -415,6 +771,47 @@ struct InterfaceDecl {
                           // are still real ART code, though - typically thin
                           // wrappers around `declare function`s)
   std::string sourceFile; // see FunctionDecl's own doc comment
+  bool isExported = false;
+};
+
+// `enum Name { Member, Member2 = 5, Member3 }` - a closed set of named
+// numeric constants, auto-numbered from 0 (each bare member is the
+// previous member's value + 1, or 0 for the first) unless a member gives
+// its own explicit `= NumberLiteral` (which the auto-numbering then
+// continues from - `Member3` above is 6, not 2). `value` is filled in by
+// Sema (EnumDecl itself only records what the source literally wrote:
+// `hasExplicitValue`/`explicitValue`); accessed as `Name.Member`, exactly
+// the same static-member access syntax a class's own `static` field
+// already has (see Sema::MangleEnumMember and its own reuse of the
+// static-access rewrite machinery) - an enum member IS, under the hood,
+// nothing more than a `static readonly Member: Name = value;` on a class
+// with no instance side at all.
+//
+// Deliberately NOT interchangeable with a plain `number`, even though
+// its runtime representation is identical (a real `double` - see
+// TypeTag::Enum) - `let c: Color = 5;` is a type error, matching real
+// TS's own numeric enums. Unlike real TS, though, arithmetic (`+`, `<`,
+// ...) isn't allowed directly on an enum-typed value either (only `==`/
+// `!=`, the same "same tag" rule Struct/Handler already have) - ART's
+// "no implicit anything" philosophy (no implicit stringification, no
+// implicit widening) extends naturally to "no implicit
+// enum-participates-in-arithmetic-as-a-number" too, rather than
+// special-casing an exception for enums alone. Write
+// `numberToString`/an explicit cast-shaped helper function if arithmetic
+// on an enum's underlying value is genuinely needed.
+struct EnumMember {
+  std::string name;
+  SourceLoc loc;
+  bool hasExplicitValue = false;
+  double explicitValue = 0; // only meaningful if hasExplicitValue
+  double value = 0;         // filled in by Sema - the member's real, final value
+};
+
+struct EnumDecl {
+  std::string name;
+  std::vector<EnumMember> members;
+  SourceLoc loc;
+  std::string sourceFile;
   bool isExported = false;
 };
 
@@ -443,6 +840,7 @@ struct Program {
   std::vector<std::unique_ptr<ImportDecl>> imports;
 
   std::vector<std::unique_ptr<InterfaceDecl>> interfaces;
+  std::vector<std::unique_ptr<EnumDecl>> enums;
   std::vector<std::unique_ptr<FunctionDecl>> functions;
   std::vector<std::unique_ptr<FunctionDecl>> externFunctions; // `declare function ...;` - body is always null
   // Top-level `let`/`const` (each a StmtKind::VarDecl) that's actually a

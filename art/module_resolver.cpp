@@ -140,6 +140,7 @@ Program ModuleResolver::ResolveAndMerge(const std::string &entryPath) {
     Program &prog = parsedFiles.at(path);
     std::unordered_set<std::string> &vis = visibility[path];
     for (auto &i : prog.interfaces) vis.insert(i->name);
+    for (auto &e : prog.enums) vis.insert(e->name);
     for (auto &f : prog.functions) vis.insert(f->name);
     for (auto &f : prog.externFunctions) vis.insert(f->name);
     for (auto &g : prog.globals) vis.insert(g->varName);
@@ -164,6 +165,7 @@ Program ModuleResolver::ResolveAndMerge(const std::string &entryPath) {
           exported = exported || isExported;
         };
         for (auto &i : target.interfaces) check(i->name, i->isExported);
+        for (auto &e : target.enums) check(e->name, e->isExported);
         for (auto &f : target.functions) check(f->name, f->isExported);
         for (auto &f : target.externFunctions) check(f->name, f->isExported);
         for (auto &g : target.globals) check(g->varName, g->isExported);
@@ -188,6 +190,10 @@ Program ModuleResolver::ResolveAndMerge(const std::string &entryPath) {
     for (auto &i : prog.interfaces) {
       i->sourceFile = path;
       merged.interfaces.push_back(std::move(i));
+    }
+    for (auto &e : prog.enums) {
+      e->sourceFile = path;
+      merged.enums.push_back(std::move(e));
     }
     for (auto &f : prog.functions) {
       f->sourceFile = path;

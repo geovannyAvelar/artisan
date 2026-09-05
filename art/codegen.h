@@ -80,7 +80,43 @@ private:
 
   llvm::FunctionCallee gcMallocFn; // Boehm GC's GC_malloc - see GenHeapAlloc
   llvm::FunctionCallee memcmpFn;
+  // libc's own setjmp/longjmp, called directly (never through a wrapper
+  // function - see GenStmt's own Try/Throw cases for why that matters:
+  // setjmp only captures a resumable state for the function that calls
+  // it directly). What try/catch/throw is actually built on - see
+  // art/README's own note on why (ART has no destructors at all,
+  // everything being GC'd, so the usual reason C++-style unwinding needs
+  // to be this complicated - running cleanup code for every stack frame
+  // being unwound past - simply doesn't apply here).
+  llvm::FunctionCallee setjmpFn;
+  llvm::FunctionCallee longjmpFn;
+  llvm::FunctionCallee abortFn; // an uncaught throw (no active handler at all) - see GenStmt's own Throw case
+  // `@art.exception.currentHandler` - the single global root of the
+  // handler-frame linked list (see GetExceptionFrameType), null when no
+  // try is currently active anywhere. Cached here once Generate() creates
+  // it so GenStmt's Try/Throw cases don't need to re-look-it-up by name
+  // every time.
+  llvm::GlobalVariable *exceptionCurrentHandler = nullptr;
+  llvm::StructType *exceptionFrameType = nullptr; // see GetExceptionFrameType
+  llvm::StructType *GetExceptionFrameType();
   llvm::StructType *arrayHeaderType = nullptr; // also used for strings: same { i64 length, ptr data } shape
+  // `{ i32 tag, ptr payload }` - every `any` value's own box (see
+  // TypeTag::Any's own doc comment). Named (like arrayHeaderType/
+  // exceptionFrameType, unlike GetHandlerStructType's anonymous one)
+  // since GenBoxAny/the Unary "typeof" case both need to CreateStructGEP
+  // into it from otherwise-unrelated call sites, all needing the exact
+  // same layout.
+  llvm::StructType *anyBoxType = nullptr;
+  llvm::StructType *GetAnyBoxType();
+  // Builds a fresh `any` box (see GetAnyBoxType) wrapping `rawValue`,
+  // already-evaluated as `sourceType` (one of the tags Sema::IsAnyBoxable
+  // accepts) - the ONE place that decides both the runtime AnyTag and how
+  // to actually store the value (a heap cell for Number/Boolean/Enum/
+  // Handler, which have no spare pointer-shaped slot of their own to
+  // reuse; `rawValue` itself for String/Struct/Array, already `ptr`-
+  // shaped). Called from GenExpr's own thin wrapper below whenever
+  // Sema set Expr::needsAnyBox - see its own doc comment in ast.h.
+  llvm::Value *GenBoxAny(llvm::Value *rawValue, const ResolvedType &sourceType);
   std::unordered_map<std::string, llvm::StructType *> structTypes;
   std::unordered_map<std::string, llvm::Function *> llvmFunctions;
   std::unordered_map<std::string, VarBinding> globalVars;
@@ -91,12 +127,94 @@ private:
   std::vector<std::unordered_map<std::string, VarBinding>> scopes;
   llvm::Function *currentFunction = nullptr;
 
+  // One entry per loop/switch/try GenStmt is currently generating,
+  // innermost last (a real LIFO stack, matching lexical nesting order) -
+  // what `break`/`continue`/`return` actually have to unwind through on
+  // their way out. Two unrelated things share this one stack (rather
+  // than two separate ones) specifically because they have to be walked
+  // TOGETHER, in real nesting order: a `break` three `try`s deep inside
+  // a loop has to pop all three of those try-handler frames (see
+  // GenExceptionHandlerCleanup) on its way to the loop's own break
+  // target, and the only way to know exactly which trys sit between
+  // "here" and "there" is one shared, correctly-ordered stack.
+  struct ScopeExit {
+    enum class Kind { Loop, Try } kind;
+
+    // Loop (also used by Switch, which is break-able like a loop but not
+    // continue-able - see LoopTargets' own old doc comment, preserved
+    // here): breakTarget is always set; continueTarget is null for a
+    // switch frame, since `continue` skips right past any enclosing
+    // switch to the nearest enclosing LOOP (matching real JS) - see
+    // GenStmt's own Continue case, which walks this stack for the first
+    // Loop-kind frame that actually has one, rather than always using
+    // the top frame the way Break does. Sema (loopDepth/switchDepth)
+    // already guarantees a Break/Continue node here always finds a
+    // valid frame - this stack exists purely to know which LLVM
+    // BasicBlock/handler state to unwind to, not to re-validate what
+    // Sema already proved.
+    llvm::BasicBlock *breakTarget = nullptr;
+    llvm::BasicBlock *continueTarget = nullptr;
+
+    // Try: a pointer to this try's own handler-frame struct (see
+    // GetExceptionFrameType) - the same frame StmtKind::Throw's own
+    // codegen reads a "prev" field out of, at a completely different,
+    // unrelated call site, to restore `@art.exception.currentHandler`
+    // when it fires (throw has no compile-time visibility into any
+    // particular try's own SSA values - only the runtime linked list
+    // rooted at that global - so it always goes through memory; early
+    // exit reuses that exact same "read this frame's own prev field"
+    // mechanism rather than a second, parallel one). A break/continue/
+    // return skipping past N nested try frames needs only the OUTERMOST
+    // (earliest-pushed) of those N frames' own prev field, loaded once -
+    // see GenExceptionHandlerCleanup.
+    llvm::Value *framePtr = nullptr;
+  };
+  std::vector<ScopeExit> scopeStack;
+
+  // Restores `@art.exception.currentHandler` to what it was before every
+  // Try-kind ScopeExit frame at or above `stopBelow` on `scopeStack` was
+  // pushed - i.e. "pop every try handler frame between here and (but not
+  // including) `stopBelow`". Called before any jump that leaves one or
+  // more try bodies early - Break/Continue (stopBelow: the target
+  // loop/switch's own stack index) and Return (stopBelow: 0, the whole
+  // current function). A no-op (no store emitted) if no Try frame is
+  // actually being skipped - skipping straight to a target with no try
+  // in between costs nothing. This is the one piece of bookkeeping that
+  // makes try/catch safe to jump out of early at all: without it, a
+  // LATER, completely unrelated `throw` elsewhere could `longjmp` into a
+  // stack frame that's already been reused by something else - real
+  // memory corruption, not a cosmetic bug.
+  void GenExceptionHandlerCleanup(size_t stopBelow);
+
   void SetupTarget();
   llvm::Type *MapType(const ResolvedType &t);
   llvm::Type *ArrayElemStorageType(const ResolvedType &elem);
   llvm::StructType *GetArrayHeaderType();
   llvm::StructType *GetOrCreateStructType(const std::string &ifaceName);
+  // `fieldName`'s own index into `iface->fields` - see
+  // StructFieldGepIndex for the (possibly different) index its actual
+  // compiled struct layout has, which is what a real CreateStructGEP
+  // call needs.
   int FieldIndex(InterfaceDecl *iface, const std::string &fieldName);
+  int StructFieldGepIndex(InterfaceDecl *iface, int fieldIndex);
+
+  // One cached LLVM global array per class with hasVirtualDispatch - the
+  // class's own vtable, one function pointer per virtual method slot
+  // (see FunctionDecl::isVirtual/vtableSlot). Built once per class,
+  // lazily, the first time anything needs it (a method call through a
+  // polymorphic receiver, or constructing an instance of that exact
+  // class) - see GetOrCreateVtable's own doc comment for exactly how a
+  // slot's current contents are resolved.
+  std::unordered_map<std::string, llvm::GlobalVariable *> vtables;
+  llvm::GlobalVariable *GetOrCreateVtable(InterfaceDecl *iface);
+  // For a class with hasVirtualDispatch, the ordered list of whichever
+  // FunctionDecl currently implements each vtable slot for THIS class
+  // specifically (its own override if it has one, otherwise whichever
+  // ancestor's version is nearest) - built fresh from the already-
+  // resolved AST (FunctionDecl::isVirtual/vtableSlot, InterfaceDecl::
+  // baseClass), not cached, since it's only ever needed once per class
+  // (from GetOrCreateVtable) to build that class's own vtable constant.
+  std::vector<FunctionDecl *> BuildVtableLayout(InterfaceDecl *iface);
 
   // Emits a global constructor (via llvm::appendToGlobalCtors) that calls
   // Boehm GC's GC_init() at module-load time, before any other code in
@@ -156,6 +274,12 @@ private:
   // loop instead of one unrolled store per element, since `size` here is
   // a runtime value, not a compile-time-known element count.
   void GenBuiltinMakeArray(FunctionDecl *inst);
+  // Defines one instantiation's LLVM function backing Sema::SeedBuiltins'
+  // "notNull" generic template - called once per distinct T actually
+  // used, same "split out of `instantiations`, hand-generated directly"
+  // deal GenBuiltinMakeArray already has. Boxes its own argument into a
+  // fresh GC cell sized to MapType(T) and returns that pointer.
+  void GenBuiltinNotNull(FunctionDecl *inst);
   void GenFunction(FunctionDecl *decl);
   // Binds one parameter of `fn` to `argVal` - shared by GenFunction and
   // GenClosureFunction. Boxes into a fresh GC cell (see VarBinding's own
@@ -216,7 +340,18 @@ private:
                       bool unpackHandler);
 
   void GenStmt(Stmt *stmt);
+  // Thin wrapper around GenExprInner: every OTHER call site in this file
+  // calls this, never GenExprInner directly, so `any`-boxing (see
+  // Expr::needsAnyBox's own doc comment) is applied in exactly ONE place
+  // regardless of which of GenExprInner's many per-ExprKind cases
+  // actually produced the value - the same "one choke point, not
+  // threaded through every case" shape isNarrowedNonNull's own unboxing
+  // already has, just on the opposite (boxing, not unboxing) side.
   llvm::Value *GenExpr(Expr *expr);
+  // The actual, unchanged-in-shape big per-ExprKind switch GenExpr used
+  // to be before `any` existed - never call this directly (see GenExpr's
+  // own doc comment above for why).
+  llvm::Value *GenExprInner(Expr *expr);
   LValue GenLValue(Expr *expr);
 
   llvm::Constant *BuildStringConstant(const std::string &value); // the header global's address
@@ -224,6 +359,13 @@ private:
   llvm::Value *GenStringLiteral(const std::string &value);
   llvm::Value *GenStringConcat(llvm::Value *lhsPtr, llvm::Value *rhsPtr);
   llvm::Value *GenStringEquals(llvm::Value *lhsPtr, llvm::Value *rhsPtr); // returns i1 "bytes equal"
+  // The exact "==" comparison logic ExprKind::Binary's own "==" case
+  // uses (String -> GenStringEquals; Handler -> field-wise fn/env
+  // identity; Number -> FCmpOEQ; everything else, e.g. Struct/Array
+  // pointers -> ICmpEQ) - factored out here so StmtKind::Switch's own
+  // case-value comparisons (see GenStmt) reuse it exactly rather than
+  // duplicating (and risking drifting from) Binary's own rules.
+  llvm::Value *GenEqualityCheck(llvm::Value *lhsVal, llvm::Value *rhsVal, TypeTag tag);
   llvm::Value *GenStringIndex(llvm::Value *strPtr, llvm::Value *idxVal);
   llvm::Value *GenHeapAlloc(uint64_t bytes);
   llvm::Value *GenHeapAlloc(llvm::Value *bytes);

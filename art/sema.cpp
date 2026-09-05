@@ -1,5 +1,6 @@
 #include "sema.h"
 
+#include <functional>
 #include <iterator>
 #include <sstream>
 #include <unordered_map>
@@ -32,8 +33,22 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
   }
   case TypeSyntaxKind::Void:
     return ResolvedType::Void();
+  case TypeSyntaxKind::Any:
+    return ResolvedType::Any();
   case TypeSyntaxKind::Array:
     return ResolvedType::ArrayOf(ResolveType(node->element.get()));
+  case TypeSyntaxKind::Nullable: {
+    ResolvedType inner = ResolveType(node->element.get());
+    if (inner.tag == TypeTag::Nullable) {
+      Error(node->loc, "'T | null | null' isn't meaningful - a type can only be nullable once");
+      return inner; // degrade gracefully - already nullable, nothing more to wrap
+    }
+    if (inner.tag == TypeTag::Any) {
+      Error(node->loc, "'any | null' is redundant - 'any' already includes 'null', just write 'any'");
+      return inner; // degrade gracefully - Any absorbs null already
+    }
+    return ResolvedType::NullableOf(std::move(inner));
+  }
   case TypeSyntaxKind::Named: {
     // A generic instantiation's active substitution wins over everything
     // else: `T` inside a generic function's own signature/body always
@@ -70,6 +85,7 @@ ResolvedType Sema::ResolveType(TypeNode *node) {
       return ResolvedType{};
     }
     if (interfaces.count(node->name) && IsVisible(node->name)) return ResolvedType::Struct(node->name);
+    if (enums.count(node->name) && IsVisible(node->name)) return ResolvedType::Enum(node->name);
     Error(node->loc, "unknown type '" + node->name + "'" + VisibilityHint(node->name));
     return ResolvedType{};
   }
@@ -185,7 +201,12 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
       frameStack.push_back(instMethod);
       PushScope();
       for (auto &p : instMethod->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
+      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+      loopDepth = 0;
+      switchDepth = 0;
       CheckStmt(instMethod->body.get());
+      loopDepth = savedLoopDepth;
+      switchDepth = savedSwitchDepth;
       PopScope();
       frameStack.pop_back();
       if (instMethod->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(instMethod->body.get())) {
@@ -210,7 +231,10 @@ std::string Sema::MangleType(const ResolvedType &t) {
   case TypeTag::String: return "string";
   case TypeTag::Void: return "void";
   case TypeTag::Array: return "arr_" + MangleType(*t.elementType);
+  case TypeTag::Nullable: return "opt_" + MangleType(*t.elementType);
+  case TypeTag::Any: return "any";
   case TypeTag::Struct: return t.structName;
+  case TypeTag::Enum: return t.structName;
   case TypeTag::Handler: {
     std::string out = "fn";
     for (auto &p : *t.handlerParamTypes) out += "_" + MangleType(p);
@@ -241,6 +265,16 @@ std::string Sema::MangleSetter(const std::string &className, const std::string &
 std::string Sema::MangleMethod(const std::string &className, const std::string &propName) {
   return className + "$" + propName;
 }
+std::string Sema::MangleStatic(const std::string &className, const std::string &propName) {
+  return className + "$static$" + propName;
+}
+std::string Sema::MangleEnumMember(const std::string &enumName, const std::string &memberName) {
+  return enumName + "$enum$" + memberName;
+}
+
+bool Sema::IsStaticAccessTarget(const std::string &name) {
+  return (interfaces.count(name) != 0 || enums.count(name) != 0) && !Lookup(name);
+}
 
 const InterfaceField *Sema::FindField(const InterfaceDecl *iface, const std::string &name) {
   for (auto &f : iface->fields)
@@ -248,21 +282,33 @@ const InterfaceField *Sema::FindField(const InterfaceDecl *iface, const std::str
   return nullptr;
 }
 FunctionDecl *Sema::FindGetter(InterfaceDecl *iface, const std::string &name) {
-  std::string mangled = MangleGetter(iface->name, name);
-  for (auto &m : iface->methods)
-    if (m->name == mangled) return m.get();
+  // Walks up the inheritance chain (a no-op single iteration for a class
+  // with no baseClass, i.e. every class before inheritance existed at
+  // all) - unlike FindField, this can't just rely on a flattened list:
+  // an ancestor's own method is mangled under ITS OWN name
+  // ("Animal$get$prop", not "Dog$get$prop"), so each level has to be
+  // checked with its own class's own mangling.
+  for (InterfaceDecl *cur = iface; cur; cur = cur->baseClass) {
+    std::string mangled = MangleGetter(cur->name, name);
+    for (auto &m : cur->methods)
+      if (m->name == mangled) return m.get();
+  }
   return nullptr;
 }
 FunctionDecl *Sema::FindSetter(InterfaceDecl *iface, const std::string &name) {
-  std::string mangled = MangleSetter(iface->name, name);
-  for (auto &m : iface->methods)
-    if (m->name == mangled) return m.get();
+  for (InterfaceDecl *cur = iface; cur; cur = cur->baseClass) {
+    std::string mangled = MangleSetter(cur->name, name);
+    for (auto &m : cur->methods)
+      if (m->name == mangled) return m.get();
+  }
   return nullptr;
 }
 FunctionDecl *Sema::FindPlainMethod(InterfaceDecl *iface, const std::string &name) {
-  std::string mangled = MangleMethod(iface->name, name);
-  for (auto &m : iface->methods)
-    if (m->name == mangled) return m.get();
+  for (InterfaceDecl *cur = iface; cur; cur = cur->baseClass) {
+    std::string mangled = MangleMethod(cur->name, name);
+    for (auto &m : cur->methods)
+      if (m->name == mangled) return m.get();
+  }
   return nullptr;
 }
 
@@ -324,7 +370,7 @@ bool Sema::IsVisible(const std::string &name) const {
 std::string Sema::VisibilityHint(const std::string &name) const {
   if (!visibility) return "";
   bool existsAnywhere = globals.count(name) || functions.count(name) || interfaces.count(name) ||
-                        genericFunctions.count(name) || genericInterfaces.count(name);
+                        genericFunctions.count(name) || genericInterfaces.count(name) || enums.count(name);
   return existsAnywhere ? " (it exists, but isn't imported into this file)" : "";
 }
 
@@ -407,12 +453,82 @@ void Sema::SeedBuiltins() {
   genericFunctions["makeArray"] = makeArray.get();
   builtinNames.insert("makeArray");
   builtins.push_back(std::move(makeArray));
+
+  // notNull<T>(v: T): T | null - the ONLY way to produce a genuinely
+  // present `T | null` value (besides passing along one you already
+  // have) - there's no implicit "a plain T widens to T | null"
+  // anywhere in ART, matching the language's usual "explicit, not
+  // implicit" stance (numberToString instead of implicit
+  // stringification, makeArray<T> instead of a magic runtime-sized
+  // literal, ...). Same "generic template, no ART-level body, one real
+  // hand-generated LLVM definition per distinct T" shape makeArray<T>
+  // already has (see Codegen::GenBuiltinNotNull) - boxes `v` into a
+  // fresh GC cell and returns that pointer as the Nullable(T) value
+  // (see TypeTag::Nullable's own doc comment for why every T | null is
+  // uniformly boxed like this, never just T's own bit pattern).
+  auto notNull = std::make_unique<FunctionDecl>();
+  notNull->name = "notNull";
+  notNull->typeParams.push_back("T");
+
+  Param notNullParam;
+  notNullParam.name = "v";
+  auto notNullParamType = std::make_unique<TypeNode>();
+  notNullParamType->kind = TypeSyntaxKind::Named;
+  notNullParamType->name = "T";
+  notNullParam.type = std::move(notNullParamType);
+  notNull->params.push_back(std::move(notNullParam));
+
+  auto notNullRetInner = std::make_unique<TypeNode>();
+  notNullRetInner->kind = TypeSyntaxKind::Named;
+  notNullRetInner->name = "T";
+  auto notNullRetType = std::make_unique<TypeNode>();
+  notNullRetType->kind = TypeSyntaxKind::Nullable;
+  notNullRetType->element = std::move(notNullRetInner);
+  notNull->returnType = std::move(notNullRetType);
+
+  genericFunctions["notNull"] = notNull.get();
+  builtinNames.insert("notNull");
+  builtins.push_back(std::move(notNull));
+
+  // `Error` - the one throwable/catchable type `throw`/`catch` recognize
+  // right now (see StmtKind::Try's own doc comment for why just one).
+  // An ordinary struct in every other respect - `{ message: string }` -
+  // constructed the normal way (`{ message: "..." }`), with no special
+  // Codegen support needed for its own layout at all (GetOrCreateStructType
+  // builds its LLVM type the exact same generic way any other interface's
+  // already is - only StmtKind::Try/Throw's own codegen, and the setjmp/
+  // longjmp machinery underneath them, are new).
+  auto errorIface = std::make_unique<InterfaceDecl>();
+  errorIface->name = "Error";
+  InterfaceField messageField;
+  messageField.name = "message";
+  messageField.resolvedType = ResolvedType::String();
+  errorIface->fields.push_back(std::move(messageField));
+  interfaces["Error"] = errorIface.get();
+  builtinNames.insert("Error");
+  builtinInterfaces.push_back(std::move(errorIface));
 }
 
 bool Sema::Check(Program &program,
                   const std::unordered_map<std::string, std::unordered_set<std::string>> *visibilityMap) {
   visibility = visibilityMap;
   SeedBuiltins();
+
+  // Every static field (InterfaceDecl::staticFields) and enum member
+  // (EnumDecl::members), across the whole program, desugars into a real
+  // synthetic global - hoisted out here as it's found and spliced onto
+  // the FRONT of program.globals below (before the program's own
+  // top-level globals), so each is checked/codegen'd by the exact same
+  // machinery an ordinary global already has, with no bespoke Codegen
+  // path needed for either. Declared in program-declaration order (every
+  // class/enum, interleaved exactly as source order already has them),
+  // then member-declaration order within each - so any top-level global
+  // can reference an earlier class's static field or an earlier enum's
+  // member, and a static field/enum member's own initializer can
+  // reference an earlier one of either kind, but never a later-declared
+  // plain top-level global (ordinary "declare before use", same as
+  // globals already have among themselves).
+  std::vector<std::unique_ptr<Stmt>> hoistedGlobals;
 
   for (auto &iface : program.interfaces) {
     bool alreadyDeclared = interfaces.count(iface->name) || genericInterfaces.count(iface->name);
@@ -452,6 +568,183 @@ bool Sema::Check(Program &program,
   }
   currentFile.clear();
 
+  // `extends` resolution: link each class's own baseClassName to a real
+  // InterfaceDecl*, validate it, and flatten its fields (base's own,
+  // recursively, then this class's new ones) directly into `fields` -
+  // done this way (a real, physical copy, not a separate "walk the
+  // chain" lookup elsewhere) so every OTHER piece of code that already
+  // reads `iface->fields` - object-literal construction requiring every
+  // field, FindField, Codegen's own GetOrCreateStructType/FieldIndex -
+  // needs zero changes at all to correctly see inherited fields too.
+  // Methods are NOT flattened this way (see FindPlainMethod/FindGetter/
+  // FindSetter's own chain-walking below instead) - unlike a field's
+  // fixed compile-time layout, which class's own method implementation
+  // a call reaches can depend on the instance's actual runtime type
+  // (virtual dispatch), so "just copy the FunctionDecl pointer" would be
+  // wrong for a family with more than one class actually overriding
+  // something.
+  {
+    // Memoized (`resolved`), so a multi-level chain (Grandchild extends
+    // Child extends Base) is flattened correctly regardless of which
+    // order the three classes happen to appear in program.interfaces -
+    // each is processed at most once, and processing a derived class
+    // first still correctly processes its own base first internally (a
+    // plain recursive call), not out of order. `visiting` tracks the
+    // current recursion stack specifically to catch a genuine cycle (A
+    // extends B extends A): checking only "is base == iface" would miss
+    // one that closes more than one level up, since an intermediate
+    // class's own baseClass pointer isn't filled in yet at the point a
+    // naive same-level check would need it.
+    // `broken` propagates UP the recursion, not just at the exact point
+    // a cycle is detected: without it, an outer frame (e.g. A, waiting
+    // on resolveInheritance(B), which itself detects the cycle back to
+    // A) would still go ahead and set `iface->baseClass = base` using
+    // that cyclic pointer - which would then infinite-loop the LATER
+    // hasVirtualDispatch-marking and vtable-computation passes below,
+    // neither of which has (or needs) its own cycle protection, since
+    // they trust baseClass chains to be genuinely acyclic by the time
+    // they run. Every class anywhere in a detected cycle (or that
+    // extends, even transitively, into one) ends up in `broken` and
+    // keeps baseClass null - no inheritance applied, past the one
+    // reported error.
+    std::unordered_set<InterfaceDecl *> resolved, visiting, broken;
+    std::function<void(InterfaceDecl *)> resolveInheritance = [&](InterfaceDecl *iface) {
+      if (resolved.count(iface)) return;
+      if (iface->baseClassName.empty()) {
+        resolved.insert(iface);
+        return;
+      }
+      if (visiting.count(iface)) {
+        Error(iface->loc, "circular inheritance involving '" + iface->name + "'");
+        broken.insert(iface);
+        resolved.insert(iface);
+        return;
+      }
+      visiting.insert(iface);
+
+      auto baseIt = interfaces.find(iface->baseClassName);
+      if (baseIt == interfaces.end() || genericInterfaces.count(iface->baseClassName)) {
+        Error(iface->loc, "class '" + iface->name + "' can't extend '" + iface->baseClassName +
+                               "' - it isn't a plain, non-generic class");
+        broken.insert(iface);
+      } else {
+        InterfaceDecl *base = baseIt->second;
+        if (base->isOpaque) {
+          Error(iface->loc, "class '" + iface->name + "' can't extend '" + iface->baseClassName +
+                                 "' - a 'declare class' has no accessible fields to inherit");
+          broken.insert(iface);
+        } else {
+          resolveInheritance(base); // base-before-derived - base's own fields must already be flattened
+          if (broken.count(base)) {
+            // `base` is itself part of a cycle (or extends into one) -
+            // don't propagate its unreliable state into `iface` too.
+            broken.insert(iface);
+            visiting.erase(iface);
+            resolved.insert(iface);
+            return;
+          }
+          iface->baseClass = base;
+
+          std::unordered_set<std::string> inheritedNames;
+          for (auto &f : base->fields) inheritedNames.insert(f.name);
+          for (auto &f : iface->fields) {
+            if (inheritedNames.count(f.name)) {
+              Error(f.loc, "'" + f.name + "' is already a field of '" + base->name + "' - '" + iface->name +
+                               "' can't redeclare it (no field shadowing)");
+            }
+          }
+          // Prepend - base's own fields (already fully flattened,
+          // including whatever IT inherited) come first, so a Dog* is
+          // layout-compatible with an Animal* (see
+          // InterfaceDecl::baseClass's own doc comment on why that
+          // ordering is what makes upcasting free). InterfaceField isn't
+          // copyable (its own `type` is a unique_ptr, never read again
+          // after the initial per-field ResolveType call above runs, so
+          // there's nothing worth cloning it for here) - built field by
+          // field instead of a vector copy, `type` left null on each
+          // synthesized copy.
+          std::vector<InterfaceField> merged;
+          merged.reserve(base->fields.size() + iface->fields.size());
+          for (auto &f : base->fields) {
+            InterfaceField copy;
+            copy.name = f.name;
+            copy.resolvedType = f.resolvedType;
+            copy.loc = f.loc;
+            copy.isReadonly = f.isReadonly;
+            merged.push_back(std::move(copy));
+          }
+          for (auto &f : iface->fields) merged.push_back(std::move(f));
+          iface->fields = std::move(merged);
+        }
+      }
+      visiting.erase(iface);
+      resolved.insert(iface);
+    };
+
+    for (auto &iface : program.interfaces) {
+      if (iface->typeParams.empty()) resolveInheritance(iface.get());
+    }
+  }
+
+  // A class only gets real virtual dispatch (a vtable pointer in its own
+  // instances, indirect calls for its methods - see
+  // InterfaceDecl::hasVirtualDispatch's own doc comment) if it's
+  // actually touched by *some* extends relationship - has a baseClass,
+  // or is one for something else. Every ancestor of an extended class
+  // needs the flag too (Animal itself needs a vtable pointer the moment
+  // ANYTHING extends it, even though Animal's own declaration never
+  // mentions `extends` at all) - walking up from each derived class
+  // marks its whole chain.
+  for (auto &iface : program.interfaces) {
+    if (iface->baseClass) {
+      for (InterfaceDecl *cur = iface.get(); cur; cur = cur->baseClass) cur->hasVirtualDispatch = true;
+    }
+  }
+
+  // Each enum member desugars into a real global constant - see
+  // EnumDecl's own doc comment and Sema::MangleEnumMember. Auto-numbered
+  // from 0 (or from an explicit `= N`, continuing +1 from whichever
+  // value - explicit or auto - the previous member ended up with),
+  // exactly real TS's own numeric-enum rule.
+  for (auto &decl : program.enums) {
+    bool alreadyDeclared = interfaces.count(decl->name) || genericInterfaces.count(decl->name) ||
+                            enums.count(decl->name) || functions.count(decl->name);
+    if (alreadyDeclared) {
+      Error(decl->loc, "'" + decl->name + "' is already declared");
+    } else {
+      enums[decl->name] = decl.get();
+    }
+
+    std::unordered_set<std::string> seenMembers;
+    double nextValue = 0;
+    for (auto &member : decl->members) {
+      if (!seenMembers.insert(member.name).second) {
+        Error(member.loc, "duplicate member '" + member.name + "' in enum '" + decl->name + "'");
+      }
+      member.value = member.hasExplicitValue ? member.explicitValue : nextValue;
+      nextValue = member.value + 1;
+
+      auto global = MakeStmt(StmtKind::VarDecl, member.loc);
+      global->isConst = true;
+      global->isPreCheckedGlobal = true; // see its own doc comment
+      global->sourceFile = decl->sourceFile;
+      global->varName = MangleEnumMember(decl->name, member.name);
+      global->resolvedVarType = ResolvedType::Enum(decl->name);
+      auto valueExpr = MakeExpr(ExprKind::NumberLiteral, member.loc);
+      valueExpr->numberValue = member.value;
+      valueExpr->resolvedType = ResolvedType::Enum(decl->name);
+      global->expr = std::move(valueExpr);
+      // Registered directly, right here (not deferred to the later
+      // per-global CheckGlobalDecl loop, which this global skips
+      // entirely - see isPreCheckedGlobal) so a LATER enum's own member,
+      // or any other code checked before that loop runs, can already
+      // see this one - same "declare before use, in this loop's own
+      // order" deal a real global has.
+      globals[global->varName] = VarInfo{global->resolvedVarType, /*isConst=*/true};
+      hoistedGlobals.push_back(std::move(global));
+    }
+  }
+
   // Every class's methods/accessors are qualified ("ClassName$methodName"/
   // "ClassName$get$propName"/"ClassName$set$propName" - see
   // MangleMethod/MangleGetter/MangleSetter) and handed off to the exact
@@ -484,9 +777,26 @@ bool Sema::Check(Program &program,
     std::unordered_set<std::string> fieldNames;
     for (auto &f : iface->fields) fieldNames.insert(f.name);
     std::unordered_set<std::string> seenGetters, seenSetters, seenPlainMethods;
+    // A static field/method's own namespace - entirely separate from the
+    // instance one above (fieldNames/seenGetters/seenSetters/
+    // seenPlainMethods): `ClassName.foo` and `instance.foo` can share a
+    // name with no collision at all, matching real TS/JS. Shared between
+    // static methods (below) and static fields (the follow-up loop right
+    // after this one), since both live in the one static namespace.
+    std::unordered_set<std::string> seenStaticNames;
 
     for (auto &method : iface->methods) {
       const std::string &propName = method->name; // still unqualified here
+      if (method->isStatic) {
+        if (!seenStaticNames.insert(propName).second) {
+          Error(method->loc, "duplicate static member '" + propName + "' in class '" + iface->name + "'");
+        }
+        if (iface->typeParams.empty()) {
+          method->sourceFile = iface->sourceFile;
+          method->name = MangleStatic(iface->name, propName);
+        }
+        continue;
+      }
       bool clashesWithField = fieldNames.count(propName) != 0;
       if (method->isGetter) {
         if (clashesWithField) {
@@ -521,17 +831,94 @@ bool Sema::Check(Program &program,
                                             : MangleMethod(iface->name, propName);
       }
     }
+
+    for (auto &field : iface->staticFields) {
+      const std::string &propName = field->varName; // still unqualified here
+      if (!seenStaticNames.insert(propName).second) {
+        Error(field->loc, "duplicate static member '" + propName + "' in class '" + iface->name + "'");
+      }
+      field->sourceFile = iface->sourceFile;
+      field->varName = MangleStatic(iface->name, propName);
+      hoistedGlobals.push_back(std::move(field));
+    }
   }
+  program.globals.insert(program.globals.begin(), std::make_move_iterator(hoistedGlobals.begin()),
+                          std::make_move_iterator(hoistedGlobals.end()));
 
   // Function signatures are registered before globals/top-level
   // statements so either's own diagnostics - e.g. a rejected call
   // expression's arguments - can still resolve a forward-declared
   // function instead of spuriously reporting it as undefined.
-  for (auto &fn : program.functions) RegisterFunctionSignature(fn.get());
+  for (auto &fn : program.functions) RegisterFunctionSignature(fn.get(), /*allowRestParam=*/true);
   for (auto &fn : program.externFunctions) RegisterFunctionSignature(fn.get());
   for (auto &iface : program.interfaces) {
     if (!iface->typeParams.empty()) continue; // a generic class - see InstantiateInterface instead
     for (auto &method : iface->methods) RegisterFunctionSignature(method.get());
+  }
+
+  // Vtable slot assignment - only for a class with hasVirtualDispatch
+  // (see its own doc comment); every other class's methods keep
+  // isVirtual false / vtableSlot -1 (their defaults), meaning Codegen
+  // generates a plain direct call for them exactly as it always has.
+  // Only plain instance methods participate (not get/set accessors or
+  // static methods - see FunctionDecl::isVirtual's own doc comment for
+  // the accepted gap on accessors). Slots are numbered base-to-derived,
+  // memoized per class so a multi-level chain is handled in the right
+  // order regardless of declaration order, same shape the field-
+  // flattening pass above already has.
+  {
+    struct VtableEntry {
+      std::string name;    // the method's own unqualified name (shared across every override in the family)
+      FunctionDecl *impl;  // whichever class's own version currently "wins" this slot
+    };
+    std::unordered_map<InterfaceDecl *, std::vector<VtableEntry>> layouts;
+    std::function<void(InterfaceDecl *)> computeVtable = [&](InterfaceDecl *iface) {
+      if (layouts.count(iface) || !iface->hasVirtualDispatch) return;
+      std::vector<VtableEntry> layout;
+      if (iface->baseClass) {
+        computeVtable(iface->baseClass);
+        layout = layouts[iface->baseClass]; // a real copy - each class's own slot numbers are independent of edits to this one
+      }
+      for (auto &m : iface->methods) {
+        if (m->isGetter || m->isSetter || m->isStatic) continue;
+        std::string unqualified = m->name.substr(iface->name.size() + 1); // strip "IfaceName$" - see MangleMethod
+        VtableEntry *existing = nullptr;
+        for (auto &entry : layout) {
+          if (entry.name == unqualified) {
+            existing = &entry;
+            break;
+          }
+        }
+        if (existing) {
+          // An override - same slot as the ancestor's own version, but
+          // only if the signature actually matches (params beyond the
+          // implicit `this`, and the return type) - ART has no
+          // covariance/contravariance rules to make good on a mismatched
+          // one, so this is a hard requirement, not a warning.
+          FunctionDecl *baseMethod = existing->impl;
+          bool sigMatches = m->params.size() == baseMethod->params.size();
+          for (size_t i = 1; sigMatches && i < m->params.size(); i++) {
+            sigMatches = m->params[i].resolvedType == baseMethod->params[i].resolvedType;
+          }
+          sigMatches = sigMatches && m->resolvedReturnType == baseMethod->resolvedReturnType;
+          if (!sigMatches) {
+            Error(m->loc, "'" + unqualified + "' overrides a method of an ancestor class with a different "
+                                               "signature - an override must match exactly (same parameter "
+                                               "types, same return type)");
+          }
+          m->vtableSlot = baseMethod->vtableSlot;
+          existing->impl = m.get();
+        } else {
+          m->vtableSlot = static_cast<int>(layout.size());
+          layout.push_back({unqualified, m.get()});
+        }
+        m->isVirtual = true;
+      }
+      layouts[iface] = std::move(layout);
+    };
+    for (auto &iface : program.interfaces) {
+      if (iface->typeParams.empty()) computeVtable(iface.get());
+    }
   }
 
   // A project writing top-level statements (see Program::topLevelStmts'
@@ -545,7 +932,9 @@ bool Sema::Check(Program &program,
           "remove the explicit function and let these statements become its body, or move this code inside it");
   }
 
-  for (auto &g : program.globals) CheckGlobalDecl(g.get());
+  for (auto &g : program.globals) {
+    if (!g->isPreCheckedGlobal) CheckGlobalDecl(g.get());
+  }
 
   // A generic function's body is never checked in template form - only
   // each concrete instantiation a call site actually asks for (see
@@ -636,7 +1025,7 @@ void Sema::CheckGlobalDecl(Stmt *stmt) {
   }
 }
 
-void Sema::RegisterFunctionSignature(FunctionDecl *fn) {
+void Sema::RegisterFunctionSignature(FunctionDecl *fn, bool allowRestParam) {
   bool alreadyDeclared = functions.count(fn->name) || genericFunctions.count(fn->name);
   if (alreadyDeclared) {
     Error(fn->loc, "function '" + fn->name + "' is already declared");
@@ -646,6 +1035,18 @@ void Sema::RegisterFunctionSignature(FunctionDecl *fn) {
   for (auto &p : fn->params) {
     if (!seenParams.insert(p.name).second) {
       Error(p.loc, "duplicate parameter '" + p.name + "' in function '" + fn->name + "'");
+    }
+    // A rest parameter is only supported on a plain, non-generic,
+    // top-level function in this first pass - not a class method, a
+    // `declare function` (a native FFI boundary needs a fixed,
+    // predictable arity), or (checked separately, in CheckExpr's
+    // FunctionExpr case, since a closure never reaches this function at
+    // all) a closure. `allowRestParam` is false for every caller of this
+    // function except the one over program.functions - see each call
+    // site's own comment.
+    if (p.isRest && (!allowRestParam || !fn->typeParams.empty())) {
+      Error(p.loc, "a rest parameter isn't supported here yet - only a plain, non-generic, top-level function "
+                   "can have one");
     }
   }
 
@@ -682,7 +1083,19 @@ void Sema::CheckFunctionBody(FunctionDecl *decl) {
   frameStack.push_back(decl);
   PushScope();
   for (auto &p : decl->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
+  // break/continue can never jump out of a nested function even if it's
+  // lexically inside a loop textually (same as real JS) - reset both to
+  // 0 for this body, restore afterward. Always 0 already here (a
+  // top-level function/method is never itself inside a loop), but reset
+  // explicitly anyway rather than relying on that, matching every other
+  // body-checking site (see loopDepth's own doc comment for the other
+  // three).
+  int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+  loopDepth = 0;
+  switchDepth = 0;
   CheckStmt(decl->body.get());
+  loopDepth = savedLoopDepth;
+  switchDepth = savedSwitchDepth;
   PopScope();
   frameStack.pop_back();
   if (decl->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(decl->body.get())) {
@@ -771,7 +1184,12 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
       frameStack.push_back(inst);
       PushScope();
       for (auto &p : inst->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
+      int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+      loopDepth = 0;
+      switchDepth = 0;
       CheckStmt(inst->body.get());
+      loopDepth = savedLoopDepth;
+      switchDepth = savedSwitchDepth;
       PopScope();
       frameStack.pop_back();
       if (inst->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(inst->body.get())) {
@@ -803,15 +1221,147 @@ bool Sema::AlwaysReturns(Stmt *stmt) {
   switch (stmt->kind) {
   case StmtKind::Return:
     return true;
+  // A throw never falls through past itself either - same "this code
+  // path is accounted for" reasoning a real return already gets, and
+  // matching real TS's own control-flow analysis (a function that
+  // always throws satisfies "returns T" the same as one that always
+  // returns a T).
+  case StmtKind::Throw:
+    return true;
   case StmtKind::Block:
     for (auto &s : stmt->statements)
       if (AlwaysReturns(s.get())) return true;
     return false;
   case StmtKind::If:
     return stmt->elseBranch && AlwaysReturns(stmt->body.get()) && AlwaysReturns(stmt->elseBranch.get());
+  // Unlike While/For/ForOf (which might run their body zero times, so
+  // the body always-returning wouldn't help - stays under the `default`
+  // fallback below, same as always), a do-while's body ALWAYS runs at
+  // least once - so if the body always returns, so does the whole loop,
+  // regardless of the condition.
+  case StmtKind::DoWhile:
+    return AlwaysReturns(stmt->body.get());
+  // A switch always-returns only if it has a `default:` arm (otherwise
+  // an unmatched value falls through past it with no return) AND every
+  // arm, checked independently (each arm's own statement list, the same
+  // Block-style scan as above), always returns on its own. Deliberately
+  // NOT fallthrough-aware - an arm that returns only because it falls
+  // through into a later arm's own return is undercounted here (this
+  // says "false" for it, not "true"), the same conservative-by-design
+  // choice the rest of this function already makes elsewhere (see e.g.
+  // If, which requires both an explicit `else` and both branches to
+  // always return - no cleverness about detecting exhaustive conditions
+  // any other way).
+  case StmtKind::Switch: {
+    bool hasDefault = false;
+    for (auto &arm : stmt->statements) {
+      if (!arm->expr) hasDefault = true;
+    }
+    if (!hasDefault) return false;
+    for (auto &arm : stmt->statements) {
+      bool armReturns = false;
+      for (auto &s : arm->statements) {
+        if (AlwaysReturns(s.get())) {
+          armReturns = true;
+          break;
+        }
+      }
+      if (!armReturns) return false;
+    }
+    return true;
+  }
+  // A try always-returns only if BOTH the try body and the catch body
+  // do - if either one can fall off the end, so can the whole
+  // statement (either by completing the try normally with no
+  // exception, or by an exception being caught and the catch body
+  // itself not returning).
+  case StmtKind::Try:
+    return AlwaysReturns(stmt->body.get()) && AlwaysReturns(stmt->elseBranch.get());
   default:
     return false;
   }
+}
+
+// See this method's own doc comment in sema.h.
+bool Sema::AlwaysExits(Stmt *stmt) {
+  switch (stmt->kind) {
+  case StmtKind::Return:
+  case StmtKind::Throw:
+  case StmtKind::Break:
+  case StmtKind::Continue:
+    return true;
+  case StmtKind::Block:
+    for (auto &s : stmt->statements)
+      if (AlwaysExits(s.get())) return true;
+    return false;
+  case StmtKind::If:
+    return stmt->elseBranch && AlwaysExits(stmt->body.get()) && AlwaysExits(stmt->elseBranch.get());
+  default:
+    return false;
+  }
+}
+
+// See this method's own doc comment in sema.h.
+bool Sema::TryGetNullCheckedVar(Expr *cond, std::string &outName, bool &outEqualsNull) {
+  if (cond->kind != ExprKind::Binary) return false;
+  if (cond->op != "==" && cond->op != "!=") return false;
+
+  Expr *identSide = nullptr;
+  if (cond->lhs->kind == ExprKind::Identifier && cond->rhs->kind == ExprKind::NullLiteral) {
+    identSide = cond->lhs.get();
+  } else if (cond->rhs->kind == ExprKind::Identifier && cond->lhs->kind == ExprKind::NullLiteral) {
+    identSide = cond->rhs.get();
+  } else {
+    return false;
+  }
+
+  VarInfo *v = Lookup(identSide->name);
+  if (!v || v->type.tag != TypeTag::Nullable) return false;
+
+  outName = identSide->name;
+  outEqualsNull = (cond->op == "==");
+  return true;
+}
+
+// See this method's own doc comment in sema.h.
+bool Sema::TryGetTypeofCheckedVar(Expr *cond, std::string &outName, AnyTag &outTag, bool &outEqualsTag) {
+  if (cond->kind != ExprKind::Binary) return false;
+  if (cond->op != "==" && cond->op != "!=") return false;
+
+  auto isTypeofIdent = [](Expr *e) {
+    return e->kind == ExprKind::Unary && e->op == "typeof" && e->operand->kind == ExprKind::Identifier;
+  };
+
+  Expr *typeofSide = nullptr;
+  Expr *stringSide = nullptr;
+  if (isTypeofIdent(cond->lhs.get()) && cond->rhs->kind == ExprKind::StringLiteral) {
+    typeofSide = cond->lhs.get();
+    stringSide = cond->rhs.get();
+  } else if (isTypeofIdent(cond->rhs.get()) && cond->lhs->kind == ExprKind::StringLiteral) {
+    typeofSide = cond->rhs.get();
+    stringSide = cond->lhs.get();
+  } else {
+    return false;
+  }
+
+  Expr *ident = typeofSide->operand.get();
+  VarInfo *v = Lookup(ident->name);
+  if (!v || v->type.tag != TypeTag::Any) return false;
+
+  const std::string &tagName = stringSide->name;
+  // Only these three narrow anything - see TypeTag::Any's own doc
+  // comment for exactly why "object"/"function" don't. The comparison
+  // itself still type-checked fine either way (it's an ordinary string
+  // equality - see CheckExpr's own Unary "typeof" case) - this just
+  // declines to narrow, same as if the condition shape didn't match.
+  if (tagName == "number") outTag = AnyTag::Number;
+  else if (tagName == "boolean") outTag = AnyTag::Boolean;
+  else if (tagName == "string") outTag = AnyTag::String;
+  else return false;
+
+  outName = ident->name;
+  outEqualsTag = (cond->op == "==");
+  return true;
 }
 
 // See this method's own doc comment in sema.h.
@@ -854,14 +1404,66 @@ void Sema::CheckStmt(Stmt *stmt) {
   case StmtKind::If: {
     ResolvedType boolT = ResolvedType::Boolean();
     CheckExpr(stmt->cond.get(), &boolT);
-    CheckStmt(stmt->body.get());
-    if (stmt->elseBranch) CheckStmt(stmt->elseBranch.get());
+
+    // Narrowing (see TryGetNullCheckedVar's/TryGetTypeofCheckedVar's own
+    // doc comments for exactly which condition shapes these recognize at
+    // all): `x != null`/`typeof x === "..."` narrows `x` for the `then`
+    // body only; `x == null`/`typeof x !== "..."` with no `else`, where
+    // the body always exits, narrows `x` for whatever code follows this
+    // whole `if` in the SAME enclosing block instead (see
+    // pendingNarrowAfterStmt/pendingAnyNarrowAfterStmt, read by
+    // StmtKind::Block's own loop). A single `if` can only ever match ONE
+    // of the two shapes - checked in order, and the second only tried
+    // once the first has already ruled itself out.
+    std::string narrowedName;
+    bool checksEqualsNull = false;
+    bool isNullCheck = TryGetNullCheckedVar(stmt->cond.get(), narrowedName, checksEqualsNull);
+
+    std::string anyNarrowedName;
+    AnyTag anyNarrowTag = AnyTag::Number;
+    bool checksEqualsTag = false;
+    bool isTypeofCheck =
+        !isNullCheck && TryGetTypeofCheckedVar(stmt->cond.get(), anyNarrowedName, anyNarrowTag, checksEqualsTag);
+
+    if (isNullCheck && !checksEqualsNull) {
+      narrowedNonNull.insert(narrowedName);
+      CheckStmt(stmt->body.get());
+      narrowedNonNull.erase(narrowedName);
+    } else if (isTypeofCheck && checksEqualsTag) {
+      narrowedAny[anyNarrowedName] = anyNarrowTag;
+      CheckStmt(stmt->body.get());
+      narrowedAny.erase(anyNarrowedName);
+    } else {
+      CheckStmt(stmt->body.get());
+    }
+
+    if (stmt->elseBranch) {
+      CheckStmt(stmt->elseBranch.get());
+    } else if (isNullCheck && checksEqualsNull && AlwaysExits(stmt->body.get())) {
+      pendingNarrowAfterStmt = narrowedName;
+    } else if (isTypeofCheck && !checksEqualsTag && AlwaysExits(stmt->body.get())) {
+      pendingAnyNarrowAfterStmt = anyNarrowedName;
+      pendingAnyNarrowTag = anyNarrowTag;
+    }
     break;
   }
   case StmtKind::While: {
     ResolvedType boolT = ResolvedType::Boolean();
     CheckExpr(stmt->cond.get(), &boolT);
+    loopDepth++;
     CheckStmt(stmt->body.get());
+    loopDepth--;
+    break;
+  }
+  case StmtKind::DoWhile: {
+    // Same checks as While, just body-then-condition - see ast.h's own
+    // doc comment on StmtKind::DoWhile for why this reuses While's exact
+    // fields instead of adding its own.
+    loopDepth++;
+    CheckStmt(stmt->body.get());
+    loopDepth--;
+    ResolvedType boolT = ResolvedType::Boolean();
+    CheckExpr(stmt->cond.get(), &boolT);
     break;
   }
   case StmtKind::For: {
@@ -872,7 +1474,9 @@ void Sema::CheckStmt(Stmt *stmt) {
       CheckExpr(stmt->cond.get(), &boolT);
     }
     if (stmt->update) CheckExpr(stmt->update.get(), nullptr);
+    loopDepth++;
     CheckStmt(stmt->body.get());
+    loopDepth--;
     PopScope();
     break;
   }
@@ -887,8 +1491,120 @@ void Sema::CheckStmt(Stmt *stmt) {
     stmt->resolvedVarType = elemT;
     PushScope();
     Declare(stmt->loc, stmt->varName, elemT, stmt->isConst, nullptr, stmt);
+    loopDepth++;
     CheckStmt(stmt->body.get());
+    loopDepth--;
     PopScope();
+    break;
+  }
+  case StmtKind::Break: {
+    if (loopDepth == 0 && switchDepth == 0) {
+      Error(stmt->loc, "'break' outside a loop or switch");
+    }
+    break;
+  }
+  case StmtKind::Continue: {
+    if (loopDepth == 0) {
+      Error(stmt->loc, "'continue' outside a loop");
+    }
+    break;
+  }
+  case StmtKind::Switch: {
+    ResolvedType discriminantT = CheckExpr(stmt->expr.get(), nullptr);
+    switchDepth++;
+    // No PushScope/PopScope per-arm - a switch's arms deliberately share
+    // one scope (see StmtKind::Case's own doc comment: a `let` in one
+    // arm stays visible to a later one it falls through into, matching
+    // real JS). One shared scope for the whole switch body lets every
+    // arm's own statements see earlier arms' locals without them leaking
+    // past the switch entirely.
+    PushScope();
+    for (auto &arm : stmt->statements) {
+      // A case value must match the switch's own discriminant type -
+      // checked directly here (against discriminantT), not by
+      // generically dispatching to StmtKind::Case below, since CheckStmt
+      // has no "expected type" parameter to thread that through.
+      // `arm->expr` is null for `default:` (see ParseSwitch).
+      if (arm->expr) {
+        CheckExpr(arm->expr.get(), discriminantT.tag != TypeTag::Unknown ? &discriminantT : nullptr);
+      }
+      for (auto &s : arm->statements) CheckStmt(s.get());
+    }
+    PopScope();
+    switchDepth--;
+    break;
+  }
+  case StmtKind::Case: {
+    // Only ever reached through StmtKind::Switch's own loop above, which
+    // handles a Case arm's expr/statements directly so it can check the
+    // arm's value against the switch's own discriminant type. A Case
+    // node is never on any other AST path, so this is unreachable in
+    // practice; still handled (rather than omitted) so this switch stays
+    // exhaustive, and so it degrades safely instead of silently
+    // no-op'ing if that ever stops being true.
+    if (stmt->expr) CheckExpr(stmt->expr.get(), nullptr);
+    for (auto &s : stmt->statements) CheckStmt(s.get());
+    break;
+  }
+  case StmtKind::Destructure: {
+    ResolvedType srcT = CheckExpr(stmt->expr.get(), nullptr);
+    if (srcT.tag != TypeTag::Struct) {
+      if (srcT.tag != TypeTag::Unknown) {
+        Error(stmt->loc, "cannot destructure a value of type '" + srcT.ToString() +
+                              "' - only an interface/class instance can be destructured");
+      }
+      break;
+    }
+    InterfaceDecl *iface = interfaces.at(srcT.structName);
+    std::unordered_set<std::string> seenLocals;
+    for (auto &b : stmt->destructureBindings) {
+      const InterfaceField *field = FindField(iface, b.fieldName);
+      if (!field) {
+        std::string hint;
+        if (FindGetter(iface, b.fieldName) || FindSetter(iface, b.fieldName)) {
+          hint = " (it's a get/set property, not a plain field - destructuring only reads plain fields)";
+        } else if (FindPlainMethod(iface, b.fieldName)) {
+          hint = " (it's a method, not a field)";
+        }
+        Error(b.loc, "interface '" + iface->name + "' has no field '" + b.fieldName + "'" + hint);
+        continue;
+      }
+      if (!seenLocals.insert(b.localName).second) {
+        Error(b.loc, "'" + b.localName + "' is already bound by this destructuring pattern");
+        continue;
+      }
+      b.resolvedType = field->resolvedType;
+      Declare(b.loc, b.localName, b.resolvedType, stmt->isConst, nullptr, stmt);
+    }
+    break;
+  }
+  case StmtKind::Try: {
+    // Body is always a Block (see Parser::ParseTry) - CheckStmt's own
+    // Block case already pushes/pops its own scope, so nothing extra
+    // needed here for it.
+    CheckStmt(stmt->body.get());
+
+    ResolvedType catchType = ResolveType(stmt->declaredType.get());
+    if (catchType.tag != TypeTag::Unknown &&
+        !(catchType.tag == TypeTag::Struct && catchType.structName == "Error")) {
+      Error(stmt->loc, "a catch clause can only catch 'Error' right now - '" + catchType.ToString() +
+                            "' isn't a throwable/catchable type yet (only one exception type exists so "
+                            "far - see README.md's own note on why)");
+    }
+    stmt->resolvedVarType = catchType;
+    // One scope for the catch variable itself, wrapping the catch
+    // body's own Block (which pushes its own separate inner scope for
+    // its own statements) - same shape a function body's own params +
+    // Block already has (see CheckFunctionBody).
+    PushScope();
+    Declare(stmt->loc, stmt->varName, catchType, /*isConst=*/false, nullptr, stmt);
+    CheckStmt(stmt->elseBranch.get());
+    PopScope();
+    break;
+  }
+  case StmtKind::Throw: {
+    ResolvedType errorType = ResolvedType::Struct("Error");
+    CheckExpr(stmt->expr.get(), &errorType);
     break;
   }
   case StmtKind::Return: {
@@ -917,11 +1633,43 @@ void Sema::CheckStmt(Stmt *stmt) {
   case StmtKind::ExprStmt:
     CheckExpr(stmt->expr.get(), nullptr);
     break;
-  case StmtKind::Block:
+  case StmtKind::Block: {
     PushScope();
-    for (auto &s : stmt->statements) CheckStmt(s.get());
+    // Names THIS block's own loop narrowed (via an `if (x == null) {
+    // <exits> }` with no `else` - see pendingNarrowAfterStmt) - undone
+    // when the block itself ends, so a narrow never leaks past the
+    // block it was established in. `.insert(...).second` guards against
+    // un-narrowing a name an OUTER block already had narrowed before
+    // this one even started (rare, but real: a block nested inside an
+    // already-narrowed `if (x != null) { ... }`, say) - only a name
+    // THIS loop actually added gets removed again here.
+    std::vector<std::string> narrowedHere;
+    std::vector<std::string> anyNarrowedHere;
+    for (auto &s : stmt->statements) {
+      CheckStmt(s.get());
+      if (!pendingNarrowAfterStmt.empty()) {
+        if (narrowedNonNull.insert(pendingNarrowAfterStmt).second) {
+          narrowedHere.push_back(pendingNarrowAfterStmt);
+        }
+        pendingNarrowAfterStmt.clear();
+      }
+      // Same deal, for the `any`-flavored `typeof x !== "..."` early-exit
+      // shape (see pendingAnyNarrowAfterStmt's own doc comment) - a
+      // parallel, independent check since a single statement only ever
+      // sets one of the two pending fields, never both.
+      if (!pendingAnyNarrowAfterStmt.empty()) {
+        if (narrowedAny.find(pendingAnyNarrowAfterStmt) == narrowedAny.end()) {
+          narrowedAny[pendingAnyNarrowAfterStmt] = pendingAnyNarrowTag;
+          anyNarrowedHere.push_back(pendingAnyNarrowAfterStmt);
+        }
+        pendingAnyNarrowAfterStmt.clear();
+      }
+    }
+    for (auto &name : narrowedHere) narrowedNonNull.erase(name);
+    for (auto &name : anyNarrowedHere) narrowedAny.erase(name);
     PopScope();
     break;
+  }
   }
 }
 
@@ -953,6 +1701,39 @@ ResolvedType Sema::CheckLValueTarget(Expr *target, SourceLoc opLoc) {
   }
 
   if (target->kind == ExprKind::Member) {
+    if (target->lhs->kind == ExprKind::Identifier && IsStaticAccessTarget(target->lhs->name)) {
+      // `ClassName.staticField = value`/`EnumName.member = value` - same
+      // rewrite-to-a-plain-Identifier trick CheckExpr's own Member case
+      // uses for a read (see its own comment). A static field is always
+      // a plain assignable global, never setter-backed (there's no
+      // "static get"/"static set" - see ParseClassBody), so there's no
+      // setter-vs-field split to make here the way there is below - and
+      // an enum member is always a `const` one (see the enum
+      // registration pass in Check()), so this always rejects it, the
+      // same path an ordinary `const` global's own reassignment already
+      // takes.
+      const std::string &nsName = target->lhs->name;
+      auto ifaceIt = interfaces.find(nsName);
+      std::string mangled = ifaceIt != interfaces.end() ? MangleStatic(ifaceIt->second->name, target->name)
+                                                         : MangleEnumMember(enums.at(nsName)->name, target->name);
+      if (globals.count(mangled)) {
+        target->kind = ExprKind::Identifier;
+        target->name = mangled;
+        VarInfo &v = globals.at(mangled);
+        if (v.isConst) Error(opLoc, "cannot assign to '" + mangled.substr(mangled.rfind('$') + 1) +
+                                         "' - it is declared 'const'");
+        target->resolvedType = v.type;
+        return target->resolvedType;
+      }
+      if (ifaceIt != interfaces.end() && functions.count(mangled)) {
+        Error(opLoc, "'" + target->name + "' is a static method of '" + ifaceIt->second->name + "', not assignable");
+      } else {
+        std::string kind = ifaceIt != interfaces.end() ? "class" : "enum";
+        Error(opLoc, kind + " '" + nsName + "' has no member '" + target->name + "'");
+      }
+      target->resolvedType = ResolvedType{};
+      return target->resolvedType;
+    }
     // Deliberately not just CheckExpr(target, nullptr) - unlike a plain
     // read, an lvalue target can't let CheckExpr's own Member case
     // rewrite a getter-backed property into a Call in place (there's
@@ -974,6 +1755,9 @@ ResolvedType Sema::CheckLValueTarget(Expr *target, SourceLoc opLoc) {
     if (objT.tag == TypeTag::Struct) {
       InterfaceDecl *iface = interfaces.at(objT.structName);
       if (const InterfaceField *field = FindField(iface, target->name)) {
+        if (field->isReadonly) {
+          Error(opLoc, "cannot assign to '" + target->name + "' - it is declared 'readonly'");
+        }
         target->resolvedType = field->resolvedType;
         return field->resolvedType;
       }
@@ -1011,6 +1795,32 @@ ResolvedType Sema::CheckLValueTarget(Expr *target, SourceLoc opLoc) {
 // Expressions
 // ---------------------------------------------------------------------
 
+bool Sema::IsAssignable(const ResolvedType &from, const ResolvedType &to) {
+  if (from == to) return true;
+  if (from.tag == TypeTag::Struct && to.tag == TypeTag::Struct) {
+    for (InterfaceDecl *cur = interfaces.at(from.structName); cur; cur = cur->baseClass) {
+      if (cur->name == to.structName) return true;
+    }
+  }
+  return false;
+}
+
+// See this method's own doc comment in sema.h.
+bool Sema::IsAnyBoxable(TypeTag t) {
+  switch (t) {
+  case TypeTag::Number:
+  case TypeTag::Boolean:
+  case TypeTag::String:
+  case TypeTag::Struct:
+  case TypeTag::Array:
+  case TypeTag::Handler:
+  case TypeTag::Enum:
+    return true;
+  default:
+    return false;
+  }
+}
+
 ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
   ResolvedType actual;
 
@@ -1027,11 +1837,59 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     actual = ResolvedType::String();
     break;
 
+  case ExprKind::NullLiteral:
+    // Same "can't infer from nothing" deal an empty array literal has -
+    // `null` alone carries no T of its own, so it always needs an
+    // expected Nullable(T) to resolve against (a `let`'s own declared
+    // type, a parameter/return type, ...). The generic actual-vs-
+    // expected check at the tail of this function already accepts this
+    // once `actual` here matches `expected` exactly (see IsAssignable -
+    // `null` widens to nothing else, it only ever fits the EXACT
+    // Nullable(T) it's being checked against).
+    if (expected && expected->tag == TypeTag::Nullable) {
+      actual = *expected;
+    } else if (expected && expected->tag == TypeTag::Any) {
+      // `any` absorbs `null` directly (see TypeTag::Any's own doc
+      // comment) - a real, distinct AnyTag::Null box, not the bare null
+      // pointer a Nullable(T)'s own "absent" value is (see Codegen's own
+      // NullLiteral case), so `typeof` still has a real box to read a tag
+      // out of. No needsAnyBox here: unlike every other boxable value,
+      // there's no "concrete pre-box value" to box in the first place.
+      actual = ResolvedType::Any();
+    } else {
+      Error(expr->loc, "cannot infer a type for 'null' - add an explicit 'T | null' type annotation");
+      actual = ResolvedType{};
+    }
+    break;
+
   case ExprKind::Identifier: {
     VarInfo *v = Lookup(expr->name);
     auto funcIt = functions.find(expr->name);
     if (v) {
-      actual = v->type;
+      // Narrowing (see narrowedNonNull's own doc comment): proven
+      // non-null AT THIS SPECIFIC REFERENCE, not a blanket fact about
+      // the variable - a later reference to the same name, once out of
+      // the narrowed region, resolves as plain Nullable(T) again, same
+      // as if this check had never happened.
+      auto anyNarrow = narrowedAny.find(expr->name);
+      if (v->type.tag == TypeTag::Nullable && narrowedNonNull.count(expr->name)) {
+        actual = *v->type.elementType;
+        expr->isNarrowedNonNull = true;
+      } else if (v->type.tag == TypeTag::Any && anyNarrow != narrowedAny.end()) {
+        // Narrowing (see narrowedAny's own doc comment): proven to hold
+        // one of the three narrowable concrete shapes AT THIS SPECIFIC
+        // REFERENCE, same per-reference-not-per-declaration discipline
+        // narrowedNonNull already has.
+        switch (anyNarrow->second) {
+        case AnyTag::Number: actual = ResolvedType::Number(); break;
+        case AnyTag::Boolean: actual = ResolvedType::Boolean(); break;
+        case AnyTag::String: actual = ResolvedType::String(); break;
+        default: actual = v->type; break; // unreachable - narrowedAny never holds Object/Function/Null (see TryGetTypeofCheckedVar)
+        }
+        expr->isNarrowedAny = true;
+      } else {
+        actual = v->type;
+      }
     } else if (funcIt != functions.end() && IsVisible(expr->name)) {
       // A bare function name (not a call) - a plain code address with no
       // captured environment of its own (contrast a closure literal,
@@ -1099,9 +1957,32 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
   }
 
   case ExprKind::Binary: {
+    const std::string &op = expr->op;
+    // `x != null`/`x == null` - the ONLY legal use of a bare `null`
+    // outside of somewhere with a real declared Nullable(T) type to
+    // check it against (a `let`'s own annotation, notNull<T>'s return
+    // type, ...). Checked as a special case, before the generic
+    // "check both sides with no expected type" path below: a bare
+    // NullLiteral has NOTHING to infer a type from on its own (see its
+    // own CheckExpr case) - it needs the OTHER side's already-resolved
+    // type handed to it as `expected`, which only this operator
+    // (uniquely, among every Binary one) can actually provide.
+    bool lhsIsNull = expr->lhs->kind == ExprKind::NullLiteral;
+    bool rhsIsNull = expr->rhs->kind == ExprKind::NullLiteral;
+    if ((op == "==" || op == "!=") && (lhsIsNull || rhsIsNull) && !(lhsIsNull && rhsIsNull)) {
+      Expr *nullSide = lhsIsNull ? expr->lhs.get() : expr->rhs.get();
+      Expr *otherSide = lhsIsNull ? expr->rhs.get() : expr->lhs.get();
+      ResolvedType otherT = CheckExpr(otherSide, nullptr);
+      if (otherT.tag != TypeTag::Nullable && otherT.tag != TypeTag::Unknown) {
+        Error(expr->loc, "operator '" + op + "' against 'null' only makes sense for a 'T | null' value, found '" +
+                              otherT.ToString() + "'");
+      }
+      CheckExpr(nullSide, otherT.tag == TypeTag::Nullable ? &otherT : nullptr);
+      actual = ResolvedType::Boolean();
+      break;
+    }
     ResolvedType lhsT = CheckExpr(expr->lhs.get(), nullptr);
     ResolvedType rhsT = CheckExpr(expr->rhs.get(), nullptr);
-    const std::string &op = expr->op;
     bool lhsUnknown = lhsT.tag == TypeTag::Unknown;
     bool rhsUnknown = rhsT.tag == TypeTag::Unknown;
     if (op == "+" && (lhsT.tag == TypeTag::String || rhsT.tag == TypeTag::String)) {
@@ -1134,6 +2015,17 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
                               rhsT.ToString() + "'");
       }
       actual = ResolvedType::Boolean();
+    } else if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>" || op == ">>>") {
+      // Same "real double, ToInt32-truncated at the operator itself"
+      // deal real JS bitwise/shift operators have - see Codegen's own
+      // Binary case for the actual truncate/operate/widen-back sequence.
+      // Always yields a number either way, same shape every other
+      // numeric operator here has.
+      if (!lhsUnknown && !rhsUnknown && (lhsT.tag != TypeTag::Number || rhsT.tag != TypeTag::Number)) {
+        Error(expr->loc, "operator '" + op + "' requires two numbers, found '" + lhsT.ToString() + "' and '" +
+                              rhsT.ToString() + "'");
+      }
+      actual = ResolvedType::Number();
     } else {
       Error(expr->loc, "unknown operator '" + op + "'");
       actual = ResolvedType{};
@@ -1154,6 +2046,23 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         Error(expr->loc, "unary '!' requires a boolean, found '" + operandT.ToString() + "'");
       }
       actual = ResolvedType::Boolean();
+    } else if (expr->op == "~") {
+      if (!unknown && operandT.tag != TypeTag::Number) {
+        Error(expr->loc, "unary '~' requires a number, found '" + operandT.ToString() + "'");
+      }
+      actual = ResolvedType::Number();
+    } else if (expr->op == "typeof") {
+      // Valid only on an `any`-typed operand - see TypeTag::Any's own doc
+      // comment. Always yields `string`, one of "number"/"boolean"/
+      // "string"/"object"/"function" (see AnyTag) - the actual runtime
+      // dispatch lives in Codegen's own Unary case, not here; Sema only
+      // needs to know this always produces a string, so `typeof x ===
+      // "..."` type-checks as an ordinary string equality with no special
+      // casing of its own (see Binary's case above).
+      if (!unknown && operandT.tag != TypeTag::Any) {
+        Error(expr->loc, "'typeof' requires an 'any' value, found '" + operandT.ToString() + "'");
+      }
+      actual = ResolvedType::String();
     } else {
       Error(expr->loc, "unknown unary operator '" + expr->op + "'");
       actual = ResolvedType{};
@@ -1163,13 +2072,78 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
 
   case ExprKind::Call: {
     if (expr->lhs->kind == ExprKind::Member) {
+      Expr *memberExpr = expr->lhs.get();
+      if (memberExpr->lhs->kind == ExprKind::Identifier && IsStaticAccessTarget(memberExpr->lhs->name)) {
+        // Captured into locals before `expr->lhs` is ever reassigned
+        // below (which frees the Member node `memberExpr` points into -
+        // reading memberExpr->name/loc afterward would be a
+        // use-after-free).
+        std::string nsName = memberExpr->lhs->name;
+        std::string propName = memberExpr->name;
+        SourceLoc propLoc = memberExpr->loc;
+
+        auto ifaceIt = interfaces.find(nsName);
+        if (ifaceIt == interfaces.end()) {
+          // `EnumName.member(...)` - an enum has no callable members at
+          // all (see EnumDecl's own doc comment: arithmetic and every
+          // other operation beyond '=='/'!=' is deliberately unsupported
+          // on an enum-typed value, and there's certainly no such thing
+          // as an enum *method*).
+          EnumDecl *enumDecl = enums.at(nsName);
+          bool exists = globals.count(MangleEnumMember(enumDecl->name, propName)) != 0;
+          if (exists) {
+            Error(expr->loc, "'" + propName + "' is a member of enum '" + enumDecl->name + "', not callable");
+          } else {
+            Error(expr->loc, "enum '" + enumDecl->name + "' has no member '" + propName + "'");
+          }
+          for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+          actual = ResolvedType{};
+          break;
+        }
+        // `ClassName.staticMethod(args)` - unlike an instance method call
+        // below, there's no receiver to splice in at all: this is really
+        // just an ordinary call to the mangled top-level function (see
+        // Sema::MangleStatic), so `expr->lhs` is rewritten to a plain
+        // Identifier naming it - the exact shape an ordinary named-
+        // function call already has by the time Codegen sees it, so
+        // Codegen's own Call case needs no new branch for this at all.
+        InterfaceDecl *iface = ifaceIt->second;
+        std::string mangled = MangleStatic(iface->name, propName);
+        if (!expr->typeArgs.empty()) {
+          Error(expr->loc, "a method call can't take explicit type arguments yet");
+        }
+        auto it = functions.find(mangled);
+        if (it == functions.end()) {
+          if (globals.count(mangled)) {
+            Error(expr->loc, "'" + propName + "' is a static field of '" + iface->name + "', not callable");
+          } else {
+            Error(expr->loc, "class '" + iface->name + "' has no static member '" + propName + "'");
+          }
+          for (auto &arg : expr->elements) CheckExpr(arg.get(), nullptr);
+          actual = ResolvedType{};
+          break;
+        }
+        FunctionDecl *fn = it->second;
+        expr->resolvedCalleeName = mangled;
+        auto newLhs = MakeExpr(ExprKind::Identifier, propLoc);
+        newLhs->name = mangled;
+        expr->lhs = std::move(newLhs); // discards the old Member(ClassName, method) subtree
+        if (fn->params.size() != expr->elements.size()) {
+          Error(expr->loc, "static method '" + propName + "' expects " + std::to_string(fn->params.size()) +
+                                " argument(s), got " + std::to_string(expr->elements.size()));
+        }
+        size_t n = std::min(fn->params.size(), expr->elements.size());
+        for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
+        for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
+        actual = fn->resolvedReturnType;
+        break;
+      }
       // `obj.method(args)` - always resolved statically against obj's
       // declared type (no vtable/dynamic dispatch - see
       // InterfaceDecl::methods' own doc comment), so this is pure
       // call-site sugar for a plain call to the class's already-
       // qualified method function, with obj spliced in as the actual
       // first argument once every other argument has been checked.
-      Expr *memberExpr = expr->lhs.get();
       ResolvedType objT = CheckExpr(memberExpr->lhs.get(), nullptr);
       if (!expr->typeArgs.empty()) {
         Error(expr->loc, "a method call can't take explicit type arguments yet");
@@ -1198,6 +2172,16 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         break;
       }
       expr->resolvedCalleeName = method->name;
+      // Real dynamic dispatch for a method whose class is actually part
+      // of an inheritance family (see FunctionDecl::isVirtual's own doc
+      // comment) - `method->vtableSlot` is the same slot number no
+      // matter which class's own override FindPlainMethod happened to
+      // find statically here, so Codegen dispatching through it (via
+      // the receiver's own RUNTIME vtable pointer, not this specific
+      // resolvedCalleeName) reaches whichever override actually applies
+      // to the real, dynamic instance - see Expr::virtualSlot's own doc
+      // comment.
+      expr->virtualSlot = method->isVirtual ? method->vtableSlot : -1;
       // method->params[0] is the implicit `this` receiver - not part of
       // the ART-visible argument list obj.method(args) supplies.
       size_t userParamCount = method->params.size() - 1;
@@ -1232,13 +2216,37 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       if (it != functions.end() && IsVisible(callee)) {
         expr->resolvedCalleeName = callee;
         FunctionDecl *fn = it->second;
-        if (fn->params.size() != expr->elements.size()) {
-          Error(expr->loc, "function '" + callee + "' expects " + std::to_string(fn->params.size()) +
-                                " argument(s), got " + std::to_string(expr->elements.size()));
+        bool hasRestParam = !fn->params.empty() && fn->params.back().isRest;
+        if (hasRestParam) {
+          // Every argument from the rest parameter's own position
+          // onward is optional (zero or more) - only the LEADING, fixed
+          // parameters are actually required. Each trailing argument is
+          // checked against the rest parameter's own ELEMENT type (not
+          // the array type itself - a call site supplies individual
+          // values, never a literal array, in this first pass; see
+          // Param::isRest's own doc comment on the spread-in-calls gap
+          // this leaves), matching how Codegen collects them into a
+          // real array one at a time (see its own Call case).
+          size_t fixedCount = fn->params.size() - 1;
+          if (expr->elements.size() < fixedCount) {
+            Error(expr->loc, "function '" + callee + "' expects at least " + std::to_string(fixedCount) +
+                                  " argument(s), got " + std::to_string(expr->elements.size()));
+          }
+          size_t n = std::min(fixedCount, expr->elements.size());
+          for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
+          const ResolvedType &elemType = *fn->params.back().resolvedType.elementType;
+          for (size_t i = fixedCount; i < expr->elements.size(); i++) {
+            CheckExpr(expr->elements[i].get(), &elemType);
+          }
+        } else {
+          if (fn->params.size() != expr->elements.size()) {
+            Error(expr->loc, "function '" + callee + "' expects " + std::to_string(fn->params.size()) +
+                                  " argument(s), got " + std::to_string(expr->elements.size()));
+          }
+          size_t n = std::min(fn->params.size(), expr->elements.size());
+          for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
+          for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
         }
-        size_t n = std::min(fn->params.size(), expr->elements.size());
-        for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
-        for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
         actual = fn->resolvedReturnType;
         break;
       }
@@ -1429,6 +2437,46 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
   }
 
   case ExprKind::Member: {
+    if (expr->lhs->kind == ExprKind::Identifier && IsStaticAccessTarget(expr->lhs->name)) {
+      // `ClassName.member`/`EnumName.member` - a static field/method or
+      // enum member access, not an instance one on some variable (there
+      // is none - see IsStaticAccessTarget). Rewritten in place into a
+      // plain Identifier naming the mangled global (see
+      // Sema::MangleStatic/MangleEnumMember) - reuses every existing
+      // Identifier lookup/lvalue/codegen path for a global with no new
+      // Codegen case at all, the same trick a getter's own Member->Call
+      // rewrite below uses for methods.
+      const std::string &nsName = expr->lhs->name;
+      auto ifaceIt = interfaces.find(nsName);
+      if (ifaceIt != interfaces.end()) {
+        InterfaceDecl *iface = ifaceIt->second;
+        std::string mangled = MangleStatic(iface->name, expr->name);
+        if (globals.count(mangled)) {
+          expr->kind = ExprKind::Identifier;
+          expr->name = mangled;
+          actual = globals.at(mangled).type;
+        } else if (functions.count(mangled)) {
+          Error(expr->loc, "'" + expr->name + "' is a static method of '" + iface->name +
+                                "' - it can only be used with call syntax ('(...)')");
+          actual = ResolvedType{};
+        } else {
+          Error(expr->loc, "class '" + iface->name + "' has no static member '" + expr->name + "'");
+          actual = ResolvedType{};
+        }
+      } else {
+        EnumDecl *enumDecl = enums.at(nsName);
+        std::string mangled = MangleEnumMember(enumDecl->name, expr->name);
+        if (globals.count(mangled)) {
+          expr->kind = ExprKind::Identifier;
+          expr->name = mangled;
+          actual = globals.at(mangled).type;
+        } else {
+          Error(expr->loc, "enum '" + enumDecl->name + "' has no member '" + expr->name + "'");
+          actual = ResolvedType{};
+        }
+      }
+      break;
+    }
     ResolvedType objT = CheckExpr(expr->lhs.get(), nullptr);
     if ((objT.tag == TypeTag::Array || objT.tag == TypeTag::String) && expr->name == "length") {
       expr->isLengthAccess = true;
@@ -1491,6 +2539,16 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
   case ExprKind::Assign: {
     ResolvedType targetT = CheckLValueTarget(expr->lhs.get(), expr->loc);
     CheckExpr(expr->rhs.get(), &targetT);
+    // A narrowed `x != null` guard only proves `x` was non-null at the
+    // check - reassigning `x` inside that narrowed region (to `null` or
+    // even back to a non-null value) makes the guard stale, since
+    // Codegen's unboxing decision is baked into each Identifier read at
+    // Sema time, not re-verified at runtime. Un-narrow on any write to
+    // avoid unboxing a pointer that's no longer known non-null.
+    if (expr->lhs->kind == ExprKind::Identifier) {
+      narrowedNonNull.erase(expr->lhs->name);
+      narrowedAny.erase(expr->lhs->name);
+    }
     actual = targetT;
     break;
   }
@@ -1553,7 +2611,15 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     fn->name = "$closure" + std::to_string(nextClosureId++);
     fn->sourceFile = currentFile;
 
-    for (auto &p : fn->params) p.resolvedType = ResolveType(p.type.get());
+    for (auto &p : fn->params) {
+      p.resolvedType = ResolveType(p.type.get());
+      // Not supported on a closure in this first pass either - see
+      // RegisterFunctionSignature's own comment on allowRestParam.
+      if (p.isRest) {
+        Error(p.loc, "a rest parameter isn't supported here yet - only a plain, non-generic, top-level function "
+                     "can have one");
+      }
+    }
     fn->resolvedReturnType = ResolveType(fn->returnType.get());
     if (fn->resolvedReturnType.tag != TypeTag::Void) {
       Error(expr->loc, "a function expression must return void - ART's Handler type ('(...) => void'-shaped "
@@ -1566,7 +2632,12 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     frameStack.push_back(fn);
     PushScope();
     for (auto &p : fn->params) Declare(p.loc, p.name, p.resolvedType, /*isConst=*/false, &p);
+    int savedLoopDepth = loopDepth, savedSwitchDepth = switchDepth;
+    loopDepth = 0;
+    switchDepth = 0;
     CheckStmt(fn->body.get());
+    loopDepth = savedLoopDepth;
+    switchDepth = savedSwitchDepth;
     PopScope();
     frameStack.pop_back();
     currentFunction = savedCurrentFunction;
@@ -1584,8 +2655,23 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
   }
   }
 
+  // Implicit widening into `any` (see TypeTag::Any's own doc comment for
+  // why this - unlike Nullable(T)'s own no-implicit-widening rule - is
+  // deliberately unconditional for every boxable tag): once `actual` is
+  // rewritten to Any here, the ordinary actual-vs-expected check right
+  // below sees a plain Any-vs-Any match and passes with no error, the
+  // same way an already-Any `actual` (e.g. reading an `any` variable)
+  // already would. `preBoxType` remembers what `actual` was a moment ago
+  // so Codegen's GenBoxAny knows what it's actually boxing.
+  if (expected && expected->tag == TypeTag::Any && IsAnyBoxable(actual.tag)) {
+    expr->needsAnyBox = true;
+    expr->preBoxType = actual;
+    actual = ResolvedType::Any();
+  }
+
   expr->resolvedType = actual;
-  if (expected && actual.tag != TypeTag::Unknown && expected->tag != TypeTag::Unknown && actual != *expected) {
+  if (expected && actual.tag != TypeTag::Unknown && expected->tag != TypeTag::Unknown &&
+      !IsAssignable(actual, *expected)) {
     Error(expr->loc, "type mismatch: expected '" + expected->ToString() + "', found '" + actual.ToString() + "'");
   }
   return actual;

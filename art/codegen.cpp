@@ -1,5 +1,6 @@
 #include "codegen.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "llvm/MC/TargetRegistry.h"
@@ -47,6 +48,20 @@ llvm::Type *Codegen::MapType(const ResolvedType &t) {
     return llvm::PointerType::get(context, 0);
   case TypeTag::Struct:
     return llvm::PointerType::get(context, 0);
+  case TypeTag::Enum:
+    // A real, distinct type from Number at the Sema level, but the exact
+    // same runtime representation - see EnumDecl's own doc comment.
+    return llvm::Type::getDoubleTy(context);
+  case TypeTag::Nullable:
+    // Always a boxed `ptr`, regardless of what the wrapped T's own
+    // unwrapped representation would be - see TypeTag::Nullable's own
+    // doc comment for why a uniform box (not "reuse T's own null-able
+    // bit pattern, where it has one") is the right call here.
+    return llvm::PointerType::get(context, 0);
+  case TypeTag::Any:
+    // Always a boxed `ptr` too - see TypeTag::Any's own doc comment and
+    // GetAnyBoxType.
+    return llvm::PointerType::get(context, 0);
   case TypeTag::Unknown:
     break;
   }
@@ -72,6 +87,71 @@ llvm::Type *Codegen::ArrayElemStorageType(const ResolvedType &elem) {
   return MapType(elem);
 }
 
+llvm::StructType *Codegen::GetAnyBoxType() {
+  if (!anyBoxType) {
+    anyBoxType = llvm::StructType::create(
+        context, {llvm::Type::getInt32Ty(context), llvm::PointerType::get(context, 0)}, "art.any");
+  }
+  return anyBoxType;
+}
+
+// See this method's own doc comment in codegen.h.
+llvm::Value *Codegen::GenBoxAny(llvm::Value *rawValue, const ResolvedType &sourceType) {
+  llvm::Value *payload;
+  AnyTag tag;
+  switch (sourceType.tag) {
+  case TypeTag::Number:
+  case TypeTag::Enum: {
+    // Same runtime representation either way (see MapType's own Enum
+    // case) - `rawValue` is already a real `double` for both.
+    tag = AnyTag::Number;
+    llvm::Value *cell = GenHeapAlloc(8);
+    builder.CreateStore(rawValue, cell);
+    payload = cell;
+    break;
+  }
+  case TypeTag::Boolean: {
+    tag = AnyTag::Boolean;
+    llvm::Value *cell = GenHeapAlloc(1);
+    builder.CreateStore(builder.CreateZExt(rawValue, llvm::Type::getInt8Ty(context)), cell);
+    payload = cell;
+    break;
+  }
+  case TypeTag::String:
+    tag = AnyTag::String;
+    payload = rawValue; // already `ptr`-shaped - no extra box needed
+    break;
+  case TypeTag::Struct:
+  case TypeTag::Array:
+    // Indistinguishable via `typeof` (both report "object", exactly like
+    // real JS - see AnyTag::Object's own doc comment), so one shared tag
+    // is enough - neither is ever narrowed back out anyway.
+    tag = AnyTag::Object;
+    payload = rawValue; // already `ptr`-shaped - no extra box needed
+    break;
+  case TypeTag::Handler: {
+    // Unlike everything else here, `rawValue` is a literal 2-word
+    // {ptr fn, ptr env} AGGREGATE VALUE, not itself a pointer (see
+    // GetHandlerStructType's own doc comment) - needs a real heap cell
+    // to live in before anything can point at it.
+    tag = AnyTag::Function;
+    llvm::Value *cell = GenHeapAlloc(module->getDataLayout().getTypeAllocSize(GetHandlerStructType()).getFixedValue());
+    builder.CreateStore(rawValue, cell);
+    payload = cell;
+    break;
+  }
+  default:
+    throw std::runtime_error("codegen: unboxable type reached GenBoxAny - Sema::IsAnyBoxable should have rejected this");
+  }
+
+  llvm::StructType *boxTy = GetAnyBoxType();
+  llvm::Value *box = GenHeapAlloc(module->getDataLayout().getTypeAllocSize(boxTy).getFixedValue());
+  builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), static_cast<uint64_t>(tag)),
+                       builder.CreateStructGEP(boxTy, box, 0));
+  builder.CreateStore(payload, builder.CreateStructGEP(boxTy, box, 1));
+  return box;
+}
+
 llvm::StructType *Codegen::GetArrayHeaderType() {
   if (!arrayHeaderType) {
     arrayHeaderType = llvm::StructType::create(
@@ -80,13 +160,60 @@ llvm::StructType *Codegen::GetArrayHeaderType() {
   return arrayHeaderType;
 }
 
+// { [512 x i8] jmpbuf, ptr prev, ptr thrownValue } - one instance per
+// dynamically-active `try`, stack-allocated in the ART function that owns
+// it (see GenStmt's own Try case for why that's safe even across
+// recursion/loop iterations). 512 bytes is comfortably larger than any
+// real platform's own jmp_buf (macOS: 148 bytes; glibc: ~200) - a fixed,
+// generously-oversized buffer rather than a per-platform probe, since
+// getting this wrong would be silent stack corruption, not a compile
+// error. `prev` links to the next-OUTER active frame (or null), forming
+// the runtime stack `@art.exception.currentHandler` roots - both
+// GenStmt's Throw case (an unrelated call site, possibly in a
+// completely different function, with no compile-time visibility into
+// any particular try's own SSA values) and GenExceptionHandlerCleanup
+// (same function, early exit) read it the same way. `thrownValue` is an
+// Error* - see StmtKind::Try's own doc comment for why only one
+// throwable type exists right now.
+llvm::StructType *Codegen::GetExceptionFrameType() {
+  if (!exceptionFrameType) {
+    llvm::Type *jmpBufTy = llvm::ArrayType::get(llvm::Type::getInt8Ty(context), 512);
+    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+    exceptionFrameType = llvm::StructType::create(context, {jmpBufTy, ptrTy, ptrTy}, "art.exhandler");
+  }
+  return exceptionFrameType;
+}
+
+// See this method's own doc comment in codegen.h.
+void Codegen::GenExceptionHandlerCleanup(size_t stopBelow) {
+  llvm::Value *outermostTryFrame = nullptr;
+  for (size_t i = stopBelow; i < scopeStack.size(); i++) {
+    if (scopeStack[i].kind == ScopeExit::Kind::Try) {
+      outermostTryFrame = scopeStack[i].framePtr;
+      break; // the first Try found scanning up FROM stopBelow is the outermost one being skipped
+    }
+  }
+  if (!outermostTryFrame) return; // no try frame in range - nothing to restore
+  llvm::StructType *frameTy = GetExceptionFrameType();
+  llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, outermostTryFrame, 1);
+  llvm::Value *prev = builder.CreateLoad(llvm::PointerType::get(context, 0), prevFieldPtr);
+  builder.CreateStore(prev, exceptionCurrentHandler);
+}
+
 llvm::StructType *Codegen::GetOrCreateStructType(const std::string &ifaceName) {
   auto it = structTypes.find(ifaceName);
   if (it != structTypes.end()) return it->second;
 
   InterfaceDecl *iface = sema.Interfaces().at(ifaceName);
   std::vector<llvm::Type *> fieldTypes;
-  fieldTypes.reserve(iface->fields.size());
+  fieldTypes.reserve(iface->fields.size() + 1);
+  // A class actually touched by inheritance gets a vtable pointer as
+  // its own real field 0, ahead of every ART-visible field - see
+  // FieldIndex's own matching +1 shift, and GenExpr's ObjectLiteral case
+  // for where it's actually populated at construction time. A class
+  // untouched by inheritance gets none of this: same layout as before
+  // this feature existed at all.
+  if (iface->hasVirtualDispatch) fieldTypes.push_back(llvm::PointerType::get(context, 0));
   for (auto &field : iface->fields) fieldTypes.push_back(MapType(field.resolvedType));
 
   auto *structTy = llvm::StructType::create(context, fieldTypes, "struct." + ifaceName);
@@ -94,11 +221,67 @@ llvm::StructType *Codegen::GetOrCreateStructType(const std::string &ifaceName) {
   return structTy;
 }
 
+// The field's own index into `iface->fields` - NOT necessarily its
+// struct-GEP index (see StructFieldGepIndex, which adds the vtable-
+// pointer shift a hasVirtualDispatch class's own compiled layout has -
+// see GetOrCreateStructType). Kept separate (rather than folding the
+// shift in here) so `iface->fields[FieldIndex(...)]` - reading the
+// field's own resolvedType/isReadonly/etc. - stays correct at every
+// call site without also having to separately un-shift it back.
 int Codegen::FieldIndex(InterfaceDecl *iface, const std::string &fieldName) {
   for (size_t i = 0; i < iface->fields.size(); i++)
     if (iface->fields[i].name == fieldName) return static_cast<int>(i);
   throw std::runtime_error("codegen: unknown field '" + fieldName + "' on interface '" + iface->name +
                             "' - Sema should have rejected this program");
+}
+
+// The field's real positional index in `iface`'s own COMPILED struct
+// layout (what CreateStructGEP actually needs) - `FieldIndex`'s own
+// result, shifted by one if this class has a vtable pointer occupying
+// real field 0 (see GetOrCreateStructType/InterfaceDecl::
+// hasVirtualDispatch).
+int Codegen::StructFieldGepIndex(InterfaceDecl *iface, int fieldIndex) {
+  return fieldIndex + (iface->hasVirtualDispatch ? 1 : 0);
+}
+
+std::vector<FunctionDecl *> Codegen::BuildVtableLayout(InterfaceDecl *iface) {
+  int slotCount = 0;
+  for (InterfaceDecl *cur = iface; cur; cur = cur->baseClass) {
+    for (auto &m : cur->methods) {
+      if (m->isVirtual) slotCount = std::max(slotCount, m->vtableSlot + 1);
+    }
+  }
+  std::vector<FunctionDecl *> layout(slotCount, nullptr);
+  // Root-to-`iface` order, so a derived class's own override (visited
+  // LATER in this loop, since it's nearer the front of `chain` and this
+  // walks it in reverse) correctly overwrites whatever its ancestor left
+  // at the same slot.
+  std::vector<InterfaceDecl *> chain;
+  for (InterfaceDecl *cur = iface; cur; cur = cur->baseClass) chain.push_back(cur);
+  for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+    for (auto &m : (*it)->methods) {
+      if (m->isVirtual) layout[m->vtableSlot] = m.get();
+    }
+  }
+  return layout;
+}
+
+llvm::GlobalVariable *Codegen::GetOrCreateVtable(InterfaceDecl *iface) {
+  auto it = vtables.find(iface->name);
+  if (it != vtables.end()) return it->second;
+
+  std::vector<FunctionDecl *> layout = BuildVtableLayout(iface);
+  llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+  std::vector<llvm::Constant *> entries;
+  entries.reserve(layout.size());
+  for (FunctionDecl *m : layout) entries.push_back(llvmFunctions.at(m->name));
+
+  auto *vtableTy = llvm::ArrayType::get(ptrTy, entries.size());
+  auto *initializer = llvm::ConstantArray::get(vtableTy, entries);
+  auto *global = new llvm::GlobalVariable(*module, vtableTy, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
+                                           initializer, "art.vtable." + iface->name);
+  vtables[iface->name] = global;
+  return global;
 }
 
 // ---------------------------------------------------------------------
@@ -201,6 +384,34 @@ llvm::Value *Codegen::GenStringEquals(llvm::Value *lhsPtr, llvm::Value *rhsPtr) 
   return phi;
 }
 
+llvm::Value *Codegen::GenEqualityCheck(llvm::Value *lhsVal, llvm::Value *rhsVal, TypeTag tag) {
+  if (tag == TypeTag::String) return GenStringEquals(lhsVal, rhsVal);
+  if (tag == TypeTag::Handler) {
+    // A Handler value is a 2-word {fn, env} aggregate, not a bare
+    // pointer - a plain ICmpEQ doesn't accept an aggregate operand, and
+    // even if it did, comparing only raw bytes would be structurally
+    // right anyway only by accident. Equal means both fields match: same
+    // underlying function AND same captured environment - two closures
+    // compiled from the same source literal (e.g. two different loop
+    // iterations) share one generated thunk function pointer but have
+    // different envs, and must compare unequal, matching real JS
+    // reference semantics for closures.
+    llvm::Value *lhsFn = builder.CreateExtractValue(lhsVal, 0);
+    llvm::Value *rhsFn = builder.CreateExtractValue(rhsVal, 0);
+    llvm::Value *lhsEnv = builder.CreateExtractValue(lhsVal, 1);
+    llvm::Value *rhsEnv = builder.CreateExtractValue(rhsVal, 1);
+    return builder.CreateAnd(builder.CreateICmpEQ(lhsFn, rhsFn), builder.CreateICmpEQ(lhsEnv, rhsEnv));
+  }
+  // Number/Enum both compare as float (an Enum's runtime representation
+  // is exactly the same `double` a Number's already is - see
+  // EnumDecl's own doc comment); every other reachable tag here
+  // (Boolean, and - via Sema's generic "same tag" rule for "=="/"!=" -
+  // Struct/Array, both represented as `ptr`) compares as a plain
+  // integer/pointer identity check.
+  return (tag == TypeTag::Number || tag == TypeTag::Enum) ? builder.CreateFCmpOEQ(lhsVal, rhsVal)
+                                                           : builder.CreateICmpEQ(lhsVal, rhsVal);
+}
+
 llvm::Value *Codegen::GenStringIndex(llvm::Value *strPtr, llvm::Value *idxVal) {
   llvm::StructType *hdrTy = GetArrayHeaderType();
   llvm::Value *idxInt = builder.CreateFPToSI(idxVal, llvm::Type::getInt64Ty(context));
@@ -287,6 +498,34 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
                                          {llvm::PointerType::get(context, 0), llvm::PointerType::get(context, 0),
                                           llvm::Type::getInt64Ty(context)},
                                          false));
+  // libc's own setjmp/longjmp - see GetExceptionFrameType's own doc
+  // comment for the frame shape these operate on, and codegen.h's own
+  // note on why calling them directly (never through a wrapper function)
+  // matters. `setjmp` takes/returns the platform's real ABI shape (an
+  // opaque jmp_buf, decayed to a pointer to its first byte, and a plain
+  // i32 - true on every platform this targets, glibc and macOS libc
+  // alike).
+  setjmpFn = module->getOrInsertFunction(
+      "setjmp", llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {llvm::PointerType::get(context, 0)}, false));
+  // Without this, LLVM's optimizer is free to assume a call only ever
+  // returns once - and can then miscompile code around it (e.g. treating
+  // a value computed before the call as still valid after the "second
+  // return" a later longjmp produces, when a jump elsewhere may have run
+  // in between). This is the one attribute that tells it setjmp is
+  // special.
+  llvm::cast<llvm::Function>(setjmpFn.getCallee())->addFnAttr(llvm::Attribute::ReturnsTwice);
+  longjmpFn = module->getOrInsertFunction(
+      "longjmp", llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                                          {llvm::PointerType::get(context, 0), llvm::Type::getInt32Ty(context)}, false));
+  // Never returns to its own caller (control resumes at the matching
+  // setjmp call site instead) - a real, useful fact for the optimizer,
+  // not just documentation.
+  llvm::cast<llvm::Function>(longjmpFn.getCallee())->addFnAttr(llvm::Attribute::NoReturn);
+  abortFn = module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(context), {}, false));
+  llvm::cast<llvm::Function>(abortFn.getCallee())->addFnAttr(llvm::Attribute::NoReturn);
+  exceptionCurrentHandler = new llvm::GlobalVariable(
+      *module, llvm::PointerType::get(context, 0), /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+      llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)), "art.exception.currentHandler");
 
   GenBuiltinNumberToString();
   GenBuiltinStringToNumber();
@@ -335,9 +574,12 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   // guarantees no user function can ever be named "makeArray" too.
   std::vector<FunctionDecl *> instantiations;
   std::vector<FunctionDecl *> makeArrayInstantiations;
+  std::vector<FunctionDecl *> notNullInstantiations;
   for (auto &[mangledName, inst] : sema.Instantiations()) {
     if (mangledName.rfind("makeArray$", 0) == 0) {
       makeArrayInstantiations.push_back(inst);
+    } else if (mangledName.rfind("notNull$", 0) == 0) {
+      notNullInstantiations.push_back(inst);
     } else {
       instantiations.push_back(inst);
     }
@@ -347,6 +589,7 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   DeclareFunctionSignatures(externFunctions, /*allowMainRename=*/false);
   DeclareFunctionSignatures(instantiations, /*allowMainRename=*/false);
   DeclareFunctionSignatures(makeArrayInstantiations, /*allowMainRename=*/false);
+  DeclareFunctionSignatures(notNullInstantiations, /*allowMainRename=*/false);
   // Every closure literal Sema found, declared the same "signature
   // first, body later" way as everything else above - a closure can be
   // referenced before its own textual position (e.g. stored in a
@@ -372,6 +615,7 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
     if (fn->body) GenFunction(fn);
   for (auto *fn : sema.Closures()) GenClosureFunction(fn);
   for (auto *fn : makeArrayInstantiations) GenBuiltinMakeArray(fn);
+  for (auto *fn : notNullInstantiations) GenBuiltinNotNull(fn);
   // program.externFunctions and a generic `declare function`'s own
   // instantiations (body == nullptr) stay as bare external declarations,
   // resolved at link time against whatever object/library actually
@@ -744,6 +988,28 @@ void Codegen::GenBuiltinMakeArray(FunctionDecl *inst) {
   currentFunction = nullptr;
 }
 
+void Codegen::GenBuiltinNotNull(FunctionDecl *inst) {
+  // `inst->resolvedReturnType` is Nullable(T) - `*elementType` is T
+  // itself, whatever it actually is for this instantiation.
+  const ResolvedType &innerType = *inst->resolvedReturnType.elementType;
+  llvm::Type *innerTy = MapType(innerType);
+  uint64_t bytes = module->getDataLayout().getTypeAllocSize(innerTy).getFixedValue();
+
+  llvm::Function *fn = llvmFunctions.at(inst->name);
+  currentFunction = fn;
+  auto *entry = llvm::BasicBlock::Create(context, "entry", fn);
+  builder.SetInsertPoint(entry);
+
+  llvm::Value *vArg = fn->getArg(0);
+  vArg->setName("v");
+
+  llvm::Value *cellPtr = GenHeapAlloc(bytes);
+  builder.CreateStore(vArg, cellPtr);
+  builder.CreateRet(cellPtr);
+
+  currentFunction = nullptr;
+}
+
 void Codegen::GenFunction(FunctionDecl *decl) {
   llvm::Function *fn = llvmFunctions.at(decl->name);
   currentFunction = fn;
@@ -923,8 +1189,35 @@ void Codegen::GenStmt(Stmt *stmt) {
     builder.CreateCondBr(condVal, bodyBB, endBB);
 
     builder.SetInsertPoint(bodyBB);
+    scopeStack.push_back({.kind = ScopeExit::Kind::Loop, .breakTarget = endBB, .continueTarget = condBB});
     GenStmt(stmt->body.get());
+    scopeStack.pop_back();
     if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(endBB);
+    break;
+  }
+
+  case StmtKind::DoWhile: {
+    auto *bodyBB = llvm::BasicBlock::Create(context, "dowhile.body", currentFunction);
+    auto *condBB = llvm::BasicBlock::Create(context, "dowhile.cond", currentFunction);
+    auto *endBB = llvm::BasicBlock::Create(context, "dowhile.end", currentFunction);
+
+    // Unlike While, the body runs unconditionally the first time - the
+    // condition isn't checked until after it (see ast.h's own doc
+    // comment on StmtKind::DoWhile).
+    builder.CreateBr(bodyBB);
+    builder.SetInsertPoint(bodyBB);
+    // `continue` re-checks the condition, same as While - it doesn't
+    // re-run the body unconditionally the way the very first entry does.
+    scopeStack.push_back({.kind = ScopeExit::Kind::Loop, .breakTarget = endBB, .continueTarget = condBB});
+    GenStmt(stmt->body.get());
+    scopeStack.pop_back();
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(condBB);
+
+    builder.SetInsertPoint(condBB);
+    llvm::Value *condVal = GenExpr(stmt->cond.get());
+    builder.CreateCondBr(condVal, bodyBB, endBB);
 
     builder.SetInsertPoint(endBB);
     break;
@@ -946,7 +1239,12 @@ void Codegen::GenStmt(Stmt *stmt) {
     builder.CreateCondBr(condVal, bodyBB, endBB);
 
     builder.SetInsertPoint(bodyBB);
+    // `continue` goes to updateBB (not condBB) - a real for-loop's
+    // update still has to run before the condition is re-checked, unlike
+    // While/DoWhile where there's no separate update step at all.
+    scopeStack.push_back({.kind = ScopeExit::Kind::Loop, .breakTarget = endBB, .continueTarget = updateBB});
     GenStmt(stmt->body.get());
+    scopeStack.pop_back();
     if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(updateBB);
 
     builder.SetInsertPoint(updateBB);
@@ -1009,7 +1307,9 @@ void Codegen::GenStmt(Stmt *stmt) {
       builder.CreateStore(elemVal, varAlloca);
       Declare(stmt->varName, varAlloca, varTy);
     }
+    scopeStack.push_back({.kind = ScopeExit::Kind::Loop, .breakTarget = endBB, .continueTarget = updateBB});
     GenStmt(stmt->body.get());
+    scopeStack.pop_back();
     if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(updateBB);
 
     builder.SetInsertPoint(updateBB);
@@ -1023,11 +1323,275 @@ void Codegen::GenStmt(Stmt *stmt) {
   }
 
   case StmtKind::Return: {
+    // The return VALUE (if any) is evaluated first, while every
+    // currently-active try handler is still genuinely active - if
+    // evaluating it throws (a call to something that itself throws), that
+    // exception has to be caught by whatever's active at THIS point, and
+    // this return never actually completes at all (control already
+    // jumped away via longjmp - the cleanup/CreateRet below is simply
+    // never reached on that path). Only once it's evaluated
+    // successfully does this function's own try frames actually need
+    // popping (see GenExceptionHandlerCleanup) - stopBelow 0 pops every
+    // one still active, the whole current function being exited.
     if (stmt->expr) {
-      builder.CreateRet(GenExpr(stmt->expr.get()));
+      llvm::Value *val = GenExpr(stmt->expr.get());
+      GenExceptionHandlerCleanup(0);
+      builder.CreateRet(val);
     } else {
+      GenExceptionHandlerCleanup(0);
       builder.CreateRetVoid();
     }
+    break;
+  }
+
+  case StmtKind::Break: {
+    // Sema (loopDepth/switchDepth) already proved this is inside a real
+    // loop/switch, so a Loop-kind frame is guaranteed to exist somewhere
+    // on scopeStack - break always means "the nearest enclosing one".
+    // Every try frame ABOVE it (nested inside it, between it and this
+    // break) needs popping on the way out - see GenExceptionHandlerCleanup.
+    size_t targetIdx = scopeStack.size();
+    for (size_t i = scopeStack.size(); i-- > 0;) {
+      if (scopeStack[i].kind == ScopeExit::Kind::Loop) {
+        targetIdx = i;
+        break;
+      }
+    }
+    GenExceptionHandlerCleanup(targetIdx + 1);
+    builder.CreateBr(scopeStack[targetIdx].breakTarget);
+    break;
+  }
+
+  case StmtKind::Continue: {
+    // Unlike Break, this searches for a Loop-kind frame that actually has
+    // a continueTarget instead of always using the nearest Loop-kind one
+    // - a switch frame's own continueTarget is null (see ScopeExit's own
+    // doc comment), so `continue` inside a switch skips right past it to
+    // the nearest enclosing LOOP, matching real JS. Sema (loopDepth > 0)
+    // already proved one exists somewhere on this stack. Every try frame
+    // ABOVE the target also needs popping, same as Break.
+    size_t targetIdx = scopeStack.size();
+    for (size_t i = scopeStack.size(); i-- > 0;) {
+      if (scopeStack[i].kind == ScopeExit::Kind::Loop && scopeStack[i].continueTarget) {
+        targetIdx = i;
+        break;
+      }
+    }
+    GenExceptionHandlerCleanup(targetIdx + 1);
+    builder.CreateBr(scopeStack[targetIdx].continueTarget);
+    break;
+  }
+
+  case StmtKind::Switch: {
+    llvm::Value *discriminant = GenExpr(stmt->expr.get());
+    TypeTag discTag = stmt->expr->resolvedType.tag;
+
+    auto *endBB = llvm::BasicBlock::Create(context, "switch.end", currentFunction);
+    size_t n = stmt->statements.size();
+    std::vector<llvm::BasicBlock *> bodyBBs(n);
+    llvm::BasicBlock *defaultBodyBB = nullptr;
+    for (size_t i = 0; i < n; i++) {
+      bodyBBs[i] = llvm::BasicBlock::Create(context, "switch.arm" + std::to_string(i), currentFunction);
+      if (!stmt->statements[i]->expr) defaultBodyBB = bodyBBs[i]; // `default:` arm
+    }
+    // No case at all (only `default:`, or an entirely empty switch) is
+    // legal - the fallback below still correctly targets endBB in that
+    // case, same as a switch whose discriminant matches nothing.
+    llvm::BasicBlock *noMatchTarget = defaultBodyBB ? defaultBodyBB : endBB;
+
+    // A chain of test blocks, one per `case` arm (in source order,
+    // `default:` skipped - it has no value of its own to test, it's only
+    // ever reached as the final fallback above, or by falling through
+    // from an earlier arm below). Each false edge falls through to the
+    // NEXT case's own test, so the whole chain reads top to bottom the
+    // same way a real if/else-if chain would.
+    std::vector<llvm::BasicBlock *> testBBs;
+    for (size_t i = 0; i < n; i++) {
+      if (!stmt->statements[i]->expr) continue;
+      testBBs.push_back(llvm::BasicBlock::Create(context, "switch.test" + std::to_string(i), currentFunction));
+    }
+
+    builder.CreateBr(testBBs.empty() ? noMatchTarget : testBBs[0]);
+    size_t testIdx = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (!stmt->statements[i]->expr) continue;
+      builder.SetInsertPoint(testBBs[testIdx]);
+      llvm::Value *caseVal = GenExpr(stmt->statements[i]->expr.get());
+      llvm::Value *matches = GenEqualityCheck(discriminant, caseVal, discTag);
+      llvm::BasicBlock *onFalse = (testIdx + 1 < testBBs.size()) ? testBBs[testIdx + 1] : noMatchTarget;
+      builder.CreateCondBr(matches, bodyBBs[i], onFalse);
+      testIdx++;
+    }
+
+    // Arm bodies, in source order - each one falls through into the
+    // NEXT arm (real switch fallthrough, matching JS) unless it already
+    // ends in a terminator (a `break`, `return`, or another already-
+    // exhaustive control-flow statement).
+    scopeStack.push_back({.kind = ScopeExit::Kind::Loop, .breakTarget = endBB}); // continueTarget left null - see ScopeExit's own doc comment
+    for (size_t i = 0; i < n; i++) {
+      builder.SetInsertPoint(bodyBBs[i]);
+      for (auto &s : stmt->statements[i]->statements) {
+        GenStmt(s.get());
+        if (builder.GetInsertBlock()->getTerminator()) break; // rest is unreachable
+      }
+      if (!builder.GetInsertBlock()->getTerminator()) {
+        builder.CreateBr(i + 1 < n ? bodyBBs[i + 1] : endBB);
+      }
+    }
+    scopeStack.pop_back();
+
+    builder.SetInsertPoint(endBB);
+    break;
+  }
+
+  case StmtKind::Case:
+    // Never generated directly - StmtKind::Switch's own case above
+    // always reaches an arm's statements through `stmt->statements[i]`
+    // itself (a Case node), not through a recursive GenStmt call on the
+    // Case node. Unreachable in practice; see Sema's own identical
+    // fallback (CheckStmt's StmtKind::Case case) for why this is still
+    // handled rather than omitted.
+    for (auto &s : stmt->statements) GenStmt(s.get());
+    break;
+
+  case StmtKind::Destructure: {
+    // The source struct is evaluated exactly once, regardless of how
+    // many bindings read from it - same field-GEP pattern GenLValue's
+    // own Member case already uses for an ordinary `obj.field` read.
+    llvm::Value *objPtr = GenExpr(stmt->expr.get());
+    const std::string &ifaceName = stmt->expr->resolvedType.structName;
+    llvm::StructType *structTy = GetOrCreateStructType(ifaceName);
+    InterfaceDecl *iface = sema.Interfaces().at(ifaceName);
+    for (auto &b : stmt->destructureBindings) {
+      int idx = FieldIndex(iface, b.fieldName);
+      llvm::Type *fieldTy = MapType(iface->fields[idx].resolvedType);
+      llvm::Value *fieldPtr = builder.CreateStructGEP(structTy, objPtr, StructFieldGepIndex(iface, idx));
+      llvm::Value *val = builder.CreateLoad(fieldTy, fieldPtr);
+      // isCapturedByClosure lives on the whole Destructure Stmt, not
+      // per-binding (see its own doc comment on Stmt) - if ANY binding
+      // from this pattern is captured, every one of them is boxed, even
+      // ones that individually aren't. Safe (boxing is never wrong, just
+      // occasionally unnecessary), and far simpler than threading
+      // per-binding capture tracking through Sema's Declare/Lookup,
+      // which are built around one binding per declaration site.
+      if (stmt->isCapturedByClosure) {
+        llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+        llvm::AllocaInst *slot = CreateEntryAlloca(currentFunction, ptrTy, b.localName);
+        uint64_t bytes = module->getDataLayout().getTypeAllocSize(fieldTy).getFixedValue();
+        llvm::Value *cellPtr = GenHeapAlloc(bytes);
+        builder.CreateStore(val, cellPtr);
+        builder.CreateStore(cellPtr, slot);
+        Declare(b.localName, slot, fieldTy, /*isBoxed=*/true);
+      } else {
+        llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, fieldTy, b.localName);
+        builder.CreateStore(val, alloca);
+        Declare(b.localName, alloca, fieldTy);
+      }
+    }
+    break;
+  }
+
+  case StmtKind::Try: {
+    llvm::StructType *frameTy = GetExceptionFrameType();
+    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+    // Entry-block alloca, same convention every other local already
+    // uses - correct even under recursion or a try inside a loop, since
+    // `alloca` allocates fresh stack space on every actual call/iteration
+    // of the function that contains it; there's exactly one active copy
+    // of this frame per dynamically-active try, never shared.
+    llvm::AllocaInst *frame = CreateEntryAlloca(currentFunction, frameTy, "try.frame");
+
+    // Push: save the currently-active handler into this frame's own
+    // "prev" field, then make this frame the new active one.
+    llvm::Value *prevHandler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
+    llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, frame, 1);
+    builder.CreateStore(prevHandler, prevFieldPtr);
+    builder.CreateStore(frame, exceptionCurrentHandler);
+
+    llvm::Value *jmpBufPtr = builder.CreateStructGEP(frameTy, frame, 0);
+    llvm::Value *rc = builder.CreateCall(setjmpFn, {jmpBufPtr});
+    llvm::Value *isFirstEntry = builder.CreateICmpEQ(rc, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0));
+
+    auto *tryBB = llvm::BasicBlock::Create(context, "try.body", currentFunction);
+    auto *catchBB = llvm::BasicBlock::Create(context, "try.catch", currentFunction);
+    auto *endBB = llvm::BasicBlock::Create(context, "try.end", currentFunction);
+    builder.CreateCondBr(isFirstEntry, tryBB, catchBB);
+
+    builder.SetInsertPoint(tryBB);
+    scopeStack.push_back({.kind = ScopeExit::Kind::Try, .framePtr = frame});
+    GenStmt(stmt->body.get());
+    scopeStack.pop_back();
+    if (!builder.GetInsertBlock()->getTerminator()) {
+      // Normal completion (no exception, no early exit - both of those
+      // are handled elsewhere: GenExceptionHandlerCleanup for an early
+      // exit, GenStmt's own Throw case for an exception). Restore the
+      // handler that was active before this try, so a later, unrelated
+      // try/throw doesn't see this now-inactive frame.
+      builder.CreateStore(prevHandler, exceptionCurrentHandler);
+      builder.CreateBr(endBB);
+    }
+
+    builder.SetInsertPoint(catchBB);
+    // The handler was already popped by Throw's own codegen before the
+    // longjmp that resumed execution here fired - nothing to restore on
+    // this path.
+    llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, frame, 2);
+    llvm::Value *thrownVal = builder.CreateLoad(ptrTy, thrownFieldPtr);
+    llvm::Type *catchVarTy = MapType(stmt->resolvedVarType);
+    // Same boxed-vs-plain split every other local declaration already
+    // has (see GenStmt's VarDecl case) - a closure capturing the caught
+    // exception variable needs a real heap cell, not a stack slot that's
+    // about to go out of scope.
+    if (stmt->isCapturedByClosure) {
+      llvm::AllocaInst *slot = CreateEntryAlloca(currentFunction, ptrTy, stmt->varName);
+      uint64_t bytes = module->getDataLayout().getTypeAllocSize(catchVarTy).getFixedValue();
+      llvm::Value *cellPtr = GenHeapAlloc(bytes);
+      builder.CreateStore(thrownVal, cellPtr);
+      builder.CreateStore(cellPtr, slot);
+      Declare(stmt->varName, slot, catchVarTy, /*isBoxed=*/true);
+    } else {
+      llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, catchVarTy, stmt->varName);
+      builder.CreateStore(thrownVal, alloca);
+      Declare(stmt->varName, alloca, catchVarTy);
+    }
+    GenStmt(stmt->elseBranch.get());
+    if (!builder.GetInsertBlock()->getTerminator()) builder.CreateBr(endBB);
+
+    builder.SetInsertPoint(endBB);
+    break;
+  }
+
+  case StmtKind::Throw: {
+    llvm::Value *errorVal = GenExpr(stmt->expr.get()); // an Error* (ptr)
+    llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+    llvm::Value *handler = builder.CreateLoad(ptrTy, exceptionCurrentHandler);
+    llvm::Value *hasHandler = builder.CreateICmpNE(handler, llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)));
+
+    auto *handledBB = llvm::BasicBlock::Create(context, "throw.handled", currentFunction);
+    auto *uncaughtBB = llvm::BasicBlock::Create(context, "throw.uncaught", currentFunction);
+    builder.CreateCondBr(hasHandler, handledBB, uncaughtBB);
+
+    // No active handler anywhere - matches real JS's "an uncaught
+    // exception terminates the program" (no message printed yet - a
+    // real follow-up, not attempted here to keep this v1's actual
+    // control-flow mechanism the sole focus).
+    builder.SetInsertPoint(uncaughtBB);
+    builder.CreateCall(abortFn, {});
+    builder.CreateUnreachable();
+
+    builder.SetInsertPoint(handledBB);
+    llvm::StructType *frameTy = GetExceptionFrameType();
+    // Pop BEFORE jumping - once the catch block is entered, it is no
+    // longer "inside" its own try (matches GenStmt's Try case, which
+    // does NOT re-pop on the catch path, since this already did).
+    llvm::Value *prevFieldPtr = builder.CreateStructGEP(frameTy, handler, 1);
+    llvm::Value *prev = builder.CreateLoad(ptrTy, prevFieldPtr);
+    builder.CreateStore(prev, exceptionCurrentHandler);
+    llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, handler, 2);
+    builder.CreateStore(errorVal, thrownFieldPtr);
+    llvm::Value *jmpBufPtr = builder.CreateStructGEP(frameTy, handler, 0);
+    builder.CreateCall(longjmpFn, {jmpBufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 1)});
+    builder.CreateUnreachable();
     break;
   }
 
@@ -1083,7 +1647,7 @@ Codegen::LValue Codegen::GenLValue(Expr *expr) {
   llvm::StructType *structTy = GetOrCreateStructType(ifaceName);
   InterfaceDecl *iface = sema.Interfaces().at(ifaceName);
   int idx = FieldIndex(iface, expr->name);
-  llvm::Value *fieldPtr = builder.CreateStructGEP(structTy, objPtr, idx);
+  llvm::Value *fieldPtr = builder.CreateStructGEP(structTy, objPtr, StructFieldGepIndex(iface, idx));
   return {fieldPtr, MapType(iface->fields[idx].resolvedType), false};
 }
 
@@ -1091,7 +1655,7 @@ Codegen::LValue Codegen::GenLValue(Expr *expr) {
 // Expressions
 // ---------------------------------------------------------------------
 
-llvm::Value *Codegen::GenExpr(Expr *expr) {
+llvm::Value *Codegen::GenExprInner(Expr *expr) {
   switch (expr->kind) {
   case ExprKind::NumberLiteral:
     return llvm::ConstantFP::get(llvm::Type::getDoubleTy(context), expr->numberValue);
@@ -1102,7 +1666,65 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
   case ExprKind::StringLiteral:
     return GenStringLiteral(expr->name);
 
+  case ExprKind::NullLiteral:
+    if (expr->resolvedType.tag == TypeTag::Any) {
+      // `any`'s own `null` needs a REAL box (tag AnyTag::Null) - unlike
+      // Nullable(T)'s bare null pointer below, `typeof` still has to read
+      // an actual tag byte out of this, and a bare null pointer has
+      // nothing to read (see Sema::CheckExpr's own NullLiteral case).
+      llvm::StructType *boxTy = GetAnyBoxType();
+      llvm::Value *box = GenHeapAlloc(module->getDataLayout().getTypeAllocSize(boxTy).getFixedValue());
+      builder.CreateStore(
+          llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), static_cast<uint64_t>(AnyTag::Null)),
+          builder.CreateStructGEP(boxTy, box, 0));
+      builder.CreateStore(llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)),
+                           builder.CreateStructGEP(boxTy, box, 1));
+      return box;
+    }
+    // The boxed representation's own "absent" value (see TypeTag::
+    // Nullable's own doc comment) - a plain null pointer, regardless of
+    // what the wrapped T actually is.
+    return llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0));
+
   case ExprKind::Identifier: {
+    if (expr->isNarrowedNonNull) {
+      // Narrowed (see Expr::isNarrowedNonNull's own doc comment): the
+      // variable's own storage is still the boxed `ptr` a Nullable(T)
+      // always is (see TypeTag::Nullable's own doc comment) regardless
+      // of what T itself is - one more load, through that pointer, is
+      // what actually turns "the box" into "the T inside it".
+      // Deliberately checked and handled BEFORE the ordinary
+      // Handler-value branch below: if T itself happens to be Handler
+      // (a nullable handler variable), that branch's own assumption -
+      // the variable's OWN declared type already IS Handler, not
+      // Nullable(Handler) - would be wrong here.
+      llvm::Value *boxPtr = LoadVar(Lookup(expr->name), expr->name);
+      return builder.CreateLoad(MapType(expr->resolvedType), boxPtr);
+    }
+    if (expr->isNarrowedAny) {
+      // Narrowed via `typeof` (see Expr::isNarrowedAny's own doc
+      // comment): the variable's own storage is still an `any` box - load
+      // its `payload` field, then unwrap according to whichever of the
+      // three narrowable concrete types `expr->resolvedType` actually is
+      // now (see GenBoxAny for the inverse - how each of these three got
+      // stored in the first place). String needs no further unwrapping:
+      // its payload IS the string's own pointer already (see GenBoxAny's
+      // own String case).
+      llvm::Value *boxPtr = LoadVar(Lookup(expr->name), expr->name);
+      llvm::Value *payload =
+          builder.CreateLoad(llvm::PointerType::get(context, 0), builder.CreateStructGEP(GetAnyBoxType(), boxPtr, 1));
+      switch (expr->resolvedType.tag) {
+      case TypeTag::Number:
+        return builder.CreateLoad(llvm::Type::getDoubleTy(context), payload);
+      case TypeTag::Boolean: {
+        llvm::Value *byte = builder.CreateLoad(llvm::Type::getInt8Ty(context), payload);
+        return builder.CreateICmpNE(byte, llvm::ConstantInt::get(llvm::Type::getInt8Ty(context), 0));
+      }
+      case TypeTag::String:
+      default:
+        return payload;
+      }
+    }
     if (expr->resolvedType.tag == TypeTag::Handler) {
       // A Handler-typed Identifier is either a real local/global variable
       // holding a Handler value (e.g. a parameter forwarded into another
@@ -1155,8 +1777,8 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
 
     if (operandTag == TypeTag::String) {
       if (op == "+") return GenStringConcat(lhsVal, rhsVal);
-      if (op == "==") return GenStringEquals(lhsVal, rhsVal);
-      if (op == "!=") return builder.CreateNot(GenStringEquals(lhsVal, rhsVal));
+      if (op == "==") return GenEqualityCheck(lhsVal, rhsVal, operandTag);
+      if (op == "!=") return builder.CreateNot(GenEqualityCheck(lhsVal, rhsVal, operandTag));
       throw std::runtime_error("codegen: unsupported string operator '" + op + "'");
     }
 
@@ -1170,41 +1792,51 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     if (op == ">") return builder.CreateFCmpOGT(lhsVal, rhsVal);
     if (op == ">=") return builder.CreateFCmpOGE(lhsVal, rhsVal);
 
-    if (operandTag == TypeTag::Handler) {
-      // A Handler value is a 2-word {fn, env} aggregate, not a bare
-      // pointer - the generic ICmpEQ/ICmpNE fallback below doesn't
-      // accept an aggregate operand, and even if it did, comparing only
-      // raw bytes would be structurally right anyway only by accident.
-      // Equal means both fields match: same underlying function AND
-      // same captured environment - two closures compiled from the same
-      // source literal (e.g. two different loop iterations) share one
-      // generated thunk function pointer but have different envs, and
-      // must compare unequal, matching real JS reference semantics for
-      // closures.
-      llvm::Value *lhsFn = builder.CreateExtractValue(lhsVal, 0);
-      llvm::Value *rhsFn = builder.CreateExtractValue(rhsVal, 0);
-      llvm::Value *lhsEnv = builder.CreateExtractValue(lhsVal, 1);
-      llvm::Value *rhsEnv = builder.CreateExtractValue(rhsVal, 1);
-      llvm::Value *bothEqual =
-          builder.CreateAnd(builder.CreateICmpEQ(lhsFn, rhsFn), builder.CreateICmpEQ(lhsEnv, rhsEnv));
-      if (op == "==") return bothEqual;
-      if (op == "!=") return builder.CreateNot(bothEqual);
-      throw std::runtime_error("codegen: unsupported handler operator '" + op + "'");
+    // '&'/'|'/'^'/'<<'/'>>'/'>>>' - real JS bitwise/shift semantics: each
+    // operand truncates to a 32-bit *signed* int (JS's ToInt32 - take the
+    // low 32 bits of the double's integer value, mod 2^32, interpreted as
+    // signed), the operator runs on those bits, and the i32 result widens
+    // back to a double (sign-extended, so a negative result round-trips
+    // correctly - e.g. ~0 is -1, not 4294967295). A shift amount is
+    // additionally masked to 0-31 (`& 31`), matching JS - `1 << 32` is
+    // `1`, not `0`, since only the low 5 bits of the shift count matter.
+    // '>>>' is unsigned: the same bits, but zero-extended back to double
+    // instead of sign-extended, so a negative operand comes back as a
+    // large positive number instead of staying negative.
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>" || op == ">>>") {
+      llvm::Type *i32Ty = llvm::Type::getInt32Ty(context);
+      llvm::Type *dblTy = llvm::Type::getDoubleTy(context);
+      llvm::Value *lhsI32 = builder.CreateFPToSI(lhsVal, i32Ty);
+      llvm::Value *rhsI32 = builder.CreateFPToSI(rhsVal, i32Ty);
+      llvm::Value *result;
+      if (op == "&") {
+        result = builder.CreateAnd(lhsI32, rhsI32);
+      } else if (op == "|") {
+        result = builder.CreateOr(lhsI32, rhsI32);
+      } else if (op == "^") {
+        result = builder.CreateXor(lhsI32, rhsI32);
+      } else {
+        llvm::Value *shiftAmt =
+            builder.CreateAnd(rhsI32, llvm::ConstantInt::get(i32Ty, 31));
+        if (op == "<<") {
+          result = builder.CreateShl(lhsI32, shiftAmt);
+        } else if (op == ">>") {
+          result = builder.CreateAShr(lhsI32, shiftAmt);
+        } else { // ">>>"
+          llvm::Value *lhsU32 = builder.CreateBitCast(lhsI32, i32Ty); // same bits, treated unsigned below
+          result = builder.CreateLShr(lhsU32, shiftAmt);
+          return builder.CreateUIToFP(result, dblTy);
+        }
+      }
+      return builder.CreateSIToFP(result, dblTy);
     }
 
-    // Number compares as float; every other reachable tag here (Boolean,
-    // and - via Sema's generic "same tag" rule for "=="/"!=" - Struct/
-    // Array, both represented as `ptr`) compares as a plain integer/
-    // pointer identity check. String has its own branch above, Handler
-    // its own branch just above.
-    if (op == "==") {
-      return operandTag == TypeTag::Number ? builder.CreateFCmpOEQ(lhsVal, rhsVal)
-                                            : builder.CreateICmpEQ(lhsVal, rhsVal);
-    }
-    if (op == "!=") {
-      return operandTag == TypeTag::Number ? builder.CreateFCmpONE(lhsVal, rhsVal)
-                                            : builder.CreateICmpNE(lhsVal, rhsVal);
-    }
+    // Every other valid op for every other reachable operand type
+    // (Number, Boolean, Handler, Struct/Array pointers - String already
+    // handled above) has already returned by this point - Sema only
+    // ever allows "=="/"!=" to reach here, per its own Binary case.
+    if (op == "==") return GenEqualityCheck(lhsVal, rhsVal, operandTag);
+    if (op == "!=") return builder.CreateNot(GenEqualityCheck(lhsVal, rhsVal, operandTag));
     throw std::runtime_error("codegen: unknown binary operator '" + op + "'");
   }
 
@@ -1212,6 +1844,38 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     llvm::Value *operandVal = GenExpr(expr->operand.get());
     if (expr->op == "-") return builder.CreateFNeg(operandVal);
     if (expr->op == "!") return builder.CreateNot(operandVal);
+    if (expr->op == "~") {
+      // Same ToInt32-truncate-then-widen-back deal as the binary bitwise
+      // operators - see their own codegen comment (ExprKind::Binary).
+      llvm::Type *i32Ty = llvm::Type::getInt32Ty(context);
+      llvm::Value *asI32 = builder.CreateFPToSI(operandVal, i32Ty);
+      llvm::Value *notted = builder.CreateNot(asI32);
+      return builder.CreateSIToFP(notted, llvm::Type::getDoubleTy(context));
+    }
+    if (expr->op == "typeof") {
+      // `operandVal` is an `any` box (Sema guarantees this - see its own
+      // Unary "typeof" case) - read its own tag field and pick the
+      // matching string. Every candidate here is a compile-time constant
+      // (GenStringLiteral has no side effects of its own - see
+      // BuildStringConstant), so a plain select-chain works fine, no real
+      // branching needed. AnyTag::Object and AnyTag::Null share the
+      // "object" fallback (see AnyTag::Object's own doc comment).
+      llvm::Value *tagVal = builder.CreateLoad(llvm::Type::getInt32Ty(context),
+                                                builder.CreateStructGEP(GetAnyBoxType(), operandVal, 0));
+      auto tagConst = [&](AnyTag t) {
+        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), static_cast<uint64_t>(t));
+      };
+      llvm::Value *result = GenStringLiteral("object");
+      result = builder.CreateSelect(builder.CreateICmpEQ(tagVal, tagConst(AnyTag::Function)),
+                                     GenStringLiteral("function"), result);
+      result = builder.CreateSelect(builder.CreateICmpEQ(tagVal, tagConst(AnyTag::String)),
+                                     GenStringLiteral("string"), result);
+      result = builder.CreateSelect(builder.CreateICmpEQ(tagVal, tagConst(AnyTag::Boolean)),
+                                     GenStringLiteral("boolean"), result);
+      result = builder.CreateSelect(builder.CreateICmpEQ(tagVal, tagConst(AnyTag::Number)),
+                                     GenStringLiteral("number"), result);
+      return result;
+    }
     throw std::runtime_error("codegen: unknown unary operator '" + expr->op + "'");
   }
 
@@ -1252,6 +1916,45 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
       for (auto &argExpr : expr->elements) args.push_back(GenExpr(argExpr.get()));
       return builder.CreateCall(fnTy, fnPtr, args);
     }
+    if (expr->virtualSlot >= 0) {
+      // Real dynamic dispatch (see Expr::virtualSlot's own doc comment):
+      // load the vtable pointer out of the receiver's own field 0 (every
+      // class with hasVirtualDispatch uses that same slot - see
+      // GetOrCreateStructType), index into it at this call's own
+      // virtualSlot, and call through that function pointer - reaching
+      // whichever override actually applies to the real, dynamic
+      // instance, regardless of what was statically visible at this
+      // call site. `expr->elements[0]` is the receiver (spliced in by
+      // Sema's own CheckExpr Call case, same as an ordinary method call
+      // already has) - generated once, here, and reused directly as the
+      // call's own first argument rather than re-evaluating it.
+      llvm::Value *receiverVal = GenExpr(expr->elements[0].get());
+      llvm::StructType *receiverStructTy = GetOrCreateStructType(expr->elements[0]->resolvedType.structName);
+      llvm::Type *ptrTy = llvm::PointerType::get(context, 0);
+      llvm::Value *vtableFieldPtr = builder.CreateStructGEP(receiverStructTy, receiverVal, 0);
+      llvm::Value *vtablePtr = builder.CreateLoad(ptrTy, vtableFieldPtr);
+      llvm::Value *slotPtr =
+          builder.CreateGEP(ptrTy, vtablePtr, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), expr->virtualSlot)});
+      llvm::Value *fnPtr = builder.CreateLoad(ptrTy, slotPtr);
+
+      // The statically-resolved implementation's own LLVM function is
+      // used only for its signature shape - Sema already guarantees
+      // every override in the family shares an ABI-compatible one (see
+      // the vtable-computation pass's own exact-signature-match check).
+      llvm::Function *staticImpl = llvmFunctions.at(expr->resolvedCalleeName);
+      std::vector<llvm::Type *> paramTypes(staticImpl->getFunctionType()->params().begin(),
+                                            staticImpl->getFunctionType()->params().end());
+      auto *fnTy = llvm::FunctionType::get(staticImpl->getFunctionType()->getReturnType(), paramTypes, false);
+
+      std::vector<llvm::Value *> args;
+      args.reserve(expr->elements.size());
+      args.push_back(receiverVal);
+      for (size_t i = 1; i < expr->elements.size(); i++) {
+        llvm::Value *val = GenExpr(expr->elements[i].get());
+        AppendCallArg(args, val, expr->elements[i]->resolvedType, /*unpackHandler=*/false);
+      }
+      return builder.CreateCall(fnTy, fnPtr, args);
+    }
     // resolvedCalleeName is the plain name for an ordinary call, or the
     // mangled per-instantiation name for a generic one (see
     // Sema::CheckGenericCall) - either way, exactly what
@@ -1267,11 +1970,51 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     llvm::Function *callee = llvmFunctions.at(expr->resolvedCalleeName);
     FunctionDecl *calleeDecl = LookupCalleeDecl(expr->resolvedCalleeName);
     bool isExternCall = calleeDecl && calleeDecl->isExtern;
+    bool hasRestParam = calleeDecl && !calleeDecl->params.empty() && calleeDecl->params.back().isRest;
     std::vector<llvm::Value *> args;
-    args.reserve(expr->elements.size());
-    for (auto &argExpr : expr->elements) {
-      llvm::Value *val = GenExpr(argExpr.get());
-      AppendCallArg(args, val, argExpr->resolvedType, isExternCall);
+    args.reserve(calleeDecl ? calleeDecl->params.size() : expr->elements.size());
+    if (hasRestParam) {
+      // Every leading, fixed parameter is passed through as normal; every
+      // TRAILING call-site argument (from the rest parameter's own
+      // position onward, however many there are) is collected into one
+      // real, freshly allocated array instead - same construction
+      // ExprKind::ArrayLiteral's own codegen already uses (GC-malloc a
+      // data buffer sized to fit exactly this many elements, store each,
+      // GC-malloc the { length, data } header, store both) - and that
+      // single array becomes the actual last argument. See
+      // Sema::CheckExpr's own Call case for the matching per-argument
+      // type-checking this mirrors.
+      size_t fixedCount = calleeDecl->params.size() - 1;
+      for (size_t i = 0; i < fixedCount; i++) {
+        llvm::Value *val = GenExpr(expr->elements[i].get());
+        AppendCallArg(args, val, expr->elements[i]->resolvedType, isExternCall);
+      }
+      const ResolvedType &elemType = *calleeDecl->params.back().resolvedType.elementType;
+      llvm::Type *storageTy = ArrayElemStorageType(elemType);
+      uint64_t elemSize = module->getDataLayout().getTypeAllocSize(storageTy).getFixedValue();
+      uint64_t restCount = expr->elements.size() - fixedCount;
+
+      llvm::Value *dataPtr = builder.CreateCall(
+          gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), restCount * elemSize)});
+      for (uint64_t i = 0; i < restCount; i++) {
+        llvm::Value *val = GenExpr(expr->elements[fixedCount + i].get());
+        if (elemType.tag == TypeTag::Boolean) val = builder.CreateZExt(val, llvm::Type::getInt8Ty(context));
+        llvm::Value *elemPtr = builder.CreateGEP(storageTy, dataPtr,
+                                                  {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), i)});
+        builder.CreateStore(val, elemPtr);
+      }
+      llvm::Value *headerPtr =
+          builder.CreateCall(gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 16)});
+      llvm::Value *lengthFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 0);
+      builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), restCount), lengthFieldPtr);
+      llvm::Value *dataFieldPtr = builder.CreateStructGEP(GetArrayHeaderType(), headerPtr, 1);
+      builder.CreateStore(dataPtr, dataFieldPtr);
+      AppendCallArg(args, headerPtr, calleeDecl->params.back().resolvedType, isExternCall);
+    } else {
+      for (auto &argExpr : expr->elements) {
+        llvm::Value *val = GenExpr(argExpr.get());
+        AppendCallArg(args, val, argExpr->resolvedType, isExternCall);
+      }
     }
     return builder.CreateCall(callee, args);
   }
@@ -1312,13 +2055,27 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
     llvm::Value *instancePtr =
         builder.CreateCall(gcMallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), sizeBytes)});
 
+    // A class touched by inheritance gets its own vtable pointer stored
+    // into field 0 here, at construction time - this exact class's own
+    // vtable (see GetOrCreateVtable), never a base's, regardless of what
+    // static type this object literal is eventually assigned into. This
+    // is the one place that decision gets made: everywhere else (a
+    // method call through some base-typed reference) just reads
+    // whichever vtable pointer is already sitting in the instance.
+    if (iface->hasVirtualDispatch) {
+      llvm::GlobalVariable *vtable = GetOrCreateVtable(iface);
+      llvm::Value *vtableFieldPtr = builder.CreateStructGEP(structTy, instancePtr, 0);
+      builder.CreateStore(vtable, vtableFieldPtr);
+    }
+
     for (size_t idx = 0; idx < iface->fields.size(); idx++) {
       const std::string &fieldName = iface->fields[idx].name;
       Expr *valueExpr = nullptr;
       for (auto &f : expr->fields)
         if (f.first == fieldName) { valueExpr = f.second.get(); break; }
       llvm::Value *val = GenExpr(valueExpr);
-      llvm::Value *fieldPtr = builder.CreateStructGEP(structTy, instancePtr, static_cast<unsigned>(idx));
+      llvm::Value *fieldPtr =
+          builder.CreateStructGEP(structTy, instancePtr, StructFieldGepIndex(iface, static_cast<int>(idx)));
       builder.CreateStore(val, fieldPtr);
     }
     return instancePtr;
@@ -1653,6 +2410,13 @@ llvm::Value *Codegen::GenExpr(Expr *expr) {
   }
 
   throw std::runtime_error("codegen: unhandled expression kind");
+}
+
+// See this method's own doc comment in codegen.h.
+llvm::Value *Codegen::GenExpr(Expr *expr) {
+  llvm::Value *raw = GenExprInner(expr);
+  if (expr->needsAnyBox) return GenBoxAny(raw, expr->preBoxType);
+  return raw;
 }
 
 } // namespace ART

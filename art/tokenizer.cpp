@@ -35,6 +35,23 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::KwFrom: return "'from'";
   case TokenKind::KwExport: return "'export'";
   case TokenKind::KwClass: return "'class'";
+  case TokenKind::KwBreak: return "'break'";
+  case TokenKind::KwContinue: return "'continue'";
+  case TokenKind::KwDo: return "'do'";
+  case TokenKind::KwSwitch: return "'switch'";
+  case TokenKind::KwCase: return "'case'";
+  case TokenKind::KwDefault: return "'default'";
+  case TokenKind::KwEnum: return "'enum'";
+  case TokenKind::KwStatic: return "'static'";
+  case TokenKind::KwReadonly: return "'readonly'";
+  case TokenKind::KwTry: return "'try'";
+  case TokenKind::KwCatch: return "'catch'";
+  case TokenKind::KwThrow: return "'throw'";
+  case TokenKind::KwFinally: return "'finally'";
+  case TokenKind::KwExtends: return "'extends'";
+  case TokenKind::KwNull: return "'null'";
+  case TokenKind::KwAny: return "'any'";
+  case TokenKind::KwTypeof: return "'typeof'";
   case TokenKind::LParen: return "'('";
   case TokenKind::RParen: return "')'";
   case TokenKind::LBrace: return "'{'";
@@ -46,6 +63,7 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::Colon: return "':'";
   case TokenKind::ColonColon: return "'::'";
   case TokenKind::Dot: return "'.'";
+  case TokenKind::Ellipsis: return "'...'";
   case TokenKind::Question: return "'?'";
   case TokenKind::Plus: return "'+'";
   case TokenKind::Minus: return "'-'";
@@ -65,6 +83,11 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::PlusPlus: return "'++'";
   case TokenKind::MinusMinus: return "'--'";
   case TokenKind::FatArrow: return "'=>'";
+  case TokenKind::Amp: return "'&'";
+  case TokenKind::Pipe: return "'|'";
+  case TokenKind::Caret: return "'^'";
+  case TokenKind::Tilde: return "'~'";
+  case TokenKind::Shl: return "'<<'";
   }
   return "?";
 }
@@ -92,6 +115,23 @@ const std::unordered_map<std::string, TokenKind> kKeywords = {
     {"from", TokenKind::KwFrom},
     {"export", TokenKind::KwExport},
     {"class", TokenKind::KwClass},
+    {"break", TokenKind::KwBreak},
+    {"continue", TokenKind::KwContinue},
+    {"do", TokenKind::KwDo},
+    {"switch", TokenKind::KwSwitch},
+    {"case", TokenKind::KwCase},
+    {"default", TokenKind::KwDefault},
+    {"enum", TokenKind::KwEnum},
+    {"static", TokenKind::KwStatic},
+    {"readonly", TokenKind::KwReadonly},
+    {"try", TokenKind::KwTry},
+    {"catch", TokenKind::KwCatch},
+    {"throw", TokenKind::KwThrow},
+    {"finally", TokenKind::KwFinally},
+    {"extends", TokenKind::KwExtends},
+    {"null", TokenKind::KwNull},
+    {"any", TokenKind::KwAny},
+    {"typeof", TokenKind::KwTypeof},
 };
 }
 
@@ -295,7 +335,13 @@ Token Tokenizer::Next() {
   case ':':
     if (Current() == ':') { Advance(); return MakeToken(TokenKind::ColonColon, "::", loc); }
     return MakeToken(TokenKind::Colon, ":", loc);
-  case '.': return MakeToken(TokenKind::Dot, ".", loc);
+  case '.':
+    if (Current() == '.' && Peek(1) == '.') {
+      Advance();
+      Advance();
+      return MakeToken(TokenKind::Ellipsis, "...", loc);
+    }
+    return MakeToken(TokenKind::Dot, ".", loc);
   case '?': return MakeToken(TokenKind::Question, "?", loc);
   case '+':
     if (Current() == '+') { Advance(); return MakeToken(TokenKind::PlusPlus, "++", loc); }
@@ -315,16 +361,27 @@ Token Tokenizer::Next() {
     return MakeToken(TokenKind::Bang, "!", loc);
   case '<':
     if (Current() == '=') { Advance(); return MakeToken(TokenKind::LtEq, "<=", loc); }
+    // '<<' is safe to merge right here, unlike '>>' below - no ART type
+    // syntax ever starts with '<' (see ParseType), so two adjacent '<'
+    // characters can only ever mean the shift operator, never two nested
+    // generic opens.
+    if (Current() == '<') { Advance(); return MakeToken(TokenKind::Shl, "<<", loc); }
     return MakeToken(TokenKind::Lt, "<", loc);
   case '>':
     if (Current() == '=') { Advance(); return MakeToken(TokenKind::GtEq, ">=", loc); }
+    // Deliberately NOT merging '>>'/'>>>' here - see TokenKind::Shl's own
+    // doc comment. Every '>' stays its own Gt token; ParseShift merges
+    // adjacent ones back into a shift operator only where an operator is
+    // actually expected.
     return MakeToken(TokenKind::Gt, ">", loc);
   case '&':
     if (Current() == '&') { Advance(); return MakeToken(TokenKind::AndAnd, "&&", loc); }
-    return MakeError("unexpected character '&' (did you mean '&&'?)", loc);
+    return MakeToken(TokenKind::Amp, "&", loc);
   case '|':
     if (Current() == '|') { Advance(); return MakeToken(TokenKind::OrOr, "||", loc); }
-    return MakeError("unexpected character '|' (did you mean '||'?)", loc);
+    return MakeToken(TokenKind::Pipe, "|", loc);
+  case '^': return MakeToken(TokenKind::Caret, "^", loc);
+  case '~': return MakeToken(TokenKind::Tilde, "~", loc);
   default:
     return MakeError(std::string("unexpected character '") + c + "'", loc);
   }

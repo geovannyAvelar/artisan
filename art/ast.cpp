@@ -6,8 +6,10 @@ bool ResolvedType::operator==(const ResolvedType &other) const {
   if (tag != other.tag) return false;
   switch (tag) {
   case TypeTag::Array:
+  case TypeTag::Nullable:
     return *elementType == *other.elementType;
   case TypeTag::Struct:
+  case TypeTag::Enum:
     return structName == other.structName;
   case TypeTag::Handler:
     return *handlerParamTypes == *other.handlerParamTypes;
@@ -25,6 +27,9 @@ std::string ResolvedType::ToString() const {
   case TypeTag::Void: return "void";
   case TypeTag::Array: return elementType->ToString() + "[]";
   case TypeTag::Struct: return structName;
+  case TypeTag::Enum: return structName;
+  case TypeTag::Nullable: return elementType->ToString() + " | null";
+  case TypeTag::Any: return "any";
   case TypeTag::Handler: {
     std::string out = "(";
     for (size_t i = 0; i < handlerParamTypes->size(); i++) {
@@ -125,6 +130,16 @@ std::unique_ptr<Stmt> CloneStmt(const Stmt &stmt) {
   if (stmt.update) out->update = CloneExpr(*stmt.update);
   if (stmt.expr) out->expr = CloneExpr(*stmt.expr);
   for (auto &s : stmt.statements) out->statements.push_back(CloneStmt(*s));
+  // resolvedType deliberately left default here too, same reasoning as
+  // resolvedVarType above - only fieldName/localName are real source,
+  // re-resolved fresh per instantiation.
+  for (auto &b : stmt.destructureBindings) {
+    DestructureBinding cb;
+    cb.fieldName = b.fieldName;
+    cb.localName = b.localName;
+    cb.loc = b.loc;
+    out->destructureBindings.push_back(std::move(cb));
+  }
 
   return out;
 }
