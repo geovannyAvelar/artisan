@@ -172,9 +172,12 @@ llvm::StructType *Codegen::GetArrayHeaderType() {
 // GenStmt's Throw case (an unrelated call site, possibly in a
 // completely different function, with no compile-time visibility into
 // any particular try's own SSA values) and GenExceptionHandlerCleanup
-// (same function, early exit) read it the same way. `thrownValue` is an
-// Error* - see StmtKind::Try's own doc comment for why only one
-// throwable type exists right now.
+// (same function, early exit) read it the same way. `thrownValue` is a
+// GC-boxed, opaque cell pointer - any type can be thrown/caught now
+// (see `art.current_exception_type_id`'s own doc comment in codegen.h
+// for how a landing site tells whether it's the intended catch);
+// StmtKind::Throw's own codegen is what actually boxes the value
+// before storing it here.
 llvm::StructType *Codegen::GetExceptionFrameType() {
   if (!exceptionFrameType) {
     llvm::Type *jmpBufTy = llvm::ArrayType::get(llvm::Type::getInt8Ty(context), 512);
@@ -182,6 +185,16 @@ llvm::StructType *Codegen::GetExceptionFrameType() {
     exceptionFrameType = llvm::StructType::create(context, {jmpBufTy, ptrTy, ptrTy}, "art.exhandler");
   }
   return exceptionFrameType;
+}
+
+// See this method's own doc comment in codegen.h.
+int Codegen::GetOrAssignExceptionTypeId(const ResolvedType &t) {
+  std::string key = t.ToString();
+  auto it = exceptionTypeIds.find(key);
+  if (it != exceptionTypeIds.end()) return it->second;
+  int id = nextExceptionTypeId++;
+  exceptionTypeIds[key] = id;
+  return id;
 }
 
 // See this method's own doc comment in codegen.h.
@@ -537,6 +550,10 @@ std::unique_ptr<llvm::Module> Codegen::Generate(Program &program) {
   exceptionCurrentHandler = new llvm::GlobalVariable(
       *module, llvm::PointerType::get(context, 0), /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
       llvm::ConstantPointerNull::get(llvm::PointerType::get(context, 0)), "art.exception.currentHandler");
+  // See its own doc comment in codegen.h.
+  currentExceptionTypeId = new llvm::GlobalVariable(
+      *module, llvm::Type::getInt32Ty(context), /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+      llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0), "art.current_exception_type_id");
 
   GenBuiltinNumberToString();
   GenBuiltinStringToNumber();
@@ -1214,8 +1231,38 @@ void Codegen::GenTryCatchOnly(Stmt *stmt) {
   // The handler was already popped by GenRethrow before the longjmp that
   // resumed execution here fired - nothing to restore on this path.
   llvm::Value *thrownFieldPtr = builder.CreateStructGEP(frameTy, frame, 2);
-  llvm::Value *thrownVal = builder.CreateLoad(ptrTy, thrownFieldPtr);
+  llvm::Value *thrownVal = builder.CreateLoad(ptrTy, thrownFieldPtr); // a boxed cell ptr - see GenStmt's own Throw case
   llvm::Type *catchVarTy = MapType(stmt->resolvedVarType);
+
+  // Any type can be thrown/caught now (unlike this file's own single-
+  // throwable-type predecessor, where landing here always meant "this
+  // is definitely mine") - compare the in-flight exception's own
+  // compile-time-assigned type id against the one THIS catch clause
+  // resolved to. A match: unbox and run the catch body normally. No
+  // match: this try isn't the intended handler after all - re-propagate
+  // via GenRethrow, reusing the exact same "pop already done, just load
+  // the current handler and jump" tail every other propagation path
+  // already relies on. When this GenTryCatchOnly is running as the
+  // INNER frame inside GenTryWithFinallyAndCatch, `@art.exception.
+  // currentHandler` at this point is already the OUTER frame (restored
+  // by the FIRST GenRethrow call that got here), so this second
+  // GenRethrow call correctly resumes at the outer frame's own
+  // "outerCatchBB" - the exact same path already used for "the catch
+  // body itself threw," now also covering "the catch type didn't
+  // match," with no additional codegen needed anywhere else.
+  llvm::Value *inFlightTypeId = builder.CreateLoad(llvm::Type::getInt32Ty(context), currentExceptionTypeId);
+  int thisCatchTypeId = GetOrAssignExceptionTypeId(stmt->resolvedVarType);
+  llvm::Value *matches = builder.CreateICmpEQ(
+      inFlightTypeId, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), thisCatchTypeId));
+  auto *catchMatchBB = llvm::BasicBlock::Create(context, "try.catch.match", currentFunction);
+  auto *catchMismatchBB = llvm::BasicBlock::Create(context, "try.catch.mismatch", currentFunction);
+  builder.CreateCondBr(matches, catchMatchBB, catchMismatchBB);
+
+  builder.SetInsertPoint(catchMismatchBB);
+  GenRethrow(thrownVal);
+
+  builder.SetInsertPoint(catchMatchBB);
+  llvm::Value *caughtVal = builder.CreateLoad(catchVarTy, thrownVal); // unbox
   // Same boxed-vs-plain split every other local declaration already
   // has (see GenStmt's VarDecl case) - a closure capturing the caught
   // exception variable needs a real heap cell, not a stack slot that's
@@ -1224,12 +1271,12 @@ void Codegen::GenTryCatchOnly(Stmt *stmt) {
     llvm::AllocaInst *slot = CreateEntryAlloca(currentFunction, ptrTy, stmt->varName);
     uint64_t bytes = module->getDataLayout().getTypeAllocSize(catchVarTy).getFixedValue();
     llvm::Value *cellPtr = GenHeapAlloc(bytes);
-    builder.CreateStore(thrownVal, cellPtr);
+    builder.CreateStore(caughtVal, cellPtr);
     builder.CreateStore(cellPtr, slot);
     Declare(stmt->varName, slot, catchVarTy, /*isBoxed=*/true);
   } else {
     llvm::AllocaInst *alloca = CreateEntryAlloca(currentFunction, catchVarTy, stmt->varName);
-    builder.CreateStore(thrownVal, alloca);
+    builder.CreateStore(caughtVal, alloca);
     Declare(stmt->varName, alloca, catchVarTy);
   }
   GenStmt(stmt->elseBranch.get());
@@ -1706,8 +1753,21 @@ void Codegen::GenStmt(Stmt *stmt) {
   }
 
   case StmtKind::Throw: {
-    llvm::Value *errorVal = GenExpr(stmt->expr.get()); // an Error* (ptr)
-    GenRethrow(errorVal);
+    // Boxed on the heap regardless of the thrown type's own shape (a
+    // `number`/`boolean` isn't already `ptr`-shaped the way a struct
+    // like the old, single-throwable-type `Error` always was) - same
+    // "box it on the heap" idiom a closure's own captured-variable cell
+    // already uses. `art.current_exception_type_id` records WHICH type
+    // this is, so a landing `try`'s own catch clause can tell whether
+    // it's the intended handler - see that global's own doc comment.
+    llvm::Value *val = GenExpr(stmt->expr.get());
+    llvm::Type *valTy = MapType(stmt->expr->resolvedType);
+    uint64_t bytes = module->getDataLayout().getTypeAllocSize(valTy).getFixedValue();
+    llvm::Value *boxed = GenHeapAlloc(bytes);
+    builder.CreateStore(val, boxed);
+    int typeId = GetOrAssignExceptionTypeId(stmt->expr->resolvedType);
+    builder.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), typeId), currentExceptionTypeId);
+    GenRethrow(boxed);
     break;
   }
 

@@ -592,6 +592,24 @@ struct FunctionDecl {
   std::vector<Param> params;
   std::unique_ptr<TypeNode> returnType; // never null - defaults to Void
   ResolvedType resolvedReturnType;
+  // Optional `throws T` clause - see Parser::ParseParamsAndReturnType.
+  // Null/false for a function that can never let an exception escape.
+  // `throwsType` (the parsed syntax) is only ever set on the FunctionDecl
+  // the parser itself built - a generic instantiation's or a generic
+  // class method instantiation's own clone never gets its own
+  // `throwsType` populated (mirrors `returnType` itself, never
+  // populated on a clone either - only the resolved field is), which is
+  // why `declaresThrows` exists as its own explicit bool: it's the one
+  // place both an original FunctionDecl and every clone/instantiation
+  // of it agree on "does this function have a throws contract" without
+  // needing to know which shape produced it. Deliberately illegal on a
+  // closure (ExprKind::FunctionExpr's own `fn`) - see
+  // Sema::CheckExpr's FunctionExpr case for why and where that's
+  // enforced (a parse-level restriction here would need duplicating the
+  // check across every FunctionDecl-parsing call site for no benefit).
+  std::unique_ptr<TypeNode> throwsType;
+  ResolvedType resolvedThrowsType;
+  bool declaresThrows = false;
   std::unique_ptr<Stmt> body; // Block; always null for a `declare function` OR an uninstantiated generic template
   SourceLoc loc;
   // Which file this declaration came from (its resolved, canonical path -

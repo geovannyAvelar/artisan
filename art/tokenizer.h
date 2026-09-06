@@ -74,6 +74,9 @@ enum class TokenKind {
   // Sema::TryGetTypeofCheckedVar for the `typeof x === "..."` narrowing
   // pattern this exists to support.
   KwTypeof,
+  // `function foo(...): T throws U { ... }` - see
+  // FunctionDecl::throwsType's own doc comment.
+  KwThrows,
 
   // Punctuation
   LParen,

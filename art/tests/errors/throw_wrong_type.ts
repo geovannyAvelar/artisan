@@ -1,5 +1,6 @@
-// Expected error: 'throw' requires an Error value - a bare string (or
-// any other type) isn't throwable yet, only the one builtin Error type.
-function main(): number {
+// A throw with no enclosing try and no matching 'throws' on the
+// enclosing function - rejected (checked exceptions: every function
+// that can let an exception escape must declare it).
+function main(): void {
   throw "just a string";
 }

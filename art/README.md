@@ -854,45 +854,54 @@ extra bookkeeping: the bridge always copies it into artisan's own
 
 ## Exceptions
 
-`try { ... } catch (name: Error) { ... } finally { ... }` and `throw
+`try { ... } catch (name: T) { ... } finally { ... }` and `throw
 expr;` are real, non-local control flow - a `throw` deep inside a call
 stack jumps directly to the nearest enclosing `catch`, skipping every
-ordinary `return` in between, exactly like real TS/JS.
+ordinary `return` in between, exactly like real TS/JS. Unlike real
+TS/JS, exceptions are **checked**: a function that can let one escape
+must say so in its own signature, with an optional `throws T` clause -
+the compiler verifies every call site across the whole call graph, not
+just the one lexical block a `throw` happens to sit in.
 
 ```ts
-function mightFail(x: number): number {
-  if (x < 0) { throw { message: "x must be non-negative" }; }
+function mightFail(x: number): number throws string {
+  if (x < 0) { throw "x must be non-negative"; }
   return x * 2;
 }
 
 function main(): number {
   try {
     return mightFail(-1);
-  } catch (e: Error) {
+  } catch (e: string) {
     let label: Node = document.getElementById("error");
-    if (!label.isNull()) { label.textContent = e.message; }
+    if (!label.isNull()) { label.textContent = e; }
     return 0;
   }
 }
 ```
 
-One real, deliberate limit on this first version, because generalizing
-it needs infrastructure ART doesn't have yet:
+A function that calls `mightFail` without a matching `try`/`catch` must
+itself declare `throws string` - the exception propagates to *its*
+caller instead, the same check applied one level up. This holds even
+several functions deep with no local `try` anywhere in between (each
+intervening function just declares `throws string` and re-propagates) -
+the compiler traces the whole chain. Any type can be thrown/caught, not
+just a fixed `Error`-shaped struct - `catch (name: T)` matches
+structurally like any other type, and a mismatched `catch` doesn't stop
+an exception, it just lets it keep propagating (running any `finally`
+in between - see below).
 
-- **`Error` (`{ message: string }`) is the only throwable/catchable
-  type.** `throw` always needs one; `catch (name: Type)` must always
-  write `Error` as `Type`. Real, unrestricted polymorphic catching
-  (`catch` selecting among several different thrown types by their
-  actual runtime type) needs runtime type identification - ART has none
-  for this yet (`any`'s own `typeof` narrowing doesn't reach structs -
-  see [Dynamic typing](#dynamic-typing) - and there's still no
-  `instanceof`/downcasting either - see
-  [What's not in ART](#whats-not-in-art)) - so with exactly one
-  throwable type in flight, every active handler always matches
-  whatever's thrown, and there's no type-tag check to get wrong. `Error`
-  is a real, ordinary struct otherwise (built the normal way -
-  `{ message: "..." }`), not compiler magic beyond being the one thing
-  `throw`/`catch` recognize.
+**A closure can never declare `throws`, and must fully handle anything
+it might otherwise throw with its own `try`/`catch`** - it can't
+delegate to whatever function it's textually written inside, even if
+that function declares a matching `throws`. Same restriction applies to
+referencing a `throws`-declaring function as a plain Handler value
+(`let h: () => void = riskyFn;`) - not allowed either. Reason: a
+Handler value can be invoked later by native code (an event handler, a
+timer firing) with no ART exception-handling context on the call stack
+at that point - letting an exception reach that boundary uncaught would
+crash, not degrade gracefully, so the compiler closes it off entirely
+rather than leaving a sharp edge.
 
 Mechanism: `setjmp`/`longjmp`, called directly (never through a wrapper
 function - `setjmp` only captures a resumable state for the function
@@ -914,7 +923,25 @@ compiler stays self-contained" approach `makeArray<T>` already uses.
 
 An uncaught `throw` - no active handler anywhere - calls `abort()`,
 matching real JS's "an uncaught exception terminates the program" (no
-message is printed yet).
+message is printed yet). Because exceptions are checked, this should
+never actually happen for a program that compiles: Sema has already
+proven, at every throw/throwing-call site, that some ancestor `try` in
+the real dynamic call chain is designed to handle it - this is a
+runtime safety net for the mechanism itself, not something a correct
+program should ever reach.
+
+A `try`'s own `catch` clause can only ever be reached by an exception
+of the exact type it declared - checked exceptions make this a compile-
+time fact everywhere else, but a landing `try` still needs to tell, at
+runtime, "is this the type I actually declared, or one just passing
+through on its way to an outer handler" (an intervening `try` between
+where something's thrown and where it's finally caught has no reason to
+share that type). A small, compile-time-assigned integer id per
+distinct thrown/caught type - never a general runtime tag/dispatch
+system, just one comparison at each `try`'s own landing code, against
+the one constant its own `catch` resolved to - answers that: match,
+handle it normally; no match, run `finally` (if any) and keep
+propagating, exactly like the "passed through uncaught" case below.
 
 A `return`/`break`/`continue` that exits a `try` body early has to
 correctly restore the handler stack on its way out, or a *later*,

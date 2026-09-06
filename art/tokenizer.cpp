@@ -52,6 +52,7 @@ const char *TokenKindName(TokenKind kind) {
   case TokenKind::KwNull: return "'null'";
   case TokenKind::KwAny: return "'any'";
   case TokenKind::KwTypeof: return "'typeof'";
+  case TokenKind::KwThrows: return "'throws'";
   case TokenKind::LParen: return "'('";
   case TokenKind::RParen: return "')'";
   case TokenKind::LBrace: return "'{'";
@@ -132,6 +133,7 @@ const std::unordered_map<std::string, TokenKind> kKeywords = {
     {"null", TokenKind::KwNull},
     {"any", TokenKind::KwAny},
     {"typeof", TokenKind::KwTypeof},
+    {"throws", TokenKind::KwThrows},
 };
 }
 

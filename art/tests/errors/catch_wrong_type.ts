@@ -1,14 +1,16 @@
-// Expected error: a catch clause can only catch 'Error' right now -
-// there's no runtime type tag yet to tell two different thrown types
-// apart (see StmtKind::Try's own doc comment).
+// A catch whose declared type doesn't match what's actually thrown,
+// with no other enclosing try/throws to catch it either - rejected
+// (any type CAN be caught now - checked exceptions verify the actual
+// type at each throw/catch site instead of restricting to one
+// universal throwable type).
 interface NotAnError {
   code: number;
 }
 
-function main(): number {
+function main(): void {
   try {
-    throw { message: "x" };
+    throw "a string, not a NotAnError";
   } catch (e: NotAnError) {
-    return 0;
+    // wrong type - doesn't catch a thrown string
   }
 }

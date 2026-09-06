@@ -185,6 +185,10 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
       methodClone->params.push_back(std::move(cp));
     }
     methodClone->resolvedReturnType = ResolveType(m->returnType.get());
+    if (m->throwsType) {
+      methodClone->resolvedThrowsType = ResolveType(m->throwsType.get());
+      methodClone->declaresThrows = true;
+    }
 
     FunctionDecl *instMethod = methodClone.get();
     inst->methods.push_back(std::move(methodClone));
@@ -205,10 +209,13 @@ ResolvedType Sema::InstantiateInterface(InterfaceDecl *tmpl, const std::vector<R
       loopDepth = 0;
       switchDepth = 0;
       finallyDepth = 0;
+      std::vector<ActiveTry> savedActiveTrys = std::move(activeTrys);
+      activeTrys.clear();
       CheckStmt(instMethod->body.get());
       loopDepth = savedLoopDepth;
       switchDepth = savedSwitchDepth;
       finallyDepth = savedFinallyDepth;
+      activeTrys = std::move(savedActiveTrys);
       PopScope();
       frameStack.pop_back();
       if (instMethod->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(instMethod->body.get())) {
@@ -1077,6 +1084,13 @@ void Sema::RegisterFunctionSignature(FunctionDecl *fn, bool allowRestParam) {
   currentFile = fn->sourceFile;
   for (auto &p : fn->params) p.resolvedType = ResolveType(p.type.get());
   fn->resolvedReturnType = ResolveType(fn->returnType.get());
+  if (fn->throwsType) {
+    fn->resolvedThrowsType = ResolveType(fn->throwsType.get());
+    fn->declaresThrows = true;
+    if (fn->resolvedThrowsType.tag == TypeTag::Void) {
+      Error(fn->loc, "'throws void' isn't meaningful - a thrown value can't be void");
+    }
+  }
 }
 
 void Sema::CheckFunctionBody(FunctionDecl *decl) {
@@ -1096,10 +1110,13 @@ void Sema::CheckFunctionBody(FunctionDecl *decl) {
   loopDepth = 0;
   switchDepth = 0;
   finallyDepth = 0;
+  std::vector<ActiveTry> savedActiveTrys = std::move(activeTrys);
+  activeTrys.clear();
   CheckStmt(decl->body.get());
   loopDepth = savedLoopDepth;
   switchDepth = savedSwitchDepth;
   finallyDepth = savedFinallyDepth;
+  activeTrys = std::move(savedActiveTrys);
   PopScope();
   frameStack.pop_back();
   if (decl->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(decl->body.get())) {
@@ -1169,6 +1186,10 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
       clone->params.push_back(std::move(cp));
     }
     clone->resolvedReturnType = ResolveType(tmpl->returnType.get());
+    if (tmpl->throwsType) {
+      clone->resolvedThrowsType = ResolveType(tmpl->throwsType.get());
+      clone->declaresThrows = true;
+    }
 
     // Registered before the body is checked (not after) so a direct
     // self-recursive call to this exact instantiation inside its own
@@ -1192,10 +1213,13 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
       loopDepth = 0;
       switchDepth = 0;
       finallyDepth = 0;
+      std::vector<ActiveTry> savedActiveTrys = std::move(activeTrys);
+      activeTrys.clear();
       CheckStmt(inst->body.get());
       loopDepth = savedLoopDepth;
       switchDepth = savedSwitchDepth;
       finallyDepth = savedFinallyDepth;
+      activeTrys = std::move(savedActiveTrys);
       PopScope();
       frameStack.pop_back();
       if (inst->resolvedReturnType.tag != TypeTag::Void && !AlwaysReturns(inst->body.get())) {
@@ -1219,6 +1243,8 @@ ResolvedType Sema::CheckGenericCall(Expr *expr) {
   size_t n = std::min(inst->params.size(), expr->elements.size());
   for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &inst->params[i].resolvedType);
   for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
+
+  if (inst->declaresThrows) CheckThrowSite(expr->loc, inst->resolvedThrowsType, "call to '" + callee + "'");
 
   return inst->resolvedReturnType;
 }
@@ -1290,6 +1316,28 @@ bool Sema::AlwaysReturns(Stmt *stmt) {
   default:
     return false;
   }
+}
+
+// See this method's own doc comment in sema.h.
+bool Sema::CheckThrowSite(SourceLoc loc, const ResolvedType &u, const std::string &verb) {
+  for (auto it = activeTrys.rbegin(); it != activeTrys.rend(); ++it) {
+    if (it->catchType == u) return true;
+  }
+  if (currentFunction && currentFunction->declaresThrows && currentFunction->resolvedThrowsType == u) {
+    return true;
+  }
+  bool inClosure = currentFunction && currentFunction->name.rfind("$closure", 0) == 0;
+  std::string where = !currentFunction ? "at the top level (there's no function to declare 'throws' on)"
+                       : inClosure     ? "inside a closure, which can never declare 'throws' - it must "
+                                         "fully handle this itself with its own try/catch"
+                                       : "in function '" + currentFunction->name +
+                                             "', which doesn't declare 'throws " + u.ToString() + "'";
+  Error(loc, "unhandled " + verb + " of type '" + u.ToString() + "' " + where +
+                 " - wrap it in a matching 'try { ... } catch (e: " + u.ToString() + ") { ... }'" +
+                 (currentFunction && !inClosure
+                      ? ", or add 'throws " + u.ToString() + "' to the enclosing function's signature"
+                      : ""));
+  return false;
 }
 
 // See this method's own doc comment in sema.h.
@@ -1589,30 +1637,38 @@ void Sema::CheckStmt(Stmt *stmt) {
     break;
   }
   case StmtKind::Try: {
-    // Body is always a Block (see Parser::ParseTry) - CheckStmt's own
-    // Block case already pushes/pops its own scope, so nothing extra
-    // needed here for it.
-    CheckStmt(stmt->body.get());
-
-    // Catch is optional now that `finally` exists (see StmtKind::Try's
-    // own doc comment) - Parser::ParseTry already guarantees at least one
-    // of the two is present, so `declaredType` non-null is exactly "has a
-    // catch clause" here.
-    if (stmt->declaredType) {
-      ResolvedType catchType = ResolveType(stmt->declaredType.get());
-      if (catchType.tag != TypeTag::Unknown &&
-          !(catchType.tag == TypeTag::Struct && catchType.structName == "Error")) {
-        Error(stmt->loc, "a catch clause can only catch 'Error' right now - '" + catchType.ToString() +
-                              "' isn't a throwable/catchable type yet (only one exception type exists so "
-                              "far - see README.md's own note on why)");
-      }
+    // Catch is optional now that `finally` exists - Parser::ParseTry
+    // already guarantees at least one of the two is present, so
+    // `declaredType` non-null is exactly "has a catch clause" here.
+    // Resolved BEFORE checking the try body (unlike the type-unaware
+    // version of this check) so CheckThrowSite can already see it -
+    // any type is legal to catch now (checked exceptions verify
+    // end-to-end through the call graph instead of restricting to one
+    // universal throwable type - see CheckThrowSite's own doc comment).
+    bool hasCatch = stmt->declaredType != nullptr;
+    ResolvedType catchType;
+    if (hasCatch) {
+      catchType = ResolveType(stmt->declaredType.get());
       stmt->resolvedVarType = catchType;
+    }
+
+    // Pushed only when there's an actual catch clause - a finally-only
+    // try (no catch) never catches anything, matching
+    // GenTryFinallyOnly's own "always propagates" codegen; registering
+    // a phantom handler here would wrongly let a throw inside the body
+    // believe it's handled when it never actually is at runtime.
+    if (hasCatch) activeTrys.push_back({catchType});
+    CheckStmt(stmt->body.get());
+    if (hasCatch) activeTrys.pop_back(); // popped before catch/finally - neither is "inside" this try
+
+    if (hasCatch) {
       // One scope for the catch variable itself, wrapping the catch
       // body's own Block (which pushes its own separate inner scope for
       // its own statements) - same shape a function body's own params +
-      // Block already has (see CheckFunctionBody).
+      // Block already has (see CheckFunctionBody). Declared const -
+      // rebinding a caught exception isn't meaningful.
       PushScope();
-      Declare(stmt->loc, stmt->varName, catchType, /*isConst=*/false, nullptr, stmt);
+      Declare(stmt->loc, stmt->varName, catchType, /*isConst=*/true, nullptr, stmt);
       CheckStmt(stmt->elseBranch.get());
       PopScope();
     }
@@ -1640,8 +1696,12 @@ void Sema::CheckStmt(Stmt *stmt) {
       // semantics.
       Error(stmt->loc, "'throw' is not allowed inside a 'finally' block");
     }
-    ResolvedType errorType = ResolvedType::Struct("Error");
-    CheckExpr(stmt->expr.get(), &errorType);
+    ResolvedType u = CheckExpr(stmt->expr.get(), nullptr);
+    if (u.tag == TypeTag::Void) {
+      Error(stmt->loc, "cannot throw a value of type void");
+    } else if (u.tag != TypeTag::Unknown) {
+      CheckThrowSite(stmt->loc, u, "throw");
+    }
     break;
   }
   case StmtKind::Return: {
@@ -1947,6 +2007,20 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
                               "' can't be used as a value - only a void-returning function can "
                               "(as a handler)");
         actual = ResolvedType{};
+      } else if (fn->declaresThrows) {
+        // Same reasoning as a closure's own throws restriction (see
+        // ExprKind::FunctionExpr's case) - a Handler value can be
+        // invoked later by native code (an event handler, a timer) with
+        // no ART exception-handling context on the call stack at that
+        // point, so a `throws`-declaring function can't be referenced
+        // as one, even though it's perfectly fine to call directly.
+        Error(expr->loc, "function '" + expr->name +
+                              "' can't be used as a value - it declares 'throws " +
+                              fn->resolvedThrowsType.ToString() +
+                              "', and a Handler value may be invoked later with no exception-handling "
+                              "context on the call stack (an event handler, a timer) - call it directly "
+                              "(inside a matching try/catch) instead of passing it around as a value");
+        actual = ResolvedType{};
       } else {
         std::vector<ResolvedType> paramTypes;
         paramTypes.reserve(fn->params.size());
@@ -2178,6 +2252,7 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
         size_t n = std::min(fn->params.size(), expr->elements.size());
         for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
         for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
+        if (fn->declaresThrows) CheckThrowSite(expr->loc, fn->resolvedThrowsType, "call to '" + propName + "'");
         actual = fn->resolvedReturnType;
         break;
       }
@@ -2236,6 +2311,9 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
       for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &method->params[i + 1].resolvedType);
       for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
       expr->elements.insert(expr->elements.begin(), std::move(memberExpr->lhs));
+      if (method->declaresThrows) {
+        CheckThrowSite(expr->loc, method->resolvedThrowsType, "call to '" + memberExpr->name + "'");
+      }
       actual = method->resolvedReturnType;
       break;
     }
@@ -2290,6 +2368,7 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
           for (size_t i = 0; i < n; i++) CheckExpr(expr->elements[i].get(), &fn->params[i].resolvedType);
           for (size_t i = n; i < expr->elements.size(); i++) CheckExpr(expr->elements[i].get(), nullptr);
         }
+        if (fn->declaresThrows) CheckThrowSite(expr->loc, fn->resolvedThrowsType, "call to '" + callee + "'");
         actual = fn->resolvedReturnType;
         break;
       }
@@ -2669,6 +2748,20 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
                         "values) only supports void-returning functions, matching every actual use (event "
                         "handlers, timers, animation frames)");
     }
+    // A closure can never declare 'throws' - see FunctionDecl::throwsType's
+    // own doc comment for why (it may be invoked later by native code -
+    // an event handler, a timer - with no ART exception-handling context
+    // on the call stack at that point). It must fully self-handle
+    // anything it might otherwise throw, enforced below by giving it a
+    // fresh, empty activeTrys - so a throw/throwing call inside it can
+    // only ever be resolved by a try INSIDE this same closure, never by
+    // looking further out.
+    if (fn->throwsType) {
+      Error(expr->loc, "a closure ('function(...) {...}' used as a Handler value) can't declare 'throws' - it "
+                        "must fully handle any exception it might otherwise let escape with its own "
+                        "try/catch, since it may be invoked later by native code (an event handler, a timer) "
+                        "with no ART exception-handling context on the call stack at that point");
+    }
 
     FunctionDecl *savedCurrentFunction = currentFunction;
     currentFunction = fn;
@@ -2679,10 +2772,13 @@ ResolvedType Sema::CheckExpr(Expr *expr, const ResolvedType *expected) {
     loopDepth = 0;
     switchDepth = 0;
     finallyDepth = 0;
+    std::vector<ActiveTry> savedActiveTrys = std::move(activeTrys);
+    activeTrys.clear();
     CheckStmt(fn->body.get());
     loopDepth = savedLoopDepth;
     switchDepth = savedSwitchDepth;
     finallyDepth = savedFinallyDepth;
+    activeTrys = std::move(savedActiveTrys);
     PopScope();
     frameStack.pop_back();
     currentFunction = savedCurrentFunction;

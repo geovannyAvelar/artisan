@@ -99,6 +99,25 @@ private:
   llvm::GlobalVariable *exceptionCurrentHandler = nullptr;
   llvm::StructType *exceptionFrameType = nullptr; // see GetExceptionFrameType
   llvm::StructType *GetExceptionFrameType();
+  // `@art.current_exception_type_id` - which distinct thrown/caught
+  // TYPE is in flight, set only at a throw (StmtKind::Throw's own
+  // codegen), read only by a try's own landing code (GenTryCatchOnly)
+  // to decide "is this mine, or just passing through" - see
+  // GetOrAssignExceptionTypeId's own doc comment. Exists because,
+  // unlike this file's own single-throwable-type predecessor, ANY type
+  // can be thrown/caught now, so "we landed in a catch block" no longer
+  // implies "this is definitely what my own catch clause declared."
+  // NOT a general runtime type-tag system: read/compared only by a
+  // try's own landing code, against the ONE constant that try's own
+  // catch clause resolved to at compile time - never carried around on
+  // any normal, non-exceptional code path.
+  llvm::GlobalVariable *currentExceptionTypeId = nullptr;
+  std::unordered_map<std::string, int> exceptionTypeIds;
+  int nextExceptionTypeId = 1; // 0 reserved (never actually read) as a defensive "not a real id" value
+  // Assigns a small, stable integer id per distinct thrown/caught
+  // ResolvedType (keyed by ResolvedType::ToString(), lazily, the first
+  // time GenStmt's Try/Throw codegen sees a given type).
+  int GetOrAssignExceptionTypeId(const ResolvedType &t);
   llvm::StructType *arrayHeaderType = nullptr; // also used for strings: same { i64 length, ptr data } shape
   // `{ i32 tag, ptr payload }` - every `any` value's own box (see
   // TypeTag::Any's own doc comment). Named (like arrayHeaderType/

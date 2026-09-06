@@ -117,6 +117,27 @@ private:
   // pattern (an early return specifically FROM a finally) not compiling.
   int finallyDepth = 0;
 
+  // One entry per `try` currently lexically enclosing whatever's being
+  // checked right now, within the CURRENT frame only (innermost last) -
+  // see CheckThrowSite's own doc comment for how this is used. Pushed
+  // by CheckStmt's Try case around the try block ONLY, and only when
+  // the try actually has a catch clause (a finally-only try never
+  // catches anything - see GenTryFinallyOnly's own always-propagates
+  // codegen), popped right after - a throw in the catch or finally
+  // block is never caught by that SAME try, matching real try/catch/
+  // finally semantics. Saved/cleared/restored around every place a
+  // function/closure/generic-instantiation/method body is independently
+  // checked (CheckGenericCall, InstantiateInterface, CheckExpr's
+  // FunctionExpr case) - exactly like loopDepth/switchDepth/
+  // finallyDepth already are there, and for the identical reason: each
+  // body's own throws-contract is self-contained, independent of
+  // whatever try lexically encloses wherever it happens to be
+  // referenced/instantiated from.
+  struct ActiveTry {
+    ResolvedType catchType;
+  };
+  std::vector<ActiveTry> activeTrys;
+
   // Names currently known non-null within an `if (x != null) { ... }`'s
   // own `then` body, or in the code following an `if (x == null) {
   // <always exits> }` with no `else` (see CheckStmt's If case and
@@ -393,6 +414,20 @@ private:
   bool IsStaticAccessTarget(const std::string &name);
 
   bool AlwaysReturns(Stmt *stmt);
+
+  // The core checked-exceptions verification, used by both a `throw`
+  // statement and every call to a `declaresThrows` function/method/
+  // generic instantiation: true iff `u` (the throw's own type, or the
+  // called function's declared throws type) is either caught by an
+  // enclosing try in the CURRENT frame (activeTrys, innermost first -
+  // see its own doc comment for why this never crosses a closure/
+  // generic-instantiation/method-instantiation boundary) or is itself
+  // currentFunction's own declared throws contract (making it the
+  // caller's problem, one level up the real call graph, not something
+  // resolved further here). Reports a compile error and returns false
+  // otherwise. `verb` is used only to phrase the diagnostic ("throw" vs.
+  // "call to 'foo'").
+  bool CheckThrowSite(SourceLoc loc, const ResolvedType &u, const std::string &verb);
 
   // True if `expr` (already checked - this walks the already-rewritten
   // tree, so it sees the ambient `document` sugar's real target) directly

@@ -473,6 +473,15 @@ void Parser::ParseParamsAndReturnType(FunctionDecl *decl) {
     voidType->loc = Cur().loc;
     decl->returnType = std::move(voidType);
   }
+
+  // Optional `throws T` - see FunctionDecl::throwsType's own doc
+  // comment. Parsed uniformly here (so ParseFunction/ParseFunctionExpr/
+  // ParseDeclareFunction all get it for free) even though a closure can
+  // never actually declare one - Sema is the enforcement point for that
+  // restriction, not the grammar.
+  if (Match(TokenKind::KwThrows)) {
+    decl->throwsType = ParseType();
+  }
 }
 
 std::unique_ptr<FunctionDecl> Parser::ParseFunction() {
@@ -1274,7 +1283,7 @@ std::unique_ptr<Expr> Parser::ParsePrimary() {
 // grammar is.
 bool Parser::CheckJsxName() const {
   return Check(TokenKind::Identifier) ||
-         (Cur().kind >= TokenKind::KwFunction && Cur().kind <= TokenKind::KwTypeof);
+         (Cur().kind >= TokenKind::KwFunction && Cur().kind <= TokenKind::KwThrows);
 }
 
 // A JSX tag or attribute name: one name segment (see CheckJsxName),
@@ -1292,7 +1301,7 @@ std::string Parser::ParseJsxName(const char *context) {
   pos++;
   while (Check(TokenKind::Minus) &&
          (PeekAt(1).kind == TokenKind::Identifier ||
-          (PeekAt(1).kind >= TokenKind::KwFunction && PeekAt(1).kind <= TokenKind::KwTypeof))) {
+          (PeekAt(1).kind >= TokenKind::KwFunction && PeekAt(1).kind <= TokenKind::KwThrows))) {
     pos++; // '-'
     name += "-";
     name += Cur().text;
