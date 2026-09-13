@@ -1,7 +1,21 @@
 {
   "name": "task-manager",
   "version": "1.0.0",
-  "description": "Task Manager app with bundled npm libraries",
+  "description": "Complex React Task Manager with bundled libraries (lodash, date-fns)",
+  "main": "app.jsx",
+  "scripts": {
+    "bundle": "bash bundle.sh",
+    "test": "node test-app.js"
+  },
+  "keywords": [
+    "react",
+    "task-manager",
+    "bundling",
+    "lodash",
+    "date-fns"
+  ],
+  "author": "Artisan",
+  "license": "MIT",
   "dependencies": {
     "lodash": "^4.17.21",
     "date-fns": "^3.0.0"

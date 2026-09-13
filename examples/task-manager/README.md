@@ -36,6 +36,7 @@ task-manager/
 ├── bundle-libs.js           # npm library bundling entry point
 ├── bundle.sh                # Bundling script
 ├── package.json             # npm dependencies (lodash, date-fns)
+├── test-app.js              # Node.js test harness for validation
 └── README.md                # This file
 ```
 
@@ -283,6 +284,23 @@ function testAddTask() {
   assert(tasks.length === 1);
 }
 ```
+
+## Validation
+
+Run the test harness to validate all app logic works correctly:
+
+```bash
+node test-app.js
+```
+
+This simulates React hooks and validates all core functionality including:
+- Task CRUD operations
+- Array filtering and sorting
+- Statistics calculation
+- Date manipulation
+- Immutable state updates
+- Form data handling
+- Complex filtering with multiple criteria
 
 ## Resources
 
