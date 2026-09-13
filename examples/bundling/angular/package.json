@@ -1,0 +1,29 @@
+{
+  "name": "artisan-bundling-angular",
+  "version": "1.0.0",
+  "description": "Example of bundling Angular for Artisan QuickJS runtime",
+  "scripts": {
+    "bundle": "bash bundle.sh",
+    "bundle:minimal": "esbuild bundle-angular-core.js --bundle --format=iife --external:rxjs --outfile=bundles/angular-core.js",
+    "bundle:all": "npm run bundle"
+  },
+  "devDependencies": {
+    "@angular/common": "^15.0.0",
+    "@angular/core": "^15.0.0",
+    "@angular/forms": "^15.0.0",
+    "@angular/platform-browser": "^15.0.0",
+    "@angular/platform-browser-dynamic": "^15.0.0",
+    "esbuild": "^0.17.0",
+    "rxjs": "^7.5.0",
+    "typescript": "^4.9.0",
+    "zone.js": "^0.12.0"
+  },
+  "keywords": [
+    "artisan",
+    "angular",
+    "bundling",
+    "quickjs"
+  ],
+  "author": "",
+  "license": "MIT"
+}

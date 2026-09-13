@@ -1,0 +1,30 @@
+{
+  "name": "artisan-bundling-react",
+  "version": "1.0.0",
+  "description": "Example of bundling React packages for Artisan QuickJS runtime",
+  "scripts": {
+    "bundle:router": "esbuild bundle-react-router.js --bundle --format=iife --external:react --external:react-dom --outfile=bundles/react-router.js",
+    "bundle:redux": "esbuild bundle-redux.js --bundle --format=iife --external:react --outfile=bundles/redux.js",
+    "bundle:all": "npm run bundle:router && npm run bundle:redux"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "react-redux": "^8.0.0",
+    "react-router": "^6.0.0",
+    "react-router-dom": "^6.0.0",
+    "redux": "^4.0.0",
+    "esbuild": "^0.17.0",
+    "typescript": "^4.9.0"
+  },
+  "keywords": [
+    "artisan",
+    "react",
+    "bundling",
+    "quickjs"
+  ],
+  "author": "",
+  "license": "MIT"
+}

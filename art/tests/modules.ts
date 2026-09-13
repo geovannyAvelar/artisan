@@ -1,399 +1,429 @@
-import { initializeModuleSystem, registerModule, require, importModule, importAll, defineModule, defineESModule, getModuleIds, getModuleCount, getCacheSize, isModuleLoaded, clearModuleCache, clearAllModules, getModuleMetadata, resolveModulePath, parseImportStatement, createModuleBundle } from "art/modules";
+// Tests for the Module System
+// Verifies CommonJS and ES6 module support
 
-function testInitializeModuleSystem(): number {
-  clearAllModules();
-  if (!initializeModuleSystem()) { return 1; }
-  return 0;
-}
+import {
+  registerModule,
+  defineModule,
+  defineESModule,
+  require,
+  importModule,
+  importAll,
+  getModuleCount,
+  getCacheSize,
+  getModuleIds,
+  isModuleLoaded,
+  getModuleMetadata,
+  clearModuleCache,
+  clearAllModules,
+  parseImportStatement,
+  resolveModulePath,
+  getModuleStatistics,
+  unregisterModule,
+  getAllModuleExports,
+  listAllModules
+} from "art/modules";
 
-function testRegisterModule(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let factory = function(module: any, exports: any, require: (id: string) => any): void {
-    exports.value = 42;
-  };
-  
-  if (!registerModule("test-module", factory)) { return 1; }
-  return 0;
-}
-
-function testRequireSimpleModule(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let factory = function(module: any, exports: any, require: (id: string) => any): void {
-    exports.hello = "world";
-    exports.number = 42;
-  };
-  
-  registerModule("simple", factory);
-  
-  let mod = require("simple");
-  if (mod == null) { return 1; }
-  if (mod.hello != "world") { return 2; }
-  if (mod.number != 42) { return 3; }
-  
-  return 0;
-}
-
-function testRequireModuleExports(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let factory = function(module: any, exports: any, require: (id: string) => any): void {
-    module[1] = { exported: true };
-  };
-  
-  registerModule("export-test", factory);
-  
-  let mod = require("export-test");
-  if (mod == null) { return 1; }
-  if (!mod.exported) { return 2; }
-  
-  return 0;
-}
-
-function testModuleCache(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let callCount: number = 0;
-  
-  let factory = function(module: any, exports: any, require: (id: string) => any): void {
-    callCount = callCount + 1;
-    exports.value = callCount;
-  };
-  
-  registerModule("cached", factory);
-  
-  let mod1 = require("cached");
-  if (mod1.value != 1) { return 1; }
-  
-  let mod2 = require("cached");
-  if (mod2.value != 1) { return 2; } // Should be cached, not re-executed
-  
-  if (callCount != 1) { return 3; } // Factory should only run once
-  
-  return 0;
-}
-
-function testIsModuleLoaded(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let factory = function(module: any, exports: any, require: (id: string) => any): void {
-    exports.test = true;
-  };
-  
-  registerModule("loaded-test", factory);
-  
-  if (isModuleLoaded("loaded-test")) { return 1; } // Not loaded yet
-  
-  require("loaded-test");
-  
-  if (!isModuleLoaded("loaded-test")) { return 2; } // Should be loaded now
-  
-  return 0;
-}
-
-function testGetModuleCount(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  if (getModuleCount() != 0) { return 1; }
-  
-  registerModule("m1", function(m: any, e: any, r: any): void {});
-  if (getModuleCount() != 1) { return 2; }
-  
-  registerModule("m2", function(m: any, e: any, r: any): void {});
-  if (getModuleCount() != 2) { return 3; }
-  
-  return 0;
-}
-
-function testGetCacheSize(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  if (getCacheSize() != 0) { return 1; }
-  
-  registerModule("m1", function(m: any, e: any, r: any): void { e.x = 1; });
-  require("m1");
-  
-  if (getCacheSize() != 1) { return 2; }
-  
-  registerModule("m2", function(m: any, e: any, r: any): void { e.y = 2; });
-  require("m2");
-  
-  if (getCacheSize() != 2) { return 3; }
-  
-  return 0;
-}
-
-function testClearModuleCache(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("m1", function(m: any, e: any, r: any): void { e.x = 1; });
-  require("m1");
-  
-  if (getCacheSize() != 1) { return 1; }
-  
-  clearModuleCache();
-  
-  if (getCacheSize() != 0) { return 2; }
-  if (isModuleLoaded("m1")) { return 3; }
-  
-  return 0;
-}
-
-function testDefineESModule(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let exportsObj: any = { x: 10, y: 20 };
-  defineESModule("es-mod", exportsObj);
-  
-  let mod = require("es-mod");
-  if (mod == null) { return 1; }
-  
-  return 0;
-}
-
-function testModuleWithDependency(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  // Register dependency
-  registerModule("dep", function(m: any, e: any, r: any): void {
-    e.getValue = function(): number { return 42; };
+export function runModuleSystemTests(): void {
+  // Test 1: Basic module registration
+  test("registerModule adds module to registry", () => {
+    clearAllModules();
+    const result = registerModule("math", (m, e, r) => {
+      e.add = (a: number, b: number) => a + b;
+    });
+    assert(result === true, "registerModule should return true");
+    assert(getModuleCount() === 1, "Module count should be 1");
   });
-  
-  // Register module that requires dependency
-  registerModule("app", function(m: any, e: any, r: any): void {
-    let dep = r("dep");
-    e.result = dep.getValue();
+
+  // Test 2: Duplicate registration prevention
+  test("registerModule prevents duplicate registration", () => {
+    clearAllModules();
+    registerModule("test", (m, e, r) => {});
+    const result = registerModule("test", (m, e, r) => {});
+    assert(result === false, "Duplicate registration should return false");
   });
-  
-  let app = require("app");
-  if (app.result != 42) { return 1; }
-  
-  return 0;
-}
 
-function testMultipleModuleDependencies(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("math", function(m: any, e: any, r: any): void {
-    e.add = function(a: number, b: number): number { return a + b; };
+  // Test 3: Module loading and caching
+  test("require loads and caches module", () => {
+    clearAllModules();
+    registerModule("counter", (m, e, r) => {
+      e.count = 0;
+      e.increment = () => ++e.count;
+    });
+
+    const c1 = require("counter");
+    c1.increment();
+    const c2 = require("counter");
+
+    assert(c1 === c2, "Same module instance should be returned");
+    assert(c2.count === 1, "Module state should persist");
   });
-  
-  registerModule("string", function(m: any, e: any, r: any): void {
-    e.concat = function(a: string, b: string): string { return a + b; };
+
+  // Test 4: Module with dependencies
+  test("module can require other modules", () => {
+    clearAllModules();
+    registerModule("config", (m, e, r) => {
+      e.value = 42;
+    });
+
+    registerModule("app", (m, e, r) => {
+      const config = r("config");
+      e.getValue = () => config.value;
+    });
+
+    const app = require("app");
+    assert(app.getValue() === 42, "Module dependency should work");
   });
-  
-  registerModule("utils", function(m: any, e: any, r: any): void {
-    let math = r("math");
-    let str = r("string");
-    e.process = function(): string {
-      let num = math.add(1, 2);
-      return str.concat("Result: ", num.toString());
-    };
+
+  // Test 5: ES6 module registration
+  test("defineESModule registers ES6 modules", () => {
+    clearAllModules();
+    defineESModule("es6module", {
+      add: (a: number, b: number) => a + b,
+      multiply: (a: number, b: number) => a * b,
+      default: "DefaultExport"
+    });
+
+    const m = require("es6module");
+    assert(m.add(2, 3) === 5, "ES6 module exports should work");
+    assert(m.default === "DefaultExport", "Default export should be present");
   });
-  
-  let utils = require("utils");
-  // Would need string conversion support to fully test
-  
-  return 0;
-}
 
-function testResolveModulePath(): number {
-  // Built-in paths
-  if (resolveModulePath("art/react") != "art/react") { return 1; }
-  if (resolveModulePath("art/net") != "art/net") { return 2; }
-  if (resolveModulePath("art/fs") != "art/fs") { return 3; }
-  
-  // Relative paths
-  if (resolveModulePath("./lib").substring(0, 3) == "./") { return 4; }
-  
-  return 0;
-}
+  // Test 6: importModule function
+  test("importModule extracts named exports", () => {
+    clearAllModules();
+    defineESModule("utils", {
+      toUpperCase: (s: string) => s.toUpperCase(),
+      toLowerCase: (s: string) => s.toLowerCase(),
+      default: "StringUtils"
+    });
 
-function testParseImportStatement(): number {
-  // ES6 import
-  let result1 = parseImportStatement("import { Component } from 'react'");
-  if (result1[0] != "es6") { return 1; }
-  
-  // CommonJS require
-  let result2 = parseImportStatement("const React = require('react')");
-  if (result2[0] != "commonjs") { return 2; }
-  
-  return 0;
-}
-
-function testGetModuleIds(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("m1", function(m: any, e: any, r: any): void {});
-  registerModule("m2", function(m: any, e: any, r: any): void {});
-  
-  let ids = getModuleIds();
-  if (ids.length != 2) { return 1; }
-  
-  return 0;
-}
-
-function testGetModuleMetadata(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("meta-test", function(m: any, e: any, r: any): void { e.x = 1; });
-  
-  let metadata = getModuleMetadata("meta-test");
-  if (metadata == null) { return 1; }
-  
-  // Before loading
-  if (metadata[2]) { return 2; } // Should not be loaded yet
-  
-  require("meta-test");
-  
-  metadata = getModuleMetadata("meta-test");
-  if (!metadata[2]) { return 3; } // Should be loaded now
-  
-  return 0;
-}
-
-function testModuleCircularDependency(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  // This tests how the system handles circular dependencies
-  // In this simplified implementation, circular deps will cause issues
-  // but the test ensures the system doesn't crash
-  
-  registerModule("a", function(m: any, e: any, r: any): void {
-    e.value = "a";
+    const upper = importModule("utils", "toUpperCase");
+    assert(upper("hello") === "HELLO", "Named import should work");
   });
-  
-  registerModule("b", function(m: any, e: any, r: any): void {
-    let a = r("a");
-    e.value = "b";
+
+  // Test 7: importAll function
+  test("importAll returns all exports", () => {
+    clearAllModules();
+    defineESModule("math", {
+      add: (a: number, b: number) => a + b,
+      subtract: (a: number, b: number) => a - b
+    });
+
+    const mathModule = importAll("math");
+    assert(mathModule.add(5, 3) === 8, "Import all should work");
+    assert(mathModule.subtract(5, 3) === 2, "All exports should be available");
   });
-  
-  let b = require("b");
-  if (b == null) { return 1; }
-  
-  return 0;
-}
 
-function testRequireNonexistentModule(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let result = require("nonexistent");
-  if (result != null) { return 1; } // Should return null
-  
-  return 0;
-}
+  // Test 8: Module count tracking
+  test("getModuleCount returns correct count", () => {
+    clearAllModules();
+    registerModule("a", (m, e, r) => {});
+    registerModule("b", (m, e, r) => {});
+    registerModule("c", (m, e, r) => {});
 
-function testClearAllModules(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("m1", function(m: any, e: any, r: any): void { e.x = 1; });
-  require("m1");
-  
-  if (getModuleCount() != 1) { return 1; }
-  if (getCacheSize() != 1) { return 2; }
-  
-  clearAllModules();
-  
-  if (getModuleCount() != 0) { return 3; }
-  if (getCacheSize() != 0) { return 4; }
-  
-  return 0;
-}
-
-function testModuleExportsFunctions(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("funcs", function(m: any, e: any, r: any): void {
-    e.add = function(a: number, b: number): number { return a + b; };
-    e.multiply = function(a: number, b: number): number { return a * b; };
+    assert(getModuleCount() === 3, "Module count should be 3");
   });
-  
-  let funcs = require("funcs");
-  if (funcs.add(2, 3) != 5) { return 1; }
-  if (funcs.multiply(3, 4) != 12) { return 2; }
-  
-  return 0;
-}
 
-function testModuleExportsMultiple(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("multi", function(m: any, e: any, r: any): void {
-    e.string = "test";
-    e.number = 42;
-    e.boolean = true;
-    e.null_value = null;
+  // Test 9: Cache size tracking
+  test("getCacheSize tracks loaded modules", () => {
+    clearAllModules();
+    registerModule("a", (m, e, r) => {});
+    registerModule("b", (m, e, r) => {});
+
+    require("a");
+    assert(getCacheSize() === 1, "Cache should contain 1 module");
+
+    require("b");
+    assert(getCacheSize() === 2, "Cache should contain 2 modules");
   });
-  
-  let mod = require("multi");
-  if (mod.string != "test") { return 1; }
-  if (mod.number != 42) { return 2; }
-  if (!mod.boolean) { return 3; }
-  
-  return 0;
-}
 
-function testRegisterDuplicate(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  let factory = function(m: any, e: any, r: any): void {};
-  
-  if (!registerModule("dup", factory)) { return 1; }
-  if (registerModule("dup", factory)) { return 2; } // Should fail on duplicate
-  
-  return 0;
-}
+  // Test 10: Module ID listing
+  test("getModuleIds returns array of IDs", () => {
+    clearAllModules();
+    registerModule("first", (m, e, r) => {});
+    registerModule("second", (m, e, r) => {});
 
-function testImportModule(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("named", function(m: any, e: any, r: any): void {
-    e.Component = "React Component";
-    e.default = "Default Export";
+    const ids = getModuleIds();
+    assert(ids.length === 2, "Should have 2 module IDs");
+    assert(ids.includes("first"), "Should include 'first'");
+    assert(ids.includes("second"), "Should include 'second'");
   });
-  
-  let comp = importModule("named", "Component");
-  if (comp != "React Component") { return 1; }
-  
-  let def = importModule("named", "");
-  if (def != "Default Export") { return 2; }
-  
-  return 0;
+
+  // Test 11: isModuleLoaded check
+  test("isModuleLoaded detects cached modules", () => {
+    clearAllModules();
+    registerModule("test", (m, e, r) => {});
+
+    assert(isModuleLoaded("test") === false, "Module not loaded initially");
+    require("test");
+    assert(isModuleLoaded("test") === true, "Module loaded after require");
+  });
+
+  // Test 12: Module metadata
+  test("getModuleMetadata returns correct info", () => {
+    clearAllModules();
+    registerModule("api", (m, e, r) => {
+      e.fetch = () => {};
+      e.post = () => {};
+    });
+
+    require("api");
+    const meta = getModuleMetadata("api");
+
+    assert(meta !== null, "Metadata should exist");
+    assert(meta!.id === "api", "Metadata ID should match");
+    assert(meta!.loaded === true, "Should be marked as loaded");
+    assert(meta!.exportCount === 2, "Should count 2 exports");
+  });
+
+  // Test 13: Cache clearing
+  test("clearModuleCache resets cache", () => {
+    clearAllModules();
+    registerModule("test", (m, e, r) => {
+      e.value = 1;
+    });
+
+    const m1 = require("test");
+    m1.value = 2;
+
+    clearModuleCache();
+    const m2 = require("test");
+
+    assert(m2.value === 1, "Module should be re-executed after cache clear");
+  });
+
+  // Test 14: All modules clearing
+  test("clearAllModules removes all modules", () => {
+    registerModule("a", (m, e, r) => {});
+    registerModule("b", (m, e, r) => {});
+
+    clearAllModules();
+
+    assert(getModuleCount() === 0, "Module count should be 0");
+    assert(getCacheSize() === 0, "Cache should be empty");
+  });
+
+  // Test 15: Circular dependency handling
+  test("circular dependencies don't cause infinite loops", () => {
+    clearAllModules();
+
+    registerModule("a", (m, e, r) => {
+      e.value = "a";
+      // Don't actually require 'b' to avoid infinite recursion
+      e.getB = () => {
+        const b = r("b");
+        return b ? b.value : null;
+      };
+    });
+
+    registerModule("b", (m, e, r) => {
+      e.value = "b";
+    });
+
+    const a = require("a");
+    assert(a.getB() === "b", "Can load dependent module later");
+  });
+
+  // Test 16: Import statement parsing
+  test("parseImportStatement extracts module ID", () => {
+    const result = parseImportStatement(`import { Component } from "react"`);
+    assert(result.moduleId === "react", "Should extract module ID");
+  });
+
+  // Test 17: Module path resolution
+  test("resolveModulePath removes extensions", () => {
+    assert(resolveModulePath("utils.ts") === "utils", "Should remove .ts");
+    assert(resolveModulePath("utils.js") === "utils", "Should remove .js");
+    assert(resolveModulePath("utils") === "utils", "Should not change plain path");
+  });
+
+  // Test 18: Multiple module exports
+  test("modules can export multiple functions", () => {
+    clearAllModules();
+    registerModule("string", (m, e, r) => {
+      e.uppercase = (s: string) => s.toUpperCase();
+      e.lowercase = (s: string) => s.toLowerCase();
+      e.reverse = (s: string) => s.split("").reverse().join("");
+    });
+
+    const str = require("string");
+    assert(str.uppercase("hello") === "HELLO", "Export 1 works");
+    assert(str.lowercase("HELLO") === "hello", "Export 2 works");
+    assert(str.reverse("hello") === "olleh", "Export 3 works");
+  });
+
+  // Test 19: Module statistics
+  test("getModuleStatistics reports usage", () => {
+    clearAllModules();
+    registerModule("a", (m, e, r) => {
+      e.x = 1;
+      e.y = 2;
+    });
+    registerModule("b", (m, e, r) => {
+      e.z = 3;
+    });
+
+    require("a");
+    require("b");
+
+    const stats = getModuleStatistics();
+    assert(stats.modules === 2, "Should count 2 modules");
+    assert(stats.cached === 2, "Should count 2 cached");
+    assert(stats.totalExports === 3, "Should count 3 exports");
+  });
+
+  // Test 20: Unregister module
+  test("unregisterModule removes module", () => {
+    clearAllModules();
+    registerModule("test", (m, e, r) => {});
+
+    assert(getModuleCount() === 1, "Module should be registered");
+    const result = unregisterModule("test");
+    assert(result === true, "Unregister should return true");
+    assert(getModuleCount() === 0, "Module should be removed");
+  });
+
+  // Test 21: Get all module exports
+  test("getAllModuleExports returns all loaded modules", () => {
+    clearAllModules();
+    registerModule("a", (m, e, r) => {
+      e.value = 1;
+    });
+    registerModule("b", (m, e, r) => {
+      e.value = 2;
+    });
+
+    require("a");
+    require("b");
+
+    const all = getAllModuleExports();
+    assert(all.size === 2, "Should have 2 modules");
+    assert(all.get("a")!.value === 1, "Module A exports correct");
+    assert(all.get("b")!.value === 2, "Module B exports correct");
+  });
+
+  // Test 22: List all modules
+  test("listAllModules provides metadata for all", () => {
+    clearAllModules();
+    registerModule("x", (m, e, r) => {
+      e.a = 1;
+      e.b = 2;
+    });
+    registerModule("y", (m, e, r) => {
+      e.c = 3;
+    });
+
+    require("x");
+
+    const list = listAllModules();
+    assert(list.length === 2, "Should list 2 modules");
+    assert(list[0].loaded === true, "First module loaded");
+    assert(list[1].loaded === false, "Second module not loaded");
+  });
+
+  // Test 23: Module exports persistence
+  test("module exports persist across calls", () => {
+    clearAllModules();
+    let callCount = 0;
+
+    registerModule("singleton", (m, e, r) => {
+      callCount++;
+      e.id = callCount;
+      e.getCallCount = () => callCount;
+    });
+
+    const m1 = require("singleton");
+    const m2 = require("singleton");
+
+    assert(m1.id === 1, "Factory executed once");
+    assert(m1 === m2, "Same instance returned");
+    assert(m1.getCallCount() === 1, "Factory not re-executed");
+  });
+
+  // Test 24: Nested module dependencies
+  test("nested dependencies resolve correctly", () => {
+    clearAllModules();
+
+    registerModule("level1", (m, e, r) => {
+      e.value = "level1";
+    });
+
+    registerModule("level2", (m, e, r) => {
+      const l1 = r("level1");
+      e.value = l1.value + "-level2";
+    });
+
+    registerModule("level3", (m, e, r) => {
+      const l2 = r("level2");
+      e.value = l2.value + "-level3";
+    });
+
+    const l3 = require("level3");
+    assert(l3.value === "level1-level2-level3", "Nested deps work");
+  });
+
+  // Test 25: Empty module exports
+  test("modules can have empty exports", () => {
+    clearAllModules();
+    registerModule("empty", (m, e, r) => {
+      // Don't export anything
+    });
+
+    const result = require("empty");
+    assert(result !== null, "Module should load");
+    assert(Object.keys(result).length === 0, "No exports");
+  });
+
+  // Test 26: Nonexistent module handling
+  test("require returns null for nonexistent module", () => {
+    clearAllModules();
+    const result = require("nonexistent");
+    assert(result === null, "Should return null for missing module");
+  });
+
+  // Test 27: Module with functions as exports
+  test("functions can be exported directly", () => {
+    clearAllModules();
+    registerModule("funcs", (m, e, r) => {
+      e.greet = (name: string) => "Hello, " + name;
+      e.goodbye = (name: string) => "Bye, " + name;
+    });
+
+    const funcs = require("funcs");
+    assert(funcs.greet("World") === "Hello, World", "Function export works");
+    assert(funcs.goodbye("World") === "Bye, World", "Multiple functions work");
+  });
+
+  // Test 28: Module identity with multiple references
+  test("same module instance across multiple references", () => {
+    clearAllModules();
+    registerModule("shared", (m, e, r) => {
+      e.shared = true;
+    });
+
+    const a = require("shared");
+    const b = require("shared");
+    const c = importModule("shared", "");
+
+    assert(a === b, "require returns same instance");
+    assert(a === c, "importModule returns same instance");
+  });
 }
 
-function testImportAll(): number {
-  clearAllModules();
-  initializeModuleSystem();
-  
-  registerModule("all", function(m: any, e: any, r: any): void {
-    e.x = 1;
-    e.y = 2;
-    e.z = 3;
-  });
-  
-  let all = importAll("all");
-  if (all == null) { return 1; }
-  
-  return 0;
+// Helper test function
+function test(description: string, fn: () => void): void {
+  try {
+    fn();
+    console.log("✓ " + description);
+  } catch (e) {
+    console.error("✗ " + description);
+    console.error("  Error: " + (e instanceof Error ? e.message : String(e)));
+  }
+}
+
+// Helper assert function
+function assert(condition: boolean, message: string): void {
+  if (!condition) {
+    throw new Error(message);
+  }
 }

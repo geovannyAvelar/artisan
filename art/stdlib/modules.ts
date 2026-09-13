@@ -1,329 +1,307 @@
-// Module system for ART. Import with: `import { require, createModuleLoader, ... } from "art/modules";`
-// Provides ES6 module and CommonJS support for JavaScript runtime.
+// Module System for Artisan QuickJS Runtime
+// Provides CommonJS and ES6 module support for organizing code and loading npm packages
 
-// Module metadata type
-export type ModuleMetadata = [id: string, exports: any, loaded: boolean, cached: boolean];
+type ModuleFactory = (module: any, exports: any, require: any) => void;
 
-// Module factory type - function that loads a module
-export type ModuleFactory = (module: any, exports: any, require: (id: string) => any) => void;
-
-// Module registry - maps module IDs to their factories
-type ModuleRegistry = [id: string, factory: ModuleFactory][];
-let _modules: ModuleRegistry = [];
-
-// Module cache - stores loaded modules
-type ModuleCache = [id: string, exports: any][];
-let _cache: ModuleCache = [];
-
-// Current module context for tracking
-type ModuleContext = [id: string, parent: string, loaded: boolean];
-let _currentContext: ModuleContext = ["<main>", "", false];
-
-// Module loader state
-let _loaderInitialized: boolean = false;
-
-// Initialize the module system
-export function initializeModuleSystem(): boolean {
-  _loaderInitialized = true;
-  return true;
+interface ModuleMetadata {
+  id: string;
+  loaded: boolean;
+  cached: boolean;
+  exportCount: number;
 }
 
-// Register a module with the system
+// Internal module registry and cache
+const _modules = new Map<string, { factory: ModuleFactory | object; isES6: boolean }>();
+const _cache = new Map<string, any>();
+
+/**
+ * Register a CommonJS-style module with a factory function
+ *
+ * @param id - Module identifier (e.g., "auth", "database", "api")
+ * @param factory - Function that receives (module, exports, require) and populates exports
+ * @returns true if registered, false if already exists
+ */
 export function registerModule(id: string, factory: ModuleFactory): boolean {
-  // Check if already registered
-  let i: number = 0;
-  while (i < _modules.length) {
-    if (_modules[i][0] == id) {
-      return false; // Already registered
-    }
-    i = i + 1;
+  if (_modules.has(id)) {
+    return false;
   }
-  
-  _modules = _modules + [[id, factory]];
+  _modules.set(id, { factory, isES6: false });
   return true;
 }
 
-// Find a module factory by ID
-function findModuleFactory(id: string): ModuleFactory | null {
-  let i: number = 0;
-  while (i < _modules.length) {
-    if (_modules[i][0] == id) {
-      return _modules[i][1];
-    }
-    i = i + 1;
-  }
-  return null;
-}
-
-// Check if module is in cache
-function isCached(id: string): boolean {
-  let i: number = 0;
-  while (i < _cache.length) {
-    if (_cache[i][0] == id) {
-      return true;
-    }
-    i = i + 1;
-  }
-  return false;
-}
-
-// Get cached module exports
-function getCachedExports(id: string): any {
-  let i: number = 0;
-  while (i < _cache.length) {
-    if (_cache[i][0] == id) {
-      return _cache[i][1];
-    }
-    i = i + 1;
-  }
-  return null;
-}
-
-// Cache module exports
-function cacheModule(id: string, exports: any): void {
-  _cache = _cache + [[id, exports]];
-}
-
-// The require() function - core of CommonJS module loading
-export function require(id: string): any {
-  // Return cached module if available
-  if (isCached(id)) {
-    return getCachedExports(id);
-  }
-  
-  // Find the module factory
-  let factory = findModuleFactory(id);
-  if (factory == null) {
-    return null; // Module not found
-  }
-  
-  // Create module wrapper object (CommonJS pattern)
-  let module: any = [id, null]; // [id, exports]
-  let exports: any = {}; // Start with empty exports
-  module[1] = exports;
-  
-  // Create bound require function for this module
-  let boundRequire: (modId: string) => any = function(modId: string): any {
-    return require(modId);
-  };
-  
-  // Execute module factory
-  factory(module, exports, boundRequire);
-  
-  // Cache the exports
-  let finalExports: any = module[1];
-  if (finalExports == null) {
-    finalExports = exports;
-  }
-  cacheModule(id, finalExports);
-  
-  return finalExports;
-}
-
-// ES6 import equivalent - loads a module and returns specific export
-export function importModule(id: string, exportName: string): any {
-  let exports: any = require(id);
-  if (exports == null) { return null; }
-  
-  // If exporting named export
-  if (exportName.length > 0) {
-    return exports[exportName];
-  }
-  
-  // If importing default
-  return exports["default"] != null ? exports["default"] : exports;
-}
-
-// ES6 import * as - loads all exports from module
-export function importAll(id: string): any {
-  return require(id);
-}
-
-// Define a module with CommonJS pattern
+/**
+ * Alias for registerModule
+ */
 export function defineModule(id: string, factory: ModuleFactory): boolean {
   return registerModule(id, factory);
 }
 
-// Define module with ES6 style (returns object with named exports)
-export function defineESModule(id: string, exportsObj: any): boolean {
-  let factory: ModuleFactory = function(module: any, exports: any, require: (id: string) => any): void {
-    // Copy all named exports
-    let keys: string[] = getObjectKeys(exportsObj);
-    let i: number = 0;
-    while (i < keys.length) {
-      let key: string = keys[i];
-      exports[key] = exportsObj[key];
-      i = i + 1;
-    }
-    
-    // Also set as module.exports
-    module[1] = exports;
+/**
+ * Register an ES6-style module with named exports
+ *
+ * @param id - Module identifier
+ * @param exportsObject - Object containing named exports and optional default export
+ * @returns true if registered, false if already exists
+ */
+export function defineESModule(id: string, exportsObject: any): boolean {
+  if (_modules.has(id)) {
+    return false;
+  }
+  _modules.set(id, { factory: exportsObject, isES6: true });
+  return true;
+}
+
+/**
+ * Load a module using CommonJS-style require()
+ * Modules are cached after first load to avoid re-execution
+ *
+ * @param id - Module identifier to load
+ * @returns Module exports object, or null if not found
+ */
+export function require(id: string): any {
+  // Return cached module if already loaded
+  if (_cache.has(id)) {
+    return _cache.get(id);
+  }
+
+  const moduleRecord = _modules.get(id);
+  if (!moduleRecord) {
+    return null;
+  }
+
+  // Handle ES6 modules - return exports directly
+  if (moduleRecord.isES6) {
+    const exports = moduleRecord.factory as any;
+    _cache.set(id, exports);
+    return exports;
+  }
+
+  // Handle CommonJS modules - execute factory with module/exports/require
+  const module = { id, exports: {} };
+  const factory = moduleRecord.factory as ModuleFactory;
+
+  // Create local require function for this module's dependencies
+  const localRequire = (depId: string) => {
+    return require(depId);
   };
-  
-  return registerModule(id, factory);
+
+  // Execute factory function to populate exports
+  factory(module, module.exports, localRequire);
+
+  // Cache the exports
+  _cache.set(id, module.exports);
+  return module.exports;
 }
 
-// Get all module IDs
-export function getModuleIds(): string[] {
-  let result: string[] = [];
-  let i: number = 0;
-  while (i < _modules.length) {
-    result = result + [_modules[i][0]];
-    i = i + 1;
+/**
+ * Import a specific named export from a module (ES6-style)
+ *
+ * @param id - Module identifier
+ * @param exportName - Name of export to import (empty string for default export)
+ * @returns The exported value, or null if not found
+ */
+export function importModule(id: string, exportName: string): any {
+  const module = require(id);
+  if (!module) {
+    return null;
   }
-  return result;
+
+  if (!exportName || exportName === "default") {
+    return module.default || module;
+  }
+
+  return module[exportName] || null;
 }
 
-// Get count of registered modules
+/**
+ * Import all exports from a module (ES6 import * as)
+ *
+ * @param id - Module identifier
+ * @returns Object containing all module exports
+ */
+export function importAll(id: string): any {
+  return require(id);
+}
+
+/**
+ * Get count of registered (not necessarily loaded) modules
+ *
+ * @returns Number of registered modules
+ */
 export function getModuleCount(): number {
-  return _modules.length;
+  return _modules.size;
 }
 
-// Get count of cached modules
+/**
+ * Get count of loaded/cached modules
+ *
+ * @returns Number of modules in cache
+ */
 export function getCacheSize(): number {
-  return _cache.length;
+  return _cache.size;
 }
 
-// Check if module is loaded and cached
+/**
+ * Get array of all registered module IDs
+ *
+ * @returns Array of module identifier strings
+ */
+export function getModuleIds(): string[] {
+  return Array.from(_modules.keys());
+}
+
+/**
+ * Check if a module has been loaded and cached
+ *
+ * @param id - Module identifier
+ * @returns true if module is in cache
+ */
 export function isModuleLoaded(id: string): boolean {
-  return isCached(id);
+  return _cache.has(id);
 }
 
-// Clear module cache
-export function clearModuleCache(): void {
-  _cache = [];
-}
-
-// Clear all modules and cache
-export function clearAllModules(): void {
-  _modules = [];
-  _cache = [];
-  _loaderInitialized = false;
-}
-
-// Get module metadata for inspection
+/**
+ * Get metadata about a registered module
+ *
+ * @param id - Module identifier
+ * @returns Metadata object with id, loaded, cached, exportCount properties
+ */
 export function getModuleMetadata(id: string): ModuleMetadata | null {
-  let loaded: boolean = isCached(id);
-  let cached: boolean = loaded;
-  let exports: any = loaded ? getCachedExports(id) : null;
-  
-  return [id, exports, loaded, cached];
+  const module = _modules.get(id);
+  if (!module) {
+    return null;
+  }
+
+  const loaded = _cache.has(id);
+  const exports = loaded ? _cache.get(id) : {};
+  const exportCount = Object.keys(exports).length;
+
+  return {
+    id,
+    loaded,
+    cached: loaded,
+    exportCount
+  };
 }
 
-// Helper: Get object keys (used internally)
-function getObjectKeys(obj: any): string[] {
-  let result: string[] = [];
-  // In ART, we'd need to iterate properties
-  // This is a simplified version
+/**
+ * Clear all cached module instances (without unregistering them)
+ * Modules will be re-executed on next require() call
+ */
+export function clearModuleCache(): void {
+  _cache.clear();
+}
+
+/**
+ * Clear all modules (both registry and cache)
+ * Use with caution - removes all registered modules
+ */
+export function clearAllModules(): void {
+  _modules.clear();
+  _cache.clear();
+}
+
+/**
+ * Parse an import statement to extract module ID and export name
+ * Handles: "import X from 'module'"
+ *          "import { named } from 'module'"
+ *          "import * as all from 'module'"
+ *
+ * @param statement - Import statement string
+ * @returns Object with moduleId and exportName properties
+ */
+export function parseImportStatement(statement: string): { moduleId: string; exportName: string } {
+  const match = statement.match(/['"]([^'"]+)['"]/);
+  const moduleId = match ? match[1] : "";
+
+  // Extract export name from "import X from" pattern
+  const nameMatch = statement.match(/import\s+(\w+)\s+from/);
+  const exportName = nameMatch ? nameMatch[1] : "";
+
+  return { moduleId, exportName };
+}
+
+/**
+ * Resolve a module path (basic version - can be enhanced with search paths)
+ *
+ * @param path - Path to resolve
+ * @returns Resolved path/ID
+ */
+export function resolveModulePath(path: string): string {
+  // Remove .js/.ts extensions
+  if (path.endsWith(".js") || path.endsWith(".ts")) {
+    return path.substring(0, path.length - 3);
+  }
+  return path;
+}
+
+/**
+ * Initialize the module system with built-in modules
+ * Registers art/* modules that bridge to ART stdlib functionality
+ */
+export function initializeModuleSystem(): void {
+  // Core modules are registered by the runtime/ART code
+  // This function is a hook for future initialization logic
+}
+
+/**
+ * Get statistics about module system usage
+ *
+ * @returns Object with modules, cached, and totalExports counts
+ */
+export function getModuleStatistics(): { modules: number; cached: number; totalExports: number } {
+  let totalExports = 0;
+
+  _cache.forEach((exports) => {
+    totalExports += Object.keys(exports).length;
+  });
+
+  return {
+    modules: _modules.size,
+    cached: _cache.size,
+    totalExports
+  };
+}
+
+/**
+ * Unregister a module (removes from registry and cache)
+ *
+ * @param id - Module identifier to unregister
+ * @returns true if module was unregistered, false if not found
+ */
+export function unregisterModule(id: string): boolean {
+  _cache.delete(id);
+  return _modules.delete(id);
+}
+
+/**
+ * Get all module exports for inspection/debugging
+ *
+ * @returns Map of module ID to exports object
+ */
+export function getAllModuleExports(): Map<string, any> {
+  const result = new Map<string, any>();
+
+  _modules.forEach((record, id) => {
+    if (_cache.has(id)) {
+      result.set(id, _cache.get(id));
+    } else {
+      // For uncached modules, show empty object
+      result.set(id, {});
+    }
+  });
+
   return result;
 }
 
-// Create a module bundle - combining multiple modules into one
-export function createModuleBundle(moduleIds: string[]): string {
-  let bundle: string = "";
-  let i: number = 0;
-  
-  while (i < moduleIds.length) {
-    let id: string = moduleIds[i];
-    bundle = bundle + "// Module: " + id + "\n";
-    
-    let factory = findModuleFactory(id);
-    if (factory != null) {
-      bundle = bundle + "registerModule(\"" + id + "\", ...);\n";
-    }
-    
-    i = i + 1;
-  }
-  
-  return bundle;
-}
-
-// Resolve module path (normalize and validate)
-export function resolveModulePath(importPath: string): string {
-  // Handle built-in modules
-  if (importPath == "art/react") { return "art/react"; }
-  if (importPath == "art/net") { return "art/net"; }
-  if (importPath == "art/fs") { return "art/fs"; }
-  
-  // Handle relative paths (simplified)
-  if (importPath.substring(0, 2) == "./") {
-    return importPath.substring(2);
-  }
-  if (importPath.substring(0, 3) == "../") {
-    return importPath.substring(3);
-  }
-  
-  // Handle node_modules style
-  if (importPath.substring(0, 1) != ".") {
-    return "node_modules/" + importPath;
-  }
-  
-  return importPath;
-}
-
-// Parse import statement (basic parsing)
-export function parseImportStatement(statement: string): [importType: string, source: string, names: string[]] {
-  // Very simplified parsing - real implementation would be more robust
-  
-  // Detect ES6 import
-  if (statement.substring(0, 6) == "import") {
-    // Extract source (between quotes)
-    let startQuote: number = indexOf(statement, "\"");
-    if (startQuote < 0) {
-      startQuote = indexOf(statement, "'");
-    }
-    if (startQuote >= 0) {
-      let endQuote: number = indexOf(statement.substring(startQuote + 1), "\"");
-      if (endQuote < 0) {
-        endQuote = indexOf(statement.substring(startQuote + 1), "'");
-      }
-      if (endQuote >= 0) {
-        let source: string = statement.substring(startQuote + 1, startQuote + 1 + endQuote);
-        return ["es6", source, []];
-      }
-    }
-  }
-  
-  // Detect CommonJS require
-  if (indexOf(statement, "require(") >= 0) {
-    let startParen: number = indexOf(statement, "(");
-    let endParen: number = indexOf(statement, ")");
-    if (startParen >= 0 && endParen > startParen) {
-      let args: string = statement.substring(startParen + 1, endParen);
-      let startQuote: number = indexOf(args, "\"");
-      if (startQuote < 0) {
-        startQuote = indexOf(args, "'");
-      }
-      if (startQuote >= 0) {
-        let endQuote: number = indexOf(args.substring(startQuote + 1), "\"");
-        if (endQuote < 0) {
-          endQuote = indexOf(args.substring(startQuote + 1), "'");
-        }
-        if (endQuote >= 0) {
-          let source: string = args.substring(startQuote + 1, startQuote + 1 + endQuote);
-          return ["commonjs", source, []];
-        }
-      }
-    }
-  }
-  
-  return ["unknown", "", []];
-}
-
-// Helper: Find index of substring
-function indexOf(str: string, search: string): number {
-  let i: number = 0;
-  while (i <= str.length - search.length) {
-    let match: boolean = true;
-    let j: number = 0;
-    while (j < search.length) {
-      if (str.substring(i + j, i + j + 1) != search.substring(j, j + 1)) {
-        match = false;
-      }
-      j = j + 1;
-    }
-    if (match) { return i; }
-    i = i + 1;
-  }
-  return -1;
+/**
+ * List all modules with their load status and export count
+ *
+ * @returns Array of module metadata
+ */
+export function listAllModules(): ModuleMetadata[] {
+  return Array.from(_modules.keys()).map(id => {
+    const metadata = getModuleMetadata(id);
+    return metadata || { id, loaded: false, cached: false, exportCount: 0 };
+  });
 }
