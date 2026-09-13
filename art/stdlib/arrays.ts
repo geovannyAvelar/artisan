@@ -34,6 +34,30 @@ export function every<T>(arr: T[], fn: (x: T) => boolean): boolean {
   return true;
 }
 
+// Returns a new array with elements transformed by fn.
+export function map<T, U>(arr: T[], fn: (x: T) => U): U[] {
+  let result: U[] = [];
+  let i: number = 0;
+  while (i < arr.length) {
+    result = result + [fn(arr[i])];
+    i = i + 1;
+  }
+  return result;
+}
+
+// Returns a new array with only elements where fn returns true.
+export function filter<T>(arr: T[], fn: (x: T) => boolean): T[] {
+  let result: T[] = [];
+  let i: number = 0;
+  while (i < arr.length) {
+    if (fn(arr[i])) {
+      result = result + [arr[i]];
+    }
+    i = i + 1;
+  }
+  return result;
+}
+
 // Returns the first element where fn returns true, or null.
 export function find<T>(arr: T[], fn: (x: T) => boolean): T | null {
   let i: number = 0;
@@ -106,6 +130,116 @@ export function join(arr: number[], separator: string): string {
   while (i < arr.length) {
     if (i > 0) { result = result + separator; }
     result = result + numberToString(arr[i]);
+    i = i + 1;
+  }
+  return result;
+}
+
+// Returns a new array with elements in reverse order.
+export function reverse<T>(arr: T[]): T[] {
+  let result: T[] = [];
+  let i: number = arr.length - 1;
+  while (i >= 0) {
+    result = result + [arr[i]];
+    i = i - 1;
+  }
+  return result;
+}
+
+// Returns a shallow copy of a portion of the array.
+export function slice<T>(arr: T[], start: number, end: number): T[] {
+  if (start < 0) { start = arr.length + start; }
+  if (end < 0) { end = arr.length + end; }
+  if (start < 0) { start = 0; }
+  if (end > arr.length) { end = arr.length; }
+  if (start >= end) { return []; }
+
+  let result: T[] = [];
+  let i: number = start;
+  while (i < end) {
+    result = result + [arr[i]];
+    i = i + 1;
+  }
+  return result;
+}
+
+// Returns a new array with all sub-array elements concatenated.
+export function flat<T>(arr: T[][]): T[] {
+  let result: T[] = [];
+  let i: number = 0;
+  while (i < arr.length) {
+    let j: number = 0;
+    while (j < arr[i].length) {
+      result = result + [arr[i][j]];
+      j = j + 1;
+    }
+    i = i + 1;
+  }
+  return result;
+}
+
+// Fills array with value from start to end (mutates array).
+export function fill<T>(arr: T[], value: T, start: number, end: number): T[] {
+  if (start < 0) { start = 0; }
+  if (end > arr.length) { end = arr.length; }
+
+  let i: number = start;
+  while (i < end) {
+    arr[i] = value;
+    i = i + 1;
+  }
+  return arr;
+}
+
+// Concatenates array with other arrays, returning new array.
+export function concat<T>(arr: T[], other: T[]): T[] {
+  let result: T[] = [];
+  let i: number = 0;
+  while (i < arr.length) {
+    result = result + [arr[i]];
+    i = i + 1;
+  }
+  i = 0;
+  while (i < other.length) {
+    result = result + [other[i]];
+    i = i + 1;
+  }
+  return result;
+}
+
+// Returns true if array is empty.
+export function isEmpty<T>(arr: T[]): boolean {
+  return arr.length == 0;
+}
+
+// Returns the first element of array, or null.
+export function first<T>(arr: T[]): T | null {
+  if (arr.length == 0) { return null; }
+  return notNull::<T>(arr[0]);
+}
+
+// Returns the last element of array, or null.
+export function last<T>(arr: T[]): T | null {
+  if (arr.length == 0) { return null; }
+  return notNull::<T>(arr[arr.length - 1]);
+}
+
+// Returns a new array with duplicates removed (preserves order).
+export function unique<T>(arr: T[]): T[] {
+  let result: T[] = [];
+  let i: number = 0;
+  while (i < arr.length) {
+    let found: boolean = false;
+    let j: number = 0;
+    while (j < result.length) {
+      if (result[j] == arr[i]) {
+        found = true;
+      }
+      j = j + 1;
+    }
+    if (!found) {
+      result = result + [arr[i]];
+    }
     i = i + 1;
   }
   return result;

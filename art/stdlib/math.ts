@@ -273,3 +273,181 @@ export function degreesToRadians(degrees: number): number {
 export function radiansToDegrees(radians: number): number {
   return radians * 180 / PI;
 }
+
+// Sine function (radians). Uses Taylor series approximation.
+export function sin(x: number): number {
+  x = x - 6.283185307 * floor(x / 6.283185307);  // Normalize to [0, 2π)
+
+  let result: number = 0;
+  let term: number = x;
+  let i: number = 1;
+
+  while (i < 20 && abs(term) > 0.0000001) {
+    result = result + term;
+    term = term * (-x * x) / ((2 * i) * (2 * i + 1));
+    i = i + 1;
+  }
+
+  return result;
+}
+
+// Cosine function (radians). Uses Taylor series approximation.
+export function cos(x: number): number {
+  x = x - 6.283185307 * floor(x / 6.283185307);
+
+  let result: number = 1;
+  let term: number = 1;
+  let i: number = 1;
+
+  while (i < 20 && abs(term) > 0.0000001) {
+    term = term * (-x * x) / ((2 * i - 1) * (2 * i));
+    result = result + term;
+    i = i + 1;
+  }
+
+  return result;
+}
+
+// Tangent function (radians).
+export function tan(x: number): number {
+  let c: number = cos(x);
+  if (abs(c) < 0.0000001) { return 0; }
+  return sin(x) / c;
+}
+
+// Arcsine function. Returns value in [-π/2, π/2].
+export function asin(x: number): number {
+  if (x < -1 || x > 1) { return 0; }
+  if (x == 0) { return 0; }
+  if (x == 1) { return PI / 2; }
+  if (x == -1) { return -PI / 2; }
+
+  let result: number = x;
+  let power: number = x;
+  let i: number = 1;
+
+  while (i < 20 && abs(power) > 0.0000001) {
+    power = power * x * x * (2 * i - 1) / (2 * i);
+    result = result + power / (2 * i + 1);
+    i = i + 1;
+  }
+
+  return result;
+}
+
+// Arccosine function. Returns value in [0, π].
+export function acos(x: number): number {
+  if (x < -1 || x > 1) { return 0; }
+  return PI / 2 - asin(x);
+}
+
+// Arctangent function. Returns value in [-π/2, π/2].
+export function atan(x: number): number {
+  if (x == 0) { return 0; }
+
+  let result: number = x;
+  let power: number = x;
+  let i: number = 1;
+
+  while (i < 20 && abs(power) > 0.0000001) {
+    power = power * (-x * x) * (2 * i - 1) / (2 * i + 1);
+    result = result + power;
+    i = i + 1;
+  }
+
+  return result;
+}
+
+// Natural logarithm (base e). Uses series approximation.
+export function log(x: number): number {
+  if (x <= 0) { return 0; }
+  if (x == 1) { return 0; }
+
+  let y: number = (x - 1) / (x + 1);
+  let result: number = 0;
+  let power: number = y;
+  let i: number = 0;
+
+  while (i < 20 && abs(power) > 0.0000001) {
+    result = result + power / (2 * i + 1);
+    power = power * y * y;
+    i = i + 1;
+  }
+
+  return 2 * result;
+}
+
+// Base-10 logarithm.
+export function log10(x: number): number {
+  if (x <= 0) { return 0; }
+  return log(x) / log(10);
+}
+
+// Base-2 logarithm.
+export function log2(x: number): number {
+  if (x <= 0) { return 0; }
+  return log(x) / log(2);
+}
+
+// Logarithm with arbitrary base.
+export function logBase(x: number, base: number): number {
+  if (x <= 0 || base <= 0 || base == 1) { return 0; }
+  return log(x) / log(base);
+}
+
+// Exponential function (e^x). Uses Taylor series.
+export function exp(x: number): number {
+  if (x == 0) { return 1; }
+
+  let result: number = 1;
+  let term: number = 1;
+  let i: number = 1;
+
+  while (i < 20 && abs(term) > 0.0000001) {
+    term = term * x / i;
+    result = result + term;
+    i = i + 1;
+  }
+
+  return result;
+}
+
+// Returns x raised to power y. For integer exponents uses repeated multiplication.
+export function pow(x: number, y: number): number {
+  if (y == 0) { return 1; }
+  if (y == 1) { return x; }
+  if (y < 0) { return 1 / pow(x, -y); }
+
+  if (isInteger(y)) {
+    let result: number = 1;
+    let n: number = y;
+    let base: number = x;
+
+    while (n > 0) {
+      if (isOdd(n)) {
+        result = result * base;
+      }
+      base = base * base;
+      n = floor(n / 2);
+    }
+    return result;
+  }
+
+  return exp(y * log(x));
+}
+
+// Hyperbolic sine.
+export function sinh(x: number): number {
+  return (exp(x) - exp(-x)) / 2;
+}
+
+// Hyperbolic cosine.
+export function cosh(x: number): number {
+  return (exp(x) + exp(-x)) / 2;
+}
+
+// Hyperbolic tangent.
+export function tanh(x: number): number {
+  let e2x: number = exp(2 * x);
+  return (e2x - 1) / (e2x + 1);
+}
