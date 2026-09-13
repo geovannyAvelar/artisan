@@ -1,262 +1,325 @@
-# Bundling Angular for Artisan
+# Using Angular in Artisan
 
-This example demonstrates how to bundle Angular and use it within the Artisan QuickJS runtime.
+Angular and RxJS are **built-in** to Artisan! No bundling or setup required.
 
-## What This Example Shows
+## Quick Start (Recommended)
 
-- Setting up Angular for bundling with esbuild
-- Handling Angular's dependencies (RxJS, Zone.js)
-- Creating module wrappers for Angular packages
-- Using Angular in Artisan applications
+Use the built-in Angular module:
 
-## Quick Start
+```typescript
+import { setupAngular, createFormGroup, getService } from "art/angular";
+
+export function startApp(): void {
+  // Initialize Angular - one line!
+  setupAngular();
+  
+  // Use Angular immediately
+  const Angular = require("@angular/core");
+  const Forms = require("@angular/forms");
+  
+  // Create components
+  @Angular.Component({
+    selector: "app-hello",
+    template: "<h1>Hello from Angular!</h1>"
+  })
+  class HelloComponent {}
+  
+  // Create forms
+  const form = createFormGroup({
+    name: [""],
+    email: [""]
+  });
+  
+  console.log("✓ Angular ready!");
+}
+```
+
+That's it! No bundling, no configuration, no boilerplate.
+
+## What's Included
+
+The built-in `art/angular` module provides:
+
+- **@angular/core** - Components, decorators, dependency injection
+- **@angular/common** - Built-in directives and pipes
+- **@angular/forms** - FormControl, FormGroup, FormBuilder, validators
+- **@angular/platform-browser** - BrowserModule, DomSanitizer
+- **rxjs** - Observable, Subject, operators (map, filter, take)
+
+## Using Angular Features
+
+### Components and Decorators
+
+```typescript
+const Angular = require("@angular/core");
+
+@Angular.Component({
+  selector: "app-user",
+  template: "<h1>{{name}}</h1>"
+})
+class UserComponent {
+  name: string = "John";
+}
+
+// Lifecycle hooks are available
+class MyComponent extends Angular.OnInit {
+  ngOnInit() {
+    console.log("Component initialized");
+  }
+}
+```
+
+### Reactive Forms
+
+```typescript
+const Forms = require("@angular/forms");
+
+// Using FormBuilder
+const form = new Forms.FormBuilder().group({
+  username: ["john_doe"],
+  email: ["john@example.com"],
+  password: [""]
+});
+
+// Access controls
+form.get("username").setValue("jane_doe");
+
+// Validate
+console.log("Form valid:", form.valid);
+```
+
+### Services and Dependency Injection
+
+```typescript
+const Angular = require("@angular/core");
+
+@Angular.Injectable()
+class DataService {
+  getData(): string[] {
+    return ["item1", "item2", "item3"];
+  }
+}
+
+const service = getService(DataService);
+console.log(service.getData());
+```
+
+### RxJS Observables
+
+```typescript
+const rxjs = require("rxjs");
+const { map, filter } = rxjs.operators;
+
+// Create observable
+const source = rxjs.Observable.of(1, 2, 3, 4, 5);
+
+// Transform and subscribe
+source
+  .pipe(
+    filter((x: number) => x > 2),
+    map((x: number) => x * 2)
+  )
+  .subscribe({
+    next: (value: number) => console.log("Value:", value)
+  });
+```
+
+## Advanced: Custom Angular Bundling
+
+If you need a newer version of Angular or custom features not in the built-in module, you can bundle your own:
 
 ### 1. Install Dependencies
 
 ```bash
-cd examples/bundling/angular
 npm install @angular/core @angular/common @angular/forms \
-            @angular/platform-browser @angular/platform-browser-dynamic \
-            rxjs zone.js typescript
+            rxjs typescript
 ```
 
-### 2. Bundle Angular
+### 2. Create Bundle Entry
+
+```javascript
+// bundle-angular.js
+export * from "@angular/core";
+export * from "@angular/common";
+export * from "@angular/forms";
+```
+
+### 3. Bundle with esbuild
 
 ```bash
-# Install esbuild if not already installed
-npm install esbuild --save-dev
-
-# Run bundling script
-bash bundle.sh
+npx esbuild bundle-angular.js --bundle --minify --format=iife --outfile=angular-bundle.js
 ```
 
-This creates:
-- `bundles/rxjs.js` - RxJS library
-- `bundles/angular-core.js` - Angular core
-- `bundles/angular-full.js` - Angular + common + forms
-
-### 3. Generate Module Wrappers
-
-```bash
-python3 ../wrap-bundle.py bundles/rxjs.js "rxjs" > src/rxjs-module.ts
-python3 ../wrap-bundle.py bundles/angular-core.js "@angular/core" > src/angular-module.ts
-```
-
-### 4. Use in Your Application
+### 4. Register Custom Module
 
 ```typescript
-import { setupAngularModules } from "./src/angular-module";
-import { setupRxJS } from "./src/rxjs-module";
+import { registerModule, require } from "art/modules";
 
-export function startApp(): void {
-  // Register modules
-  setupRxJS();
-  setupAngularModules();
-  
-  // Use Angular
-  const Angular = require("@angular/core");
-  
-  // Create components
-  const HelloComponent = Angular.Component({
-    selector: 'app-hello',
-    template: '<h1>Hello from Angular!</h1>'
-  })(class HelloComponent {});
-  
-  // Use Angular decorators and features
-  console.log("Angular loaded:", typeof Angular.Component === 'function');
-}
-```
-
-## Directory Structure
-
-```
-examples/bundling/angular/
-  ├── README.md                    # This file
-  ├── bundle.sh                    # Script to bundle Angular
-  ├── bundle-*.js                  # Entry points for esbuild
-  ├── bundles/                     # Output bundles
-  │   ├── rxjs.js
-  │   ├── angular-core.js
-  │   └── angular-full.js
-  ├── src/
-  │   ├── app.ts                   # Main application
-  │   ├── angular-module.ts        # Angular module registration
-  │   └── rxjs-module.ts           # RxJS module registration
-  └── package.json
-```
-
-## Key Files
-
-### `bundle.sh`
-Bash script that:
-1. Creates bundle entry points
-2. Runs esbuild to create bundles
-3. Lists output files
-
-### `app.ts`
-Shows how to:
-- Register bundled modules
-- Import Angular from the module system
-- Use Angular features
-
-### `src/angular-module.ts` (Generated)
-Auto-generated module wrapper that:
-- Embeds the bundled Angular code
-- Registers it with `registerModule()`
-- Exports Angular components and decorators
-
-## Bundling Process Explained
-
-### Why Separate Bundles?
-
-**RxJS (standalone)**
-- Angular depends on RxJS
-- Must be bundled separately
-- Large library that could be shared
-
-**Angular Core**
-- Just @angular/core
-- Minimal but functional
-- Good for small applications
-
-**Angular Full**
-- @angular/core + @angular/common + @angular/forms
-- Complete Angular experience
-- Larger bundle
-
-### esbuild Flags Used
-
-```bash
-esbuild input.js \
-  --bundle              # Include all dependencies
-  --format=iife         # Wrap in function for isolation
-  --platform=neutral    # Not browser/node specific
-  --minify              # Reduce size
-  --external:zone.js    # Don't bundle zone.js
-```
-
-## Size Considerations
-
-Typical bundle sizes:
-- RxJS alone: ~500KB
-- Angular core: ~1.5MB
-- Angular full: ~2MB
-- Minified and gzipped: ~60-70% smaller
-
-## Using Angular Features
-
-Once bundled and registered, you can use:
-
-### Decorators
-```typescript
-const Angular = require("@angular/core");
-
-class MyComponent {
-  name = "World";
-}
-
-const Decorated = Angular.Component({
-  selector: 'my-component',
-  template: '<h1>Hello {{name}}</h1>'
-})(MyComponent);
-```
-
-### Dependency Injection
-```typescript
-class DataService {
-  getData() { return ["a", "b", "c"]; }
-}
-
-const Component = Angular.Component({
-  selector: 'data-component'
-})(class {
-  constructor(service: DataService) {
-    this.data = service.getData();
-  }
+// Register your custom bundle
+registerModule("@angular/custom", function(module, exports, require) {
+  // Embed bundled code here
+  const angularCode = `/* bundled angular code */`;
+  // ... setup exports
 });
 ```
 
-### Reactive Forms
-```typescript
-const FormBuilder = require("@angular/forms").FormBuilder;
+## Available Built-in Angular Modules
 
-class MyForm {
-  form: any;
+| Module | Contents |
+|--------|----------|
+| `@angular/core` | Components, decorators, lifecycle hooks, dependency injection |
+| `@angular/common` | CommonModule, directives (NgIf, NgFor, NgClass), pipes (DatePipe, UpperCasePipe) |
+| `@angular/forms` | FormControl, FormGroup, FormArray, FormBuilder, validators |
+| `@angular/platform-browser` | BrowserModule, DomSanitizer, bootstrapApplication |
+| `rxjs` | Observable, Subject, operators (map, filter, take) |
+
+## API Reference
+
+### setupAngular()
+Initializes all built-in Angular and RxJS modules. Call this once at startup.
+
+```typescript
+import { setupAngular } from "art/angular";
+
+setupAngular();
+```
+
+### Helper Functions
+
+```typescript
+// Create forms easily
+const form = createFormGroup({
+  name: ["John"],
+  email: ["john@example.com"]
+});
+
+// Create form controls
+const control = createFormControl("initial value");
+
+// Get a service instance
+const service = getService(MyService);
+```
+
+## Common Patterns
+
+### Complete Example: User Management
+
+```typescript
+import { setupAngular, createFormGroup, getService } from "art/angular";
+
+setupAngular();
+
+const Angular = require("@angular/core");
+const Forms = require("@angular/forms");
+
+// Service
+@Angular.Injectable()
+class UserService {
+  users: any[] = [];
   
-  constructor(fb: FormBuilder) {
-    this.form = fb.group({
-      name: [''],
-      email: ['']
-    });
+  addUser(user: any): void {
+    this.users.push(user);
+  }
+  
+  getUsers(): any[] {
+    return this.users;
   }
 }
+
+// Component
+@Angular.Component({
+  selector: "app-user-manager",
+  template: `<div>User Manager</div>`
+})
+class UserManagerComponent {
+  form: any;
+  users: any[] = [];
+  
+  constructor(service: UserService) {
+    this.form = createFormGroup({
+      name: [""],
+      email: [""]
+    });
+    this.users = service.getUsers();
+  }
+  
+  addUser(): void {
+    const values = this.form.getValues();
+    console.log("Adding user:", values);
+  }
+}
+
+// Use it
+const service = getService(UserService);
+const component = new UserManagerComponent(service);
+component.addUser();
 ```
 
-## Common Issues and Solutions
+## When to Use Built-in vs Custom Bundling
 
-### "RxJS is not defined"
-**Problem**: Angular module tries to use RxJS before it's registered
-**Solution**: Call `setupRxJS()` before `setupAngularModules()`
+### Use Built-in Angular When:
+✅ Using standard Angular features
+✅ Want zero setup time
+✅ Need rapid prototyping
+✅ Want smaller bundle sizes
+✅ Don't need cutting-edge features
 
-### "Zone.js is required"
-**Problem**: Angular expects zone.js polyfills
-**Solution**: Either bundle zone.js or provide minimal polyfill:
+### Use Custom Bundling When:
+📦 Need newer Angular version
+📦 Using specialized packages (@angular/router, @angular/http)
+📦 Customizing Angular source
+📦 Optimizing for size/performance
+
+## Performance Characteristics
+
+**Built-in Module:**
+- Pre-compiled and cached
+- Instant initialization with `setupAngular()`
+- Minimal memory overhead
+- Ideal for most applications
+
+**Custom Bundles:**
+- More control over features
+- Potential size optimization
+- Additional setup required
+- Best for specialized use cases
+
+## Troubleshooting
+
+### Components not rendering
+Make sure `setupAngular()` is called before accessing Angular:
 ```typescript
-globalThis.Zone = {
-  current: { run: (fn: any) => fn() }
-};
+import { setupAngular } from "art/angular";
+
+// ✓ Correct
+setupAngular();
+const Angular = require("@angular/core");
+
+// ✗ Wrong
+const Angular = require("@angular/core");  // Not initialized yet
 ```
 
-### Bundle too large
-**Solution**: 
-- Use `--minify` flag in esbuild
-- Bundle only what you need
-- Consider using lighter alternatives
+### Form validation not working
+Use the built-in Validators class:
+```typescript
+const Forms = require("@angular/forms");
 
-### "Cannot find module"
-**Problem**: Bundled code references external module
-**Solution**: Mark it as external during bundling:
-```bash
-esbuild input.js --bundle --external:tslib --external:zone.js
+const control = new Forms.FormControl(
+  "",
+  Forms.Validators.required
+);
 ```
 
-## Advanced: Custom Angular Bundle
+### Services not injecting
+Use `getService()` helper:
+```typescript
+import { getService } from "art/angular";
 
-To bundle only specific Angular features:
-
-```javascript
-// bundle-custom-angular.js
-// Only what your app needs
-export { Component, NgModule } from "@angular/core";
-export { CommonModule } from "@angular/common";
-export { FormsModule } from "@angular/forms";
+const myService = getService(MyService);
 ```
 
-Then bundle with:
-```bash
-esbuild bundle-custom-angular.js --bundle --minify
-```
+## See Also
 
-This creates a much smaller bundle with only the features you use.
-
-## Performance Tips
-
-1. **Lazy load modules**: Register only the modules you need
-2. **Tree-shake**: Use esbuild's tree shaking to remove unused code
-3. **Separate concerns**: Bundle different packages separately
-4. **Cache modules**: The module system caches, so first load is worst
-5. **Monitor sizes**: Keep bundles under 2MB when possible
-
-## References
-
-- Angular Documentation: https://angular.io/docs
-- esbuild Bundler: https://esbuild.github.io/
-- Artisan Module System: See MODULES.md
-- Bundling Guide: See BUNDLING.md
-
-## Next Steps
-
-1. Try the bundling process step by step
-2. Experiment with different bundle configurations
-3. Create a bundling pipeline for your project
-4. Integrate with your build system
+- [Module System Guide](../../docs/MODULES.md) - How modules work
+- [Bundling Guide](../../docs/BUNDLING.md) - Custom bundling for other packages
+- [ART Guide](../../docs/ART_GUIDE.md) - ART language for high-performance code

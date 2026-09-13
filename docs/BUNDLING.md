@@ -2,6 +2,23 @@
 
 This guide explains how to bundle npm packages (Angular, Express, Vue, etc.) for use within the Artisan QuickJS runtime.
 
+## Quick Note: Built-in Packages
+
+**Angular and RxJS are already built-in!** 
+
+If you just need Angular, import it directly:
+
+```typescript
+import { setupAngular } from "art/angular";
+
+setupAngular();
+const Angular = require("@angular/core");
+```
+
+No bundling or setup needed. See [Angular integration example](../examples/bundling/angular/) for details.
+
+This guide is for bundling **other npm packages** or custom versions.
+
 ## Overview
 
 The module system can load pre-bundled npm packages by wrapping them in `registerModule()`. This guide shows how to:
@@ -15,7 +32,7 @@ The module system can load pre-bundled npm packages by wrapping them in `registe
 Before bundling, ensure you have:
 - Node.js and npm installed
 - esbuild installed: `npm install -g esbuild` or `npm install esbuild`
-- The packages you want to bundle (e.g., `npm install @angular/core`)
+- The packages you want to bundle (e.g., `npm install express lodash`)
 
 ## General Bundling Process
 

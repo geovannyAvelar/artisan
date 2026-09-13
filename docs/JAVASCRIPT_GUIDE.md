@@ -424,6 +424,43 @@ ReactDOM.createRoot(document.getElementById("root")).render(<Counter />);
 
 See [Module System Guide](MODULES.md) for more details.
 
+## Using Angular Instead of React
+
+Artisan also has **built-in Angular support** with:
+- @angular/core, @angular/common, @angular/forms
+- RxJS for reactive programming
+- Full dependency injection and decorators
+
+```typescript
+import { setupAngular, createFormGroup } from "art/angular";
+
+setupAngular();
+
+const Angular = require("@angular/core");
+
+@Angular.Component({
+  selector: "app-counter",
+  template: "<div>Angular component</div>"
+})
+class CounterComponent {
+  count: number = 0;
+}
+
+// Forms work the same way
+const form = createFormGroup({
+  username: [""],
+  email: [""]
+});
+```
+
+Use Angular when:
+- You prefer Angular's patterns and structure
+- You want TypeScript decorators
+- You need reactive forms
+- You're familiar with Angular ecosystem
+
+See [Angular integration guide](../examples/bundling/angular/README.md) for complete examples.
+
 ## Combining React with ART
 
 Use React for UI, ART for performance-critical code:
