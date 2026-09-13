@@ -47,7 +47,7 @@ Choose your preferred language:
 
 ## Organizing Code
 
-**[Module System Guide](../MODULES.md)** - CommonJS and ES6 modules
+**[Module System Guide](MODULES.md)** - CommonJS and ES6 modules
 - Module registration and loading
 - CommonJS require() patterns
 - ES6 import/export syntax
@@ -58,7 +58,7 @@ Choose your preferred language:
 
 ## Using Frameworks & Libraries
 
-**[Bundling Guide](../BUNDLING.md)** - Using npm packages
+**[Bundling Guide](BUNDLING.md)** - Using npm packages
 - Bundling Angular, React, Vue, and other frameworks
 - esbuild integration
 - Creating bundles for npm packages
@@ -70,19 +70,19 @@ Choose your preferred language:
 
 ### Integration & Architecture
 
-**[Module System Summary](../MODULE_SYSTEM_SUMMARY.md)** - Architecture overview
+**[Module System Architecture](MODULE_SYSTEM_SUMMARY.md)** - Architecture overview
 - How the module system enables frameworks
 - Performance considerations
 - Bundling strategy
 - Next steps for npm integration
 
-**[React Integration Status](../REACT_IN_ARTISAN.md)** - Complete React feature overview
+**[React Features](REACT_IN_ARTISAN.md)** - Complete React feature overview
 - Component architecture
 - Hooks support
 - Performance notes
 - Integration patterns
 
-**[React Integration Guide](../REACT_INTEGRATION.md)** - Detailed React patterns
+**[React Patterns](REACT_INTEGRATION.md)** - Detailed React patterns
 - Creating React components
 - Using Artisan-specific features
 - Styling and theming

@@ -50,9 +50,9 @@ This scaffolds a project with ART (`app.tsx`) and creates a native binary.
 - **[React Bundling](examples/bundling/react/)** - Bundling React packages
 
 ### Advanced Topics
-- **[Module System Summary](MODULE_SYSTEM_SUMMARY.md)** - Architecture and capabilities
-- **[React Integration Status](REACT_IN_ARTISAN.md)** - Complete React support overview
-- **[React Integration Guide](REACT_INTEGRATION.md)** - Detailed React usage patterns
+- **[Module System Architecture](docs/MODULE_SYSTEM_SUMMARY.md)** - Architecture and capabilities
+- **[React Features](docs/REACT_IN_ARTISAN.md)** - Complete React support overview
+- **[React Patterns](docs/REACT_INTEGRATION.md)** - Detailed React usage patterns
 
 ## Features
 
