@@ -1,7 +1,11 @@
 // React Counter Example
 // This demonstrates a fully functional React application running in Artisan
+// Uses the simplified art/react module for easy setup
 
-import { useState, useEffect } from "react";
+import { setupReact, createRoot, useState, useEffect } from "art/react";
+
+// Initialize React - just one line!
+setupReact();
 
 function Counter({ initialValue = 0, step = 1 }) {
   const [count, setCount] = useState(initialValue);
@@ -92,16 +96,10 @@ function App() {
   );
 }
 
-// Mount the app
-const root = document.getElementById("root");
+// Mount the app to #root
+const root = createRoot("root");
 if (root) {
-  const container = document.createElement("div");
-  root.appendChild(container);
-  
-  // In a full setup, this would be:
-  // ReactDOM.createRoot(container).render(<App />);
-  // 
-  // For now, the React rendering setup depends on:
-  // 1. js-prelude.js loading React and ReactDOM
-  // 2. h and Fragment globals being set to React equivalents
+  root.render(<App />);
+} else {
+  console.error("Failed to create React root");
 }

@@ -1,179 +1,440 @@
-// React integration module for ART. Import with: `import { setupReact, createReactRoot, ... } from "art/react";`
-// Provides utilities for running React applications through QuickJS.
+// React integration module for ART. Import with: `import { setupReact, createRoot, ... } from "art/react";`
+// Provides simplified React 18.3.1 setup and comprehensive utilities.
 
-// React context type for managing the React runtime
-export type ReactContext = number;
+// Get React from the pre-vendored module
+function getReact(): any {
+  return (globalThis as any).React;
+}
 
-// React component type
-export type ReactComponent = (props: any) => any;
+function getReactDOM(): any {
+  return (globalThis as any).ReactDOM;
+}
 
-// React element type
-export type ReactElement = any;
+// ============================================================================
+// Setup
+// ============================================================================
 
-// Root rendering context
-type RootContext = [rootNode: any, isDirty: boolean, suspense: boolean];
-let _reactContexts: RootContext[] = [];
-let _contextCounter: number = 0;
-
-// Initialize React in the QuickJS context. Must be called before using React.
-// Loads react.development.js and react-dom.development.js
+// Initialize React - call this once at startup
 export function setupReact(): boolean {
-  // This would be called from C++ or through a mechanism that has access to
-  // the vendored React files in third_party/react/
-  // In practice, the embedding application (like an Artisan CLI command)
-  // would handle loading react-runtime.js (which concatenates the bundles)
-  // before invoking the script engine.
+  // React 18.3.1 is pre-vendored and available globally
+  const React = getReact();
+  const ReactDOM = getReactDOM();
+
+  if (!React || !ReactDOM) {
+    console.warn("React or ReactDOM not found. Is it pre-vendored?");
+    return false;
+  }
+
   return true;
 }
 
-// Creates a React root and mounts the given component to a DOM node.
-// In React 18+, this replaces the old ReactDOM.render() API.
-export function createReactRoot(domNode: any, component: ReactComponent): ReactContext {
-  let contextId: ReactContext = _contextCounter;
-  _contextCounter = _contextCounter + 1;
-  
-  // Store the rendering context
-  _reactContexts = _reactContexts + [[domNode, true, false]];
-  
-  return contextId;
+// Create a React root and mount a component to a DOM node
+export function createRoot(container: HTMLElement | string): any {
+  const ReactDOM = getReactDOM();
+
+  if (typeof container === "string") {
+    const el = document.getElementById(container);
+    if (!el) {
+      console.error("Container element not found:", container);
+      return null;
+    }
+    return ReactDOM.createRoot(el);
+  }
+
+  return ReactDOM.createRoot(container);
 }
 
-// Renders a React component to a root created with createReactRoot().
-// This is called to actually render the component after createReactRoot().
-export function renderToRoot(context: ReactContext, component: ReactComponent): boolean {
-  if (context < 0 || context >= _reactContexts.length) { return false; }
-  
-  let root: RootContext = _reactContexts[context];
-  
-  // Mark the root as needing redraw
-  root[1] = true;
-  
-  // In actual implementation, this would call React's root.render(component)
-  // through the QuickJS binding layer
-  
+// Shortcut to create and render a component in one call
+export function render(component: any, container: HTMLElement | string): boolean {
+  const root = createRoot(container);
+  if (!root) return false;
+
+  root.render(component);
   return true;
 }
 
-// Creates a simple functional component wrapper.
-// Components in React are just functions that return elements.
-export function createComponent(renderFn: (props: any) => ReactElement): ReactComponent {
-  // Return a function that matches the React component signature
-  return renderFn;
+// ============================================================================
+// Hooks
+// ============================================================================
+
+// useState hook
+export function useState<T>(initialValue: T | (() => T)): [T, (value: T | ((prev: T) => T)) => void] {
+  const React = getReact();
+  return React.useState(initialValue);
 }
 
-// Hooks API wrapper for useState - manages component state.
-// Note: This requires actual React to be loaded in QuickJS context.
-// The real implementation would call React.useState directly.
-export function useState<T>(initialValue: T): [T, (newValue: T) => void] {
-  // Placeholder - the real implementation uses React.useState from QuickJS
-  let currentValue: T = initialValue;
-  
-  let setter: (newValue: T) => void = function(newValue: T): void {
-    currentValue = newValue;
-  };
-  
-  return [currentValue, setter];
+// useEffect hook
+export function useEffect(
+  effect: () => void | (() => void),
+  deps?: any[]
+): void {
+  const React = getReact();
+  return React.useEffect(effect, deps);
 }
 
-// Hooks API wrapper for useEffect.
-// Registers a side effect that runs when dependencies change.
-export function useEffect(fn: () => void, dependencies: any[]): void {
-  // Placeholder - the real implementation uses React.useEffect from QuickJS
-  fn();
-}
-
-// Hooks API wrapper for useCallback.
-// Memoizes a callback to prevent unnecessary re-renders.
+// useCallback hook
 export function useCallback<T extends (...args: any[]) => any>(
   callback: T,
-  dependencies: any[]
+  deps: any[]
 ): T {
-  // Placeholder - the real implementation uses React.useCallback from QuickJS
-  return callback;
+  const React = getReact();
+  return React.useCallback(callback, deps);
 }
 
-// Hooks API wrapper for useMemo.
-// Memoizes a computed value to prevent recalculation.
-export function useMemo<T>(fn: () => T, dependencies: any[]): T {
-  // Placeholder - the real implementation uses React.useMemo from QuickJS
-  return fn();
+// useMemo hook
+export function useMemo<T>(
+  factory: () => T,
+  deps: any[]
+): T {
+  const React = getReact();
+  return React.useMemo(factory, deps);
 }
 
-// Creates a React element (equivalent to React.createElement or JSX <tag />).
-// This is used internally by the JSX transform target.
-export function createElement(
-  tagOrComponent: string | ReactComponent,
-  props: any,
+// useRef hook
+export function useRef<T>(initialValue: T): { current: T } {
+  const React = getReact();
+  return React.useRef(initialValue);
+}
+
+// useContext hook
+export function useContext<T>(context: any): T {
+  const React = getReact();
+  return React.useContext(context);
+}
+
+// useReducer hook
+export function useReducer<S, A>(
+  reducer: (state: S, action: A) => S,
+  initialState: S,
+  init?: (initial: S) => S
+): [S, (action: A) => void] {
+  const React = getReact();
+  if (init) {
+    return React.useReducer(reducer, initialState, init);
+  }
+  return React.useReducer(reducer, initialState);
+}
+
+// ============================================================================
+// Context and Components
+// ============================================================================
+
+// Create a context for state management
+export function createContext<T>(defaultValue: T): any {
+  const React = getReact();
+  return React.createContext(defaultValue);
+}
+
+// Memo component for performance optimization
+export function memo<P>(
+  Component: (props: P) => any,
+  propsAreEqual?: (prevProps: P, nextProps: P) => boolean
+): any {
+  const React = getReact();
+  return React.memo(Component, propsAreEqual);
+}
+
+// ============================================================================
+// JSX and Element Creation
+// ============================================================================
+
+// Create a React element
+export function createElement<P>(
+  type: string | ((props: any) => any),
+  props?: P | null,
   ...children: any[]
-): ReactElement {
-  // Placeholder - real implementation delegates to React.createElement in QuickJS
+): any {
+  const React = getReact();
+  return React.createElement(type, props, ...children);
+}
+
+// Commonly used element shortcuts
+export function div(props?: any, ...children: any[]): any {
+  return createElement("div", props, ...children);
+}
+
+export function button(props?: any, ...children: any[]): any {
+  return createElement("button", props, ...children);
+}
+
+export function input(props?: any): any {
+  return createElement("input", props);
+}
+
+export function span(props?: any, ...children: any[]): any {
+  return createElement("span", props, ...children);
+}
+
+export function p(props?: any, ...children: any[]): any {
+  return createElement("p", props, ...children);
+}
+
+export function h1(props?: any, ...children: any[]): any {
+  return createElement("h1", props, ...children);
+}
+
+export function h2(props?: any, ...children: any[]): any {
+  return createElement("h2", props, ...children);
+}
+
+export function h3(props?: any, ...children: any[]): any {
+  return createElement("h3", props, ...children);
+}
+
+export function h4(props?: any, ...children: any[]): any {
+  return createElement("h4", props, ...children);
+}
+
+export function h5(props?: any, ...children: any[]): any {
+  return createElement("h5", props, ...children);
+}
+
+export function form(props?: any, ...children: any[]): any {
+  return createElement("form", props, ...children);
+}
+
+export function ul(props?: any, ...children: any[]): any {
+  return createElement("ul", props, ...children);
+}
+
+export function ol(props?: any, ...children: any[]): any {
+  return createElement("ol", props, ...children);
+}
+
+export function li(props?: any, ...children: any[]): any {
+  return createElement("li", props, ...children);
+}
+
+export function a(props?: any, ...children: any[]): any {
+  return createElement("a", props, ...children);
+}
+
+export function img(props?: any): any {
+  return createElement("img", props);
+}
+
+export function Fragment(props: any): any {
+  const React = getReact();
+  return React.Fragment;
+}
+
+// ============================================================================
+// Form Utilities
+// ============================================================================
+
+// Hook for managing form state
+export function useForm<T extends Record<string, any>>(
+  initialValues: T
+): {
+  values: T;
+  setValues: (values: Partial<T>) => void;
+  handleChange: (e: any) => void;
+  reset: () => void;
+} {
+  const [values, setValues] = useState(initialValues);
+  const initialValuesRef = useRef(initialValues);
+
+  const handleChange = (e: any) => {
+    const { name, value, type, checked } = e.target;
+    setValues({
+      ...values,
+      [name]: type === "checkbox" ? checked : value
+    });
+  };
+
+  const reset = () => {
+    setValues(initialValuesRef.current);
+  };
+
   return {
-    type: tagOrComponent,
-    props: props,
-    children: children,
+    values,
+    setValues: (v: Partial<T>) => setValues({ ...values, ...v }),
+    handleChange,
+    reset
   };
 }
 
-// Fragment component (equivalent to React.Fragment or <>...</>).
-// Renders multiple children without a wrapper element.
-export function Fragment(props: any): ReactElement {
+// ============================================================================
+// Common Patterns
+// ============================================================================
+
+// Conditional rendering helper
+export function conditional<T>(
+  condition: boolean,
+  trueComponent: T | null,
+  falseComponent?: T | null
+): T | null {
+  return condition ? trueComponent : (falseComponent || null);
+}
+
+// Map over items to create components
+export function mapComponents<T, R>(
+  items: T[],
+  renderItem: (item: T, index: number) => R
+): R[] {
+  return items.map(renderItem);
+}
+
+// ============================================================================
+// Development Utilities
+// ============================================================================
+
+// Logger hook for debugging
+export function useLogger(name: string, value: any): void {
+  useEffect(() => {
+    console.log(`[${name}]`, value);
+  }, [value]);
+}
+
+// Performance logger
+export function usePerformance(componentName: string): void {
+  const startTime = useRef(performance.now());
+
+  useEffect(() => {
+    return () => {
+      const endTime = performance.now();
+      const duration = endTime - startTime.current;
+      console.log(`${componentName} rendered in ${duration.toFixed(2)}ms`);
+    };
+  }, []);
+}
+
+// ============================================================================
+// API Integration Helpers
+// ============================================================================
+
+// Hook for fetching data
+export function useFetch<T>(
+  url: string,
+  options?: RequestInit
+): {
+  data: T | null;
+  loading: boolean;
+  error: Error | null;
+} {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch(url, options)
+      .then(response => response.json())
+      .then(json => {
+        if (!cancelled) {
+          setData(json);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setError(err);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  return { data, loading, error };
+}
+
+// Hook for async operations
+export function useAsync<T, E = Error>(
+  asyncFunction: () => Promise<T>,
+  deps?: any[]
+): {
+  result: T | null;
+  loading: boolean;
+  error: E | null;
+} {
+  const [result, setResult] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<E | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    asyncFunction()
+      .then(data => {
+        if (!cancelled) {
+          setResult(data);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setError(err);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, deps || []);
+
+  return { result, loading, error };
+}
+
+// ============================================================================
+// Animation Helpers
+// ============================================================================
+
+// Use requestAnimationFrame hook
+export function useAnimationFrame(callback: (timestamp: number) => void): void {
+  const frameRef = useRef<number>();
+
+  useEffect(() => {
+    const animate = (timestamp: number) => {
+      callback(timestamp);
+      frameRef.current = requestAnimationFrame(animate);
+    };
+
+    frameRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (frameRef.current) {
+        cancelAnimationFrame(frameRef.current);
+      }
+    };
+  }, []);
+}
+
+// ============================================================================
+// State Management Helpers
+// ============================================================================
+
+// Simple state management with Context
+export function createStore<T>(initialState: T): any {
+  const StoreContext = createContext<{ state: T; setState: (state: T) => void }>({
+    state: initialState,
+    setState: () => {}
+  });
+
   return {
-    type: "fragment",
-    props: props,
-    children: props.children,
+    context: StoreContext,
+    Provider: (props: any) => {
+      const [state, setState] = useState(initialState);
+
+      const React = getReact();
+      return React.createElement(
+        StoreContext.Provider,
+        { value: { state, setState } },
+        props.children
+      );
+    },
+    useStore: () => useContext(StoreContext)
   };
 }
 
-// Utility: Checks if a value is a valid React element.
-export function isReactElement(value: any): boolean {
-  if (typeof value != "object") { return false; }
-  if (value == null) { return false; }
-  // A simple heuristic - real React uses Symbol.for('react.element')
-  return value.type != null && (value.props != null || value.children != null);
-}
+// ============================================================================
+// Type Exports for TypeScript Support
+// ============================================================================
 
-// Utility: Retrieves the root node from a React context.
-export function getRootNode(context: ReactContext): any {
-  if (context < 0 || context >= _reactContexts.length) { return null; }
-  return _reactContexts[context][0];
-}
-
-// Utility: Checks if a root needs to be redrawn.
-export function isRootDirty(context: ReactContext): boolean {
-  if (context < 0 || context >= _reactContexts.length) { return false; }
-  return _reactContexts[context][1];
-}
-
-// Utility: Marks a root as clean (redrawn).
-export function markRootClean(context: ReactContext): boolean {
-  if (context < 0 || context >= _reactContexts.length) { return false; }
-  let root: RootContext = _reactContexts[context];
-  root[1] = false;
-  return true;
-}
-
-// Gets the total number of React roots created.
-export function getRootCount(): number {
-  return _reactContexts.length;
-}
-
-// Clears all React contexts (useful for testing).
-export function clearReactContexts(): void {
-  _reactContexts = [];
-  _contextCounter = 0;
-}
-
-// Advanced: Suspense support for React concurrent features.
-// Marks a root as using suspense for lazy loading.
-export function enableSuspense(context: ReactContext): boolean {
-  if (context < 0 || context >= _reactContexts.length) { return false; }
-  let root: RootContext = _reactContexts[context];
-  root[2] = true;
-  return true;
-}
-
-// Advanced: Check if a root has suspense enabled.
-export function hasSuspense(context: ReactContext): boolean {
-  if (context < 0 || context >= _reactContexts.length) { return false; }
-  return _reactContexts[context][2];
-}
+export type ReactElement = any;
+export type ReactComponent = (props: any) => ReactElement;
+export type ReactContext<T = any> = any;

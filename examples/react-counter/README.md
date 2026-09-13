@@ -1,58 +1,75 @@
 # React Counter Example for Artisan
 
-This is a complete example of a React application running within Artisan using the embedded QuickJS JavaScript engine.
+A complete example of a React application running in Artisan with the built-in React 18.3.1 module. **No bundling or complex setup required!**
 
-## What This Shows
+## Quick Start
 
-- **React 18.3.1 Running**: Full React library (hooks, components, state management)
-- **Hooks in Action**: `useState`, `useEffect`, custom logic
-- **Real DOM Binding**: React rendering to actual DOM nodes through QuickJS
-- **Event Handling**: Button clicks and event handlers
-- **Styling**: Inline styles and CSS classes
-- **Conditional Rendering**: Showing/hiding UI based on state
+The simplified setup with `art/react`:
+
+```jsx
+import { setupReact, createRoot, useState } from "art/react";
+
+setupReact();  // One line to initialize!
+
+function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(count + 1)}>Count: {count}</button>;
+}
+
+createRoot("root").render(<Counter />);
+```
+
+That's all you need!
+
+## What This Example Shows
+
+- **React 18.3.1 Built-in**: Pre-vendored, zero setup
+- **Simplified Initialization**: One `setupReact()` call
+- **All Hooks Supported**: useState, useEffect, useCallback, useMemo, useRef, useContext, useReducer
+- **Real DOM Integration**: React renders to actual DOM nodes
+- **Full Interactivity**: Event handlers, state management, conditional rendering
+- **Component Composition**: Props, composition, hooks
 
 ## Project Structure
 
 ```
 react-counter/
-├── index.html          # HTML template with root div
-├── app.jsx            # React application code
-├── js-prelude.js      # React runtime setup (loads React, sets up JSX targets)
+├── index.html          # HTML template with <div id="root">
+├── app.jsx            # React application code (uses art/react)
 └── README.md          # This file
 ```
 
-## How It Works
+## Setup (Simplified)
 
-### 1. Build Phase
-
-The Artisan build system:
-1. Compiles `app.jsx` to JavaScript using the JSX transformer
-2. Transforms JSX expressions like `<Counter />` into `h(Counter, ...)`
-3. The result is standard JavaScript
-
-### 2. Runtime Phase
-
-When the application runs:
-1. `js-prelude.js` loads first (concatenated with React bundles)
-2. It sets `h` and `Fragment` globals to `React.createElement` and `React.Fragment`
-3. The compiled `app.jsx` code runs
-4. React renders components to the DOM
-5. User interactions trigger React state updates
-6. React efficiently updates the DOM
-
-### 3. DOM Integration
-
-The QuickJS engine provides access to the DOM:
+### Import from art/react
 
 ```javascript
-// Available in your React code
-document.getElementById("root")           // Get elements
-element.addEventListener("click", ...)    // Attach listeners
-element.style.color = "red"               // Set styles
-element.appendChild(child)                // Manipulate DOM
+import { setupReact, createRoot, useState, useEffect } from "art/react";
 ```
 
-## Example App Breakdown
+Includes:
+- `setupReact()` - Initialize React
+- `createRoot(selector)` - Create a React root
+- `useState`, `useEffect`, `useCallback`, `useMemo`, `useRef`, `useContext`, `useReducer` - All hooks
+- Helper functions: `useForm`, `useFetch`, `useAsync`, `useAnimationFrame`, `useLogger`
+- Element shortcuts: `div`, `button`, `input`, `span`, `p`, `h1`, `h2`, etc.
+
+### Example: Basic Setup
+
+```jsx
+import { setupReact, createRoot, useState } from "art/react";
+
+setupReact();
+
+function App() {
+  const [name, setName] = useState("World");
+  return <h1>Hello, {name}!</h1>;
+}
+
+createRoot("root").render(<App />);
+```
+
+## Example Components
 
 ### Counter Component
 
@@ -61,194 +78,190 @@ function Counter({ initialValue = 0, step = 1 }) {
   const [count, setCount] = useState(initialValue);
   const [history, setHistory] = useState([]);
   
-  // ... render UI with buttons that update state
-}
-```
-
-Features:
-- **Props**: Takes `initialValue` and `step` parameters
-- **State**: Tracks count and history of changes
-- **Hooks**: Uses `useState` for state management
-- **Rendering**: Displays count, action buttons, and statistics
-
-### Main App Component
-
-```jsx
-function App() {
-  const [showStats, setShowStats] = useState(false);
+  const increment = () => {
+    const newCount = count + step;
+    setCount(newCount);
+    setHistory([...history, newCount]);
+  };
   
   return (
-    // Renders Counter component with default props
-    // Toggle-able statistics display
+    <div style={{ padding: "20px" }}>
+      <h2>Counter: {count}</h2>
+      <button onClick={increment}>Increment</button>
+      <p>Changes: {history.length}</p>
+    </div>
   );
 }
 ```
 
-Features:
-- **Composition**: Renders the Counter component
-- **Conditional UI**: Shows/hides statistics based on state
-- **Interactivity**: Buttons trigger state changes
+### Main App
+
+```jsx
+import { setupReact, createRoot, useState } from "art/react";
+
+setupReact();
+
+function App() {
+  const [showStats, setShowStats] = useState(false);
+  
+  return (
+    <div style={{ fontFamily: "system-ui" }}>
+      <h1>React in Artisan</h1>
+      <Counter initialValue={0} step={1} />
+      <button onClick={() => setShowStats(!showStats)}>
+        {showStats ? "Hide" : "Show"} Stats
+      </button>
+      {showStats && <div>Stats: ...</div>}
+    </div>
+  );
+}
+
+createRoot("root").render(<App />);
+```
 
 ## Running This Example
 
-### Prerequisites
-- Artisan framework installed
-- Node.js (for build tooling)
-
-### Build
+### Build & Run
 ```bash
 cd examples/react-counter
-artisan build
-```
-
-### Run
-```bash
-artisan run
+artisan build . --run
 ```
 
 The app will:
-1. Load in your default browser
-2. Display the counter interface
-3. Be fully interactive - click buttons to increment/decrement
-4. Show history and statistics when enabled
+1. Compile JSX to JavaScript
+2. Load React 18.3.1 (pre-vendored)
+3. Display the interactive counter
+4. Respond to button clicks in real-time
 
-## Key React Concepts Used
+## Available Hooks & Utilities
 
-### State Management
+### Standard React Hooks
 ```javascript
-const [count, setCount] = useState(0);
-setCount(count + 1);  // Update state
+import { 
+  useState, useEffect, useCallback, useMemo, 
+  useRef, useContext, useReducer 
+} from "art/react";
 ```
 
-### Effects
+### Convenience Hooks
 ```javascript
-useEffect(() => {
-  console.log("Component mounted");
-  return () => console.log("Component unmounted");
-}, []);
+// Form state management
+const { values, handleChange, reset } = useForm({ name: "", email: "" });
+
+// Fetch data
+const { data, loading, error } = useFetch("/api/data");
+
+// Async operations
+const { result, loading, error } = useAsync(async () => await getData());
+
+// Animation loop
+useAnimationFrame((timestamp) => {
+  // Runs on each frame
+});
+
+// Debugging
+useLogger("myVar", value);  // Logs value on change
+usePerformance("MyComponent");  // Measures render time
 ```
 
-### Props & Destructuring
+### Element Shortcuts
 ```javascript
-function Counter({ initialValue = 0, step = 1 }) {
-  // Use props with default values
-}
-```
+import { div, button, input, span, p, h1, h2, form, ul, li, a, img } from "art/react";
 
-### Event Handlers
-```javascript
-<button onclick={() => setCount(count + 1)}>
-  Increment
-</button>
-```
-
-Note: Event names are lowercase (onclick, not onClick) to match real DOM conventions.
-
-### Conditional Rendering
-```javascript
-{showStats && <div>Statistics...</div>}
-```
-
-### Lists & Array Methods
-```javascript
-{history.map(value => <span>{value}</span>)}
-```
-
-## Styling in React/Artisan
-
-### Inline Styles (camelCase)
-```jsx
-<div style={{ color: "red", backgroundColor: "blue" }}>
-  Styled content
+// Use directly in JSX
+<div id="main">
+  <h1>Title</h1>
+  <button onClick={handleClick}>Click me</button>
+  <input type="text" onChange={handleChange} />
 </div>
 ```
 
-### CSS Classes
-```jsx
-<div class="my-class">Content</div>
-```
-
-### Direct DOM Manipulation
-```javascript
-element.style.color = "red";
-element.classList.add("active");
-```
-
-## Console Output
-
-When running, you'll see console output:
-- "React runtime initialized" - js-prelude.js has loaded
-- "Counter initialized with value: 0" - useEffect ran
-- Any console.log() statements from your code
-
-## Common Patterns You Can Use
-
-### Custom Hooks
-```javascript
-function useCounter(initial = 0) {
-  const [count, setCount] = useState(initial);
-  return [count, (delta) => setCount(count + delta)];
-}
-```
-
-### Component Composition
-```javascript
-function Parent() {
-  return <Child prop1="value" />;
-}
-
-function Child({ prop1 }) {
-  return <div>{prop1}</div>;
-}
-```
+## Common Patterns
 
 ### State-Driven UI
-```javascript
-const [isOpen, setIsOpen] = useState(false);
-return (
-  <>
-    {isOpen && <Menu />}
-    <button onclick={() => setIsOpen(!isOpen)}>Toggle Menu</button>
-  </>
-);
+```jsx
+function Menu() {
+  const [isOpen, setIsOpen] = useState(false);
+  
+  return (
+    <>
+      <button onClick={() => setIsOpen(!isOpen)}>Menu</button>
+      {isOpen && <div>Menu items...</div>}
+    </>
+  );
+}
 ```
 
-## Limitations & Notes
+### Form Handling
+```jsx
+function LoginForm() {
+  const { values, handleChange, reset } = useForm({
+    username: "",
+    password: ""
+  });
+  
+  return (
+    <form>
+      <input 
+        name="username" 
+        value={values.username}
+        onChange={handleChange}
+      />
+      <button onClick={() => reset()}>Clear</button>
+    </form>
+  );
+}
+```
 
-1. **No fetch/HTTP** - Use Artisan's `net` module for networking
-2. **Limited CSS** - Only basic properties are supported (color, background-color, etc.)
-3. **No npm packages** - Only React and what's built into Artisan
-4. **Single event loop** - No true async/await; use Promises from `art/promise`
-5. **Event naming** - Uses real DOM names (onclick, not onClick)
+### Data Fetching
+```jsx
+function DataDisplay() {
+  const { data, loading, error } = useFetch("/api/items");
+  
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+  return <div>{data.length} items loaded</div>;
+}
+```
+
+### Custom Hooks
+```jsx
+function useCounter(initial = 0) {
+  const [count, setCount] = useState(initial);
+  return {
+    count,
+    increment: () => setCount(c => c + 1),
+    decrement: () => setCount(c => c - 1),
+    reset: () => setCount(initial)
+  };
+}
+
+// Usage
+function App() {
+  const counter = useCounter(0);
+  return (
+    <div>
+      Count: {counter.count}
+      <button onClick={counter.increment}>+</button>
+    </div>
+  );
+}
+```
 
 ## Next Steps
 
-1. **Modify this example** - Try changing the counter logic
-2. **Create new components** - Add your own React components
-3. **Add more interactivity** - Use more Hooks (useCallback, useEffect, etc.)
-4. **Integrate with ART** - Call ART functions from React or vice versa
-5. **Use Artisan modules** - Import from `art/fs`, `art/net`, etc.
+1. **Experiment** - Modify the counter, add features
+2. **Build components** - Create reusable components
+3. **Add more pages** - Use HTML routing
+4. **Integrate ART** - Call ART functions from React
+5. **Use modules** - Import from `art/fs`, `art/net`, etc.
 
 ## Resources
 
-- [React Documentation](https://react.dev)
-- [Artisan README](../../README.md)
-- [React Integration Guide](../../REACT_INTEGRATION.md)
-- [Artisan Stdlib Modules](../../art/stdlib/)
-
-## Troubleshooting
-
-### "React is not defined"
-Make sure js-prelude.js is loaded with the React bundles.
-
-### Buttons not responding
-Check browser console for errors. Event handlers use `onclick` (lowercase), not `onClick`.
-
-### Styling not working
-Verify CSS property names are camelCase and supported. Not all CSS properties are available.
-
-### Component not rendering
-Ensure ReactDOM.createRoot() is called and render() is invoked on the root.
+- [art/react API](../../art/stdlib/react.ts) - Full module reference
+- [React Docs](https://react.dev) - Official React documentation
+- [Getting Started Guide](../../docs/GETTING_STARTED.md)
+- [JavaScript Guide](../../docs/JAVASCRIPT_GUIDE.md)
 
 ---
 

@@ -59,9 +59,10 @@ This scaffolds a project with ART (`app.tsx`) and creates a native binary.
 ✅ **Native Performance** - Compiled to machine code via LLVM  
 ✅ **Two Languages** - ART (compiled) + JavaScript/JSX (interpreted)  
 ✅ **Single Binary** - No external dependencies, no runtime  
-✅ **React Support** - Pre-vendored React 18.3.1 with all hooks  
+✅ **Built-in React** - React 18.3.1 pre-vendored with simplified `art/react` module  
+✅ **Built-in Angular** - Angular + RxJS with simplified `art/angular` module  
 ✅ **Module System** - CommonJS and ES6 modules  
-✅ **NPM Packages** - Bundle and use Angular, Express, and other frameworks  
+✅ **NPM Packages** - Bundle and use Express, Vue, and other frameworks  
 ✅ **Hot Development** - Fast rebuilds with incremental compilation  
 ✅ **Full DOM API** - querySelector, events, classList, style, and more  
 

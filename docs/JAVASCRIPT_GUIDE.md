@@ -13,15 +13,16 @@ Artisan includes **React 18.3.1 pre-vendored** and runs JavaScript via the **Qui
 - Seamless integration with ART code
 - Native performance for JavaScript execution
 
-## Quick Start
+## Quick Start (Simplified)
 
-### Create a React App
+**Use the built-in `art/react` module for zero setup!**
 
 Create `app.jsx`:
 
 ```javascript
-import React, { useState } from "react";
-import ReactDOM from "react-dom/client";
+import { setupReact, createRoot, useState } from "art/react";
+
+setupReact();  // One line to initialize!
 
 function Counter() {
   const [count, setCount] = useState(0);
@@ -36,9 +37,22 @@ function Counter() {
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<Counter />);
+createRoot("root").render(<Counter />);
 ```
+
+Create `pages/index.html`:
+
+```html
+<div id="root"></div>
+```
+
+Build and run:
+
+```bash
+artisan-cli build my-app --run
+```
+
+Done! React is running with zero configuration.
 
 Create `pages/index.html`:
 
