@@ -1,76 +1,76 @@
-import { log, info, warn, error, debug, clear, getOutput, setLogLevel, assert, LOG_ALL, LOG_WARN } from "art/console";
+import { log, error, warn, info, getLogs, getLogCount, clear, setTime, getTime } from "art/console";
 
-function testLog(): number {
+function testLogBasic(): number {
   clear();
-  log("test message");
-  let output: string = getOutput();
-  if (output.length == 0) { return 1; }
-  if (output.indexOf("test message") == -1) { return 2; }
+  log("test");
+  if (getLogCount() != 1) { return 1; }
   return 0;
 }
 
-function testInfo(): number {
+function testErrorBasic(): number {
   clear();
-  info("info message");
-  let output: string = getOutput();
-  if (output.indexOf("info message") == -1) { return 1; }
+  error("error");
+  if (getLogCount() != 1) { return 1; }
   return 0;
 }
 
-function testWarn(): number {
+function testWarnBasic(): number {
   clear();
   warn("warning");
-  let output: string = getOutput();
-  if (output.length == 0) { return 1; }
+  if (getLogCount() != 1) { return 1; }
   return 0;
 }
 
-function testError(): number {
+function testInfoBasic(): number {
   clear();
-  error("error message");
-  let output: string = getOutput();
-  if (output.length == 0) { return 1; }
+  info("info");
+  if (getLogCount() != 1) { return 1; }
   return 0;
 }
 
-function testDebug(): number {
+function testMultipleLogs(): number {
   clear();
-  debug("debug info");
-  let output: string = getOutput();
-  if (output.length == 0) { return 1; }
+  log("a");
+  log("b");
+  log("c");
+  if (getLogCount() != 3) { return 1; }
   return 0;
 }
 
 function testClear(): number {
-  log("message");
   clear();
-  let output: string = getOutput();
-  if (output.length != 0) { return 1; }
+  log("test");
+  if (getLogCount() != 1) { return 1; }
+  clear();
+  if (getLogCount() != 0) { return 2; }
   return 0;
 }
 
-function testLogLevel(): number {
+function testGetLogs(): number {
   clear();
-  setLogLevel(LOG_WARN);
-  log("should not appear");
-  let output: string = getOutput();
-  if (output.indexOf("should not appear") >= 0) { return 1; }
-
-  setLogLevel(LOG_ALL);
-  log("should appear");
-  output = getOutput();
-  if (output.indexOf("should appear") == -1) { return 2; }
+  log("test1");
+  log("test2");
+  let logs: [string, string, number][] = getLogs();
+  if (logs.length != 2) { return 1; }
   return 0;
 }
 
-function testAssert(): number {
+function testTimeTracking(): number {
   clear();
-  assert(true, "pass");
-  let output: string = getOutput();
-  if (output.indexOf("Assertion") >= 0) { return 1; }
+  setTime(0);
+  if (getTime() != 0) { return 1; }
+  
+  setTime(100);
+  if (getTime() != 100) { return 2; }
+  
+  return 0;
+}
 
-  assert(false, "fail");
-  output = getOutput();
-  if (output.indexOf("fail") == -1) { return 2; }
+function testLogTime(): number {
+  clear();
+  setTime(42);
+  log("msg");
+  let logs: [string, string, number][] = getLogs();
+  if (logs[0][2] != 42) { return 1; }
   return 0;
 }

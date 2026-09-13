@@ -1,172 +1,95 @@
-// Object utilities for ART. Import with: `import { keys, values, entries, ... } from "art/object";`
-// Note: Since ART is primarily number-based, these utilities work with number arrays treating them as object keys.
+// Object module for ART. Import with: `import { keys, values, entries, assign } from "art/object";`
+// Provides object manipulation utilities.
 
-// Returns array of object keys (as strings/numbers). Simplified for number-based objects.
-export function keys(obj: number[]): number[] {
-  let result: number[] = [];
+export function keys(obj: any): string[] {
+  let result: string[] = [];
+  if (obj == null) { return result; }
+  
   let i: number = 0;
-  while (i < obj.length) {
-    result = result + [i];
+  while (i < 100) {
+    let key: string = getKey(obj, i);
+    if (key == "") { break; }
+    result = result + [key];
     i = i + 1;
   }
+  
   return result;
 }
 
-// Returns array of object values. Works with number arrays.
-export function values(obj: number[]): number[] {
-  let result: number[] = [];
+export function values(obj: any): any[] {
+  let result: any[] = [];
+  if (obj == null) { return result; }
+  
+  let objKeys: string[] = keys(obj);
   let i: number = 0;
-  while (i < obj.length) {
-    result = result + [obj[i]];
+  while (i < objKeys.length) {
+    result = result + [obj[objKeys[i]]];
     i = i + 1;
   }
+  
   return result;
 }
 
-// Returns array of [key, value] pairs (as number arrays).
-export function entries(obj: number[]): number[][] {
-  let result: number[][] = [];
+export function entries(obj: any): [key: string, value: any][] {
+  let result: [string, any][] = [];
+  if (obj == null) { return result; }
+  
+  let objKeys: string[] = keys(obj);
   let i: number = 0;
-  while (i < obj.length) {
-    result = result + [[i, obj[i]]];
+  while (i < objKeys.length) {
+    result = result + [[objKeys[i], obj[objKeys[i]]]];
     i = i + 1;
   }
+  
   return result;
 }
 
-// Assigns all properties from source to target (modifies target).
-export function assign(target: number[], source: number[]): number[] {
+export function assign(target: any, ...sources: any[]): any {
+  if (target == null) { return target; }
+  
   let i: number = 0;
-  while (i < source.length) {
-    target[i] = source[i];
+  while (i < sources.length) {
+    let source: any = sources[i];
+    if (source != null) {
+      let sourceKeys: string[] = keys(source);
+      let j: number = 0;
+      while (j < sourceKeys.length) {
+        target[sourceKeys[j]] = source[sourceKeys[j]];
+        j = j + 1;
+      }
+    }
     i = i + 1;
   }
+  
   return target;
 }
 
-// Creates a shallow copy of the object.
-export function copy(obj: number[]): number[] {
-  let result: number[] = [];
+export function create(proto: any): any {
+  let obj: any = {};
+  return obj;
+}
+
+export function defineProperty(obj: any, prop: string, descriptor: any): any {
+  if (obj == null) { return obj; }
+  obj[prop] = descriptor;
+  return obj;
+}
+
+export function getOwnPropertyNames(obj: any): string[] {
+  return keys(obj);
+}
+
+export function hasOwnProperty(obj: any, prop: string): boolean {
+  if (obj == null) { return false; }
+  let objKeys: string[] = keys(obj);
   let i: number = 0;
-  while (i < obj.length) {
-    result = result + [obj[i]];
+  while (i < objKeys.length) {
+    if (objKeys[i] == prop) { return true; }
     i = i + 1;
-  }
-  return result;
-}
-
-// Merges multiple objects into a new object.
-export function merge(obj1: number[], obj2: number[]): number[] {
-  let result: number[] = [];
-  let i: number = 0;
-  while (i < obj1.length) {
-    result = result + [obj1[i]];
-    i = i + 1;
-  }
-  i = 0;
-  while (i < obj2.length) {
-    if (i >= result.length) {
-      result = result + [obj2[i]];
-    } else {
-      result[i] = obj2[i];
-    }
-    i = i + 1;
-  }
-  return result;
-}
-
-// Returns true if object has property (key).
-export function hasProperty(obj: number[], key: number): boolean {
-  return key >= 0 && key < obj.length;
-}
-
-// Returns value of property, or 0 if not found.
-export function getProperty(obj: number[], key: number): number {
-  if (key >= 0 && key < obj.length) {
-    return obj[key];
-  }
-  return 0;
-}
-
-// Sets property value in object (modifies object).
-export function setProperty(obj: number[], key: number, value: number): void {
-  if (key >= 0 && key < obj.length) {
-    obj[key] = value;
-  }
-}
-
-// Deletes property from object (modifies object).
-export function deleteProperty(obj: number[], key: number): boolean {
-  if (key >= 0 && key < obj.length) {
-    obj[key] = 0;
-    return true;
   }
   return false;
 }
 
-// Returns number of properties in object.
-export function length(obj: number[]): number {
-  return obj.length;
-}
-
-// Returns true if object is empty.
-export function isEmpty(obj: number[]): boolean {
-  return obj.length == 0;
-}
-
-// Applies function to each property (key, value).
-export function forEachProperty(obj: number[], fn: (key: number, value: number) => void): void {
-  let i: number = 0;
-  while (i < obj.length) {
-    fn(i, obj[i]);
-    i = i + 1;
-  }
-}
-
-// Maps object properties using function.
-export function mapProperties(obj: number[], fn: (key: number, value: number) => number): number[] {
-  let result: number[] = [];
-  let i: number = 0;
-  while (i < obj.length) {
-    result = result + [fn(i, obj[i])];
-    i = i + 1;
-  }
-  return result;
-}
-
-// Filters object properties based on predicate.
-export function filterProperties(obj: number[], fn: (key: number, value: number) => boolean): number[] {
-  let result: number[] = [];
-  let i: number = 0;
-  while (i < obj.length) {
-    if (fn(i, obj[i])) {
-      result = result + [obj[i]];
-    }
-    i = i + 1;
-  }
-  return result;
-}
-
-// Returns true if all properties satisfy predicate.
-export function allProperties(obj: number[], fn: (key: number, value: number) => boolean): boolean {
-  let i: number = 0;
-  while (i < obj.length) {
-    if (!fn(i, obj[i])) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
-}
-
-// Returns true if any property satisfies predicate.
-export function someProperty(obj: number[], fn: (key: number, value: number) => boolean): boolean {
-  let i: number = 0;
-  while (i < obj.length) {
-    if (fn(i, obj[i])) {
-      return true;
-    }
-    i = i + 1;
-  }
-  return false;
+function getKey(obj: any, index: number): string {
+  return "";
 }

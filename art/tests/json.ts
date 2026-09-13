@@ -1,115 +1,122 @@
-import { stringify, parse, stringifyArray, parseArray, isValidJSON } from "art/json";
+import { stringify, parse } from "art/json";
 
-function testStringifyNumber(): number {
-  if (stringify(0) != "0") { return 1; }
-  if (stringify(123) != "123") { return 2; }
-  if (stringify(-456) != "-456") { return 3; }
-
-  let s: string = stringify(3.14);
-  if (s.substring(0, 3) != "3.1") { return 4; }  // Approximate
-
+function testStringifyString(): number {
+  let result: string = stringify("hello");
+  if (result != "\"hello\"") { return 1; }
   return 0;
 }
 
-function testParseNumber(): number {
-  if (parse("0") != 0) { return 1; }
-  if (parse("123") != 123) { return 2; }
-  if (parse("-456") != -456) { return 3; }
+function testStringifyNumber(): number {
+  let result: string = stringify(42);
+  if (result != "42") { return 1; }
+  return 0;
+}
 
-  let p: number = parse("3.14");
-  if (p < 3.1 || p > 3.2) { return 4; }
+function testStringifyBoolean(): number {
+  let result: string = stringify(true);
+  if (result != "true") { return 1; }
+  return 0;
+}
 
-  if (parse("") != 0) { return 5; }  // Invalid
-  if (parse("abc") != 0) { return 6; }  // Invalid
+function testStringifyNull(): number {
+  let result: string = stringify(null);
+  if (result != "null") { return 1; }
   return 0;
 }
 
 function testStringifyArray(): number {
-  let result: string = stringifyArray([]);
+  let arr: number[] = [1, 2, 3];
+  let result: string = stringify(arr);
+  if (result != "[1,2,3]") { return 1; }
+  return 0;
+}
+
+function testStringifyEmptyArray(): number {
+  let arr: number[] = [];
+  let result: string = stringify(arr);
   if (result != "[]") { return 1; }
+  return 0;
+}
 
-  result = stringifyArray([1, 2, 3]);
-  if (result != "[1, 2, 3]") { return 2; }
+function testStringifyStringEscape(): number {
+  let result: string = stringify("hello\nworld");
+  if (result != "\"hello\\nworld\"") { return 1; }
+  return 0;
+}
 
-  result = stringifyArray([0]);
-  if (result != "[0]") { return 3; }
+function testParseString(): number {
+  let result: string = parse("\"hello\"") as string;
+  if (result != "hello") { return 1; }
+  return 0;
+}
 
+function testParseNumber(): number {
+  let result: number = parse("42") as number;
+  if (result != 42) { return 1; }
+  return 0;
+}
+
+function testParseBoolean(): number {
+  let result: boolean = parse("true") as boolean;
+  if (!result) { return 1; }
+  return 0;
+}
+
+function testParseNull(): number {
+  let result: any = parse("null");
+  if (result != null) { return 1; }
   return 0;
 }
 
 function testParseArray(): number {
-  let arr1: number[] = parseArray("");
-  if (arr1.length != 0) { return 1; }
-
-  let arr2: number[] = parseArray("[]");
-  if (arr2.length != 0) { return 2; }
-
-  let arr3: number[] = parseArray("[1, 2, 3]");
-  if (arr3.length != 3) { return 3; }
-  if (arr3[0] != 1 || arr3[1] != 2 || arr3[2] != 3) { return 4; }
-
-  let arr4: number[] = parseArray("[0]");
-  if (arr4.length != 1 || arr4[0] != 0) { return 5; }
-
+  let result: any[] = parse("[1,2,3]") as any[];
+  if (result.length != 3) { return 1; }
+  if (result[0] != 1) { return 2; }
   return 0;
 }
 
-function testIsValidJSON(): number {
-  if (!isValidJSON("0")) { return 1; }
-  if (!isValidJSON("123")) { return 2; }
-  if (!isValidJSON("-456")) { return 3; }
-
-  if (!isValidJSON("[]")) { return 4; }
-  if (!isValidJSON("[1, 2, 3]")) { return 5; }
-
-  if (isValidJSON("")) { return 6; }
-  if (isValidJSON("abc")) { return 7; }
-  if (isValidJSON("[")) { return 8; }
-  if (isValidJSON("{")) { return 9; }
-
+function testParseNegativeNumber(): number {
+  let result: number = parse("-42") as number;
+  if (result != -42) { return 1; }
   return 0;
 }
 
-function testRoundTripNumber(): number {
-  let orig: number = 42;
-  let stringified: string = stringify(orig);
-  let parsed: number = parse(stringified);
-  if (parsed != orig) { return 1; }
-
+function testRoundtrip(): number {
+  let arr: number[] = [1, 2, 3];
+  let stringified: string = stringify(arr);
+  let parsed: any[] = parse(stringified) as any[];
+  if (parsed.length != 3) { return 1; }
+  if (parsed[0] != 1) { return 2; }
   return 0;
 }
 
-function testRoundTripArray(): number {
-  let orig: number[] = [1, 2, 3, 4, 5];
-  let stringified: string = stringifyArray(orig);
-  let parsed: number[] = parseArray(stringified);
-
-  if (parsed.length != orig.length) { return 1; }
-  let i: number = 0;
-  while (i < orig.length) {
-    if (parsed[i] != orig[i]) { return 2; }
-    i = i + 1;
-  }
-
+function testStringifyNestedArray(): number {
+  let arr: number[] = [1, 2];
+  let result: string = stringify([arr, arr]);
+  if (result.length == 0) { return 1; }
   return 0;
 }
 
-function testParseArrayWithSpaces(): number {
-  let arr: number[] = parseArray("[ 1 , 2 , 3 ]");
-  if (arr.length != 3) { return 1; }
-  if (arr[0] != 1 || arr[1] != 2 || arr[2] != 3) { return 2; }
+function testParseEmptyArray(): number {
+  let result: any[] = parse("[]") as any[];
+  if (result.length != 0) { return 1; }
   return 0;
 }
 
-function testNegativeNumbers(): number {
-  let neg: string = stringify(-123);
-  if (neg != "-123") { return 1; }
+function testParseWhitespace(): number {
+  let result: number = parse("  42  ") as number;
+  if (result != 42) { return 1; }
+  return 0;
+}
 
-  let parsed: number = parse("-456");
-  if (parsed != -456) { return 2; }
+function testStringifyQuote(): number {
+  let result: string = stringify("\"quote\"");
+  if (result != "\"\\\"quote\\\"\"") { return 1; }
+  return 0;
+}
 
-  let arr: number[] = parseArray("[-1, -2, -3]");
-  if (arr.length != 3 || arr[0] != -1) { return 3; }
-
+function testParseStringWithSpace(): number {
+  let result: string = parse("\"hello world\"") as string;
+  if (result != "hello world") { return 1; }
   return 0;
 }

@@ -1,168 +1,132 @@
-// Console utilities for ART. Import with: `import { log, error, warn, ... } from "art/console";`
-// Provides logging output (adapted for ART's number-based system).
+// Console module for ART. Import with: `import { log, error, warn, info } from "art/console";`
+// Provides console output utilities for debugging and logging.
 
-// Global output buffer (simulates console in ART environment)
-let _outputBuffer: string = "";
-let _logLevel: number = 0;  // 0=all, 1=warn+, 2=error+, 3=none
+type LogEntry = [level: string, message: string, timestamp: number];
+let _logs: LogEntry[] = [];
+let _currentTime: number = 0;
 
-// Log levels
-export const LOG_ALL: number = 0;
-export const LOG_WARN: number = 1;
-export const LOG_ERROR: number = 2;
-export const LOG_NONE: number = 3;
-
-// Logs a message to console.
-export function log(message: string): void {
-  if (_logLevel <= LOG_ALL) {
-    _outputBuffer = _outputBuffer + "[LOG] " + message + "\n";
-  }
+export function log(...args: any[]): void {
+  let message: string = formatArgs(args);
+  _logs = _logs + [["log", message, _currentTime]];
 }
 
-// Logs an informational message.
-export function info(message: string): void {
-  if (_logLevel <= LOG_ALL) {
-    _outputBuffer = _outputBuffer + "[INFO] " + message + "\n";
-  }
+export function error(...args: any[]): void {
+  let message: string = formatArgs(args);
+  _logs = _logs + [["error", message, _currentTime]];
 }
 
-// Logs a warning message.
-export function warn(message: string): void {
-  if (_logLevel <= LOG_WARN) {
-    _outputBuffer = _outputBuffer + "[WARN] " + message + "\n";
-  }
+export function warn(...args: any[]): void {
+  let message: string = formatArgs(args);
+  _logs = _logs + [["warn", message, _currentTime]];
 }
 
-// Logs an error message.
-export function error(message: string): void {
-  if (_logLevel <= LOG_ERROR) {
-    _outputBuffer = _outputBuffer + "[ERROR] " + message + "\n";
-  }
+export function info(...args: any[]): void {
+  let message: string = formatArgs(args);
+  _logs = _logs + [["info", message, _currentTime]];
 }
 
-// Logs a debug message.
-export function debug(message: string): void {
-  if (_logLevel <= LOG_ALL) {
-    _outputBuffer = _outputBuffer + "[DEBUG] " + message + "\n";
-  }
+export function debug(...args: any[]): void {
+  let message: string = formatArgs(args);
+  _logs = _logs + [["debug", message, _currentTime]];
 }
 
-// Logs multiple values separated by spaces.
-export function logValues(values: number[]): void {
-  if (_logLevel <= LOG_ALL && values.length > 0) {
-    let msg: string = "";
-    let i: number = 0;
-    while (i < values.length) {
-      if (i > 0) { msg = msg + " "; }
-      msg = msg + numberToString(values[i]);
-      i = i + 1;
-    }
-    log(msg);
-  }
+export function trace(): void {
+  _logs = _logs + [["trace", "stack trace", _currentTime]];
 }
 
-// Clears the console output buffer.
-export function clear(): void {
-  _outputBuffer = "";
-}
-
-// Returns the console output buffer.
-export function getOutput(): string {
-  return _outputBuffer;
-}
-
-// Sets the log level (filters output).
-export function setLogLevel(level: number): void {
-  if (level >= 0 && level <= 3) {
-    _logLevel = level;
-  }
-}
-
-// Gets the current log level.
-export function getLogLevel(): number {
-  return _logLevel;
-}
-
-// Asserts a condition, logs if false.
 export function assert(condition: boolean, message: string): void {
   if (!condition) {
-    error("Assertion failed: " + message);
+    _logs = _logs + [["assert", message, _currentTime]];
   }
 }
 
-// Logs message with a timestamp prefix.
-export function logWithTime(message: string): void {
-  let time: number = getCurrentTime();
-  log("[" + numberToString(time) + "] " + message);
+export function clear(): void {
+  _logs = [];
 }
 
-// Logs a table-like structure (simplified).
-export function table(data: number[][]): void {
-  if (data.length == 0) {
-    log("[]");
-    return;
-  }
+export function count(label: string): void {
+  let message: string = label + ": 1";
+  _logs = _logs + [["count", message, _currentTime]];
+}
 
-  log("[ " + getOutput() + " ]");
+export function time(label: string): void {
+  _logs = _logs + [["time", label, _currentTime]];
+}
+
+export function timeEnd(label: string): void {
+  _logs = _logs + [["timeEnd", label, _currentTime]];
+}
+
+export function table(data: any[]): void {
+  let message: string = "table";
+  _logs = _logs + [["table", message, _currentTime]];
+}
+
+export function group(label: string): void {
+  _logs = _logs + [["group", label, _currentTime]];
+}
+
+export function groupEnd(): void {
+  _logs = _logs + [["groupEnd", "", _currentTime]];
+}
+
+export function getLogs(): LogEntry[] {
+  let result: LogEntry[] = [];
   let i: number = 0;
-  while (i < data.length) {
-    let row: string = "  [";
-    let j: number = 0;
-    while (j < data[i].length) {
-      if (j > 0) { row = row + ", "; }
-      row = row + numberToString(data[i][j]);
-      j = j + 1;
-    }
-    row = row + "]";
-    log(row);
+  while (i < _logs.length) {
+    result = result + [_logs[i]];
     i = i + 1;
   }
-}
-
-// Logs a group header.
-export function group(label: string): void {
-  log("▼ " + label);
-}
-
-// Logs an error with stack trace information.
-export function errorWithTrace(message: string): void {
-  error(message);
-  error("  at anonymous");
-}
-
-// Returns current time (simplified - uses counter).
-function getCurrentTime(): number {
-  return 0;  // Placeholder, would be system time in real implementation
-}
-
-// Helper: Convert number to string
-function numberToString(n: number): string {
-  if (n == 0) { return "0"; }
-
-  let isNegative: boolean = n < 0;
-  if (isNegative) { n = -n; }
-
-  let result: string = "";
-  while (n > 0) {
-    let digit: number = n - ((n / 10) * 10);
-    result = digitToChar(digit) + result;
-    n = (n / 10);
-  }
-
-  if (isNegative) { result = "-" + result; }
   return result;
 }
 
-// Helper: Convert digit to character
-function digitToChar(d: number): string {
-  if (d == 0) { return "0"; }
-  if (d == 1) { return "1"; }
-  if (d == 2) { return "2"; }
-  if (d == 3) { return "3"; }
-  if (d == 4) { return "4"; }
-  if (d == 5) { return "5"; }
-  if (d == 6) { return "6"; }
-  if (d == 7) { return "7"; }
-  if (d == 8) { return "8"; }
-  if (d == 9) { return "9"; }
-  return "0";
+export function getLogCount(): number {
+  return _logs.length;
+}
+
+export function getLastLog(): LogEntry {
+  if (_logs.length == 0) { return ["", "", 0]; }
+  return _logs[_logs.length - 1];
+}
+
+export function setTime(time: number): void {
+  _currentTime = time;
+}
+
+export function getTime(): number {
+  return _currentTime;
+}
+
+function formatArgs(args: any[]): string {
+  let result: string = "";
+  let i: number = 0;
+  
+  while (i < args.length) {
+    if (i > 0) {
+      result = result + " ";
+    }
+    result = result + formatValue(args[i]);
+    i = i + 1;
+  }
+  
+  return result;
+}
+
+function formatValue(value: any): string {
+  if (value == null) { return "null"; }
+  
+  let valueType: string = typeof value;
+  
+  if (valueType == "string") {
+    return value as string;
+  }
+  if (valueType == "number") {
+    return value as string;
+  }
+  if (valueType == "boolean") {
+    if (value as boolean) { return "true"; }
+    return "false";
+  }
+  
+  return "[object Object]";
 }
