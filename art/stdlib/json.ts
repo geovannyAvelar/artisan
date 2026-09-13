@@ -1,266 +1,281 @@
-// JSON utilities for serialization and parsing.
-// Import with: `import { stringify, parse } from "art/json";`
+// JSON module for ART. Import with: `import { stringify, parse } from "art/json";`
+// Provides JSON serialization and deserialization.
 
-// Converts a number to a JSON string representation.
-// Numbers serialize to decimal representation.
-export function stringify(value: number): string {
-  return numberToString(value);
+export function stringify(value: any): string {
+  return stringifyValue(value);
 }
 
-// Parses a JSON string to a number.
-// Only supports numeric JSON values.
-// Returns 0 if parsing fails.
-export function parse(json: string): number {
-  return parseNumber(json);
+export function parse(text: string): any {
+  let result: [value: any, index: number] = parseValue(text, 0);
+  return result[0];
 }
 
-// Stringifies an array of numbers to JSON format.
-// Returns a JSON array string like "[1, 2, 3]".
-export function stringifyArray(arr: number[]): string {
+function stringifyValue(value: any): string {
+  if (value == null) { return "null"; }
+  
+  let valueType: string = typeof value;
+  
+  if (valueType == "string") {
+    return stringifyString(value as string);
+  }
+  if (valueType == "number") {
+    return value as string;
+  }
+  if (valueType == "boolean") {
+    if (value as boolean) { return "true"; }
+    return "false";
+  }
+  
+  if (isArray(value)) {
+    return stringifyArray(value as any[]);
+  }
+  
+  return "{}";
+}
+
+function stringifyString(str: string): string {
+  let result: string = "\"";
+  let i: number = 0;
+  
+  while (i < str.length) {
+    let c: string = str.substring(i, i + 1);
+    
+    if (c == "\"") {
+      result = result + "\\\"";
+    } else if (c == "\\") {
+      result = result + "\\\\";
+    } else if (c == "\n") {
+      result = result + "\\n";
+    } else if (c == "\r") {
+      result = result + "\\r";
+    } else if (c == "\t") {
+      result = result + "\\t";
+    } else {
+      result = result + c;
+    }
+    
+    i = i + 1;
+  }
+  
+  result = result + "\"";
+  return result;
+}
+
+function stringifyArray(arr: any[]): string {
   if (arr.length == 0) { return "[]"; }
-
+  
   let result: string = "[";
   let i: number = 0;
+  
   while (i < arr.length) {
-    if (i > 0) { result = result + ", "; }
-    result = result + numberToString(arr[i]);
+    if (i > 0) {
+      result = result + ",";
+    }
+    result = result + stringifyValue(arr[i]);
     i = i + 1;
   }
+  
   result = result + "]";
-
   return result;
 }
 
-// Parses a JSON array string to an array of numbers.
-// Returns empty array if parsing fails.
-export function parseArray(json: string): number[] {
-  if (json == "") { return []; }
+function isArray(value: any): boolean {
+  if (value == null) { return false; }
+  let valueType: string = typeof value;
+  return valueType == "array" || valueType == "number[]" || valueType == "string[]";
+}
 
-  // Remove whitespace and brackets
-  let trimmed: string = json;
-  if (trimmed.substring(0, 1) == "[") {
-    trimmed = trimmed.substring(1);
+function parseValue(text: string, index: number): [value: any, index: number] {
+  index = skipWhitespace(text, index);
+  
+  if (index >= text.length) { return [null, index]; }
+  
+  let c: string = text.substring(index, index + 1);
+  
+  if (c == "\"") {
+    return parseString(text, index);
   }
-  if (trimmed.substring(trimmed.length - 1) == "]") {
-    trimmed = trimmed.substring(0, trimmed.length - 1);
+  if (c == "{") {
+    return parseObject(text, index);
   }
+  if (c == "[") {
+    return parseArray(text, index);
+  }
+  if (c == "t" || c == "f") {
+    return parseBoolean(text, index);
+  }
+  if (c == "n") {
+    return parseNull(text, index);
+  }
+  if (c == "-" || (c >= "0" && c <= "9")) {
+    return parseNumber(text, index);
+  }
+  
+  return [null, index];
+}
 
-  if (trimmed == "") { return []; }
-
-  let result: number[] = [];
-  let current: string = "";
-  let i: number = 0;
-
-  while (i < trimmed.length) {
-    let char: string = trimmed.substring(i, i + 1);
-
-    if (char == ",") {
-      let num: number = parseNumber(current);
-      result = result + [num];
-      current = "";
-    } else if (char != " ") {
-      current = current + char;
+function parseString(text: string, index: number): [value: string, index: number] {
+  index = index + 1;
+  let result: string = "";
+  
+  while (index < text.length) {
+    let c: string = text.substring(index, index + 1);
+    
+    if (c == "\"") {
+      return [result, index + 1];
     }
-
-    i = i + 1;
+    if (c == "\\") {
+      index = index + 1;
+      if (index < text.length) {
+        let escaped: string = text.substring(index, index + 1);
+        if (escaped == "\"") {
+          result = result + "\"";
+        } else if (escaped == "\\") {
+          result = result + "\\";
+        } else if (escaped == "n") {
+          result = result + "\n";
+        } else if (escaped == "r") {
+          result = result + "\r";
+        } else if (escaped == "t") {
+          result = result + "\t";
+        } else {
+          result = result + escaped;
+        }
+      }
+    } else {
+      result = result + c;
+    }
+    
+    index = index + 1;
   }
-
-  if (current != "") {
-    let num: number = parseNumber(current);
-    result = result + [num];
-  }
-
-  return result;
+  
+  return [result, index];
 }
 
-// Checks if a string is valid JSON format.
-export function isValidJSON(json: string): boolean {
-  if (json == "") { return false; }
-
-  let trimmed: string = trim(json);
-
-  // Check for array format
-  if (trimmed.substring(0, 1) == "[") {
-    if (trimmed.substring(trimmed.length - 1) != "]") { return false; }
-    let arr: number[] = parseArray(trimmed);
-    return arr.length >= 0;  // Valid if we can parse it
-  }
-
-  // Check for number format
-  if (isNumberString(trimmed)) { return true; }
-
-  return false;
-}
-
-// Converts a number to JSON string with proper formatting.
-function numberToString(value: number): string {
-  if (value == 0) { return "0"; }
-
+function parseNumber(text: string, index: number): [value: number, index: number] {
   let isNegative: boolean = false;
-  if (value < 0) {
+  
+  if (index < text.length && text.substring(index, index + 1) == "-") {
     isNegative = true;
-    value = -value;
+    index = index + 1;
   }
-
-  // Handle integer part
-  let intStr: string = "";
-  let intPart: number = value - ((value / 1) - ((value / 1)));
-
-  if (intPart == 0) {
-    intStr = "0";
-  } else {
-    while (intPart > 0) {
-      let digit: number = intPart - ((intPart / 10) * 10);
-      intStr = digitToChar(digit) + intStr;
-      intPart = intPart / 10;
-    }
-  }
-
-  // Handle fractional part (simplified)
-  let fracStr: string = "";
-  let frac: number = value - intPart;
-  if (frac > 0.0001) {
-    fracStr = ".";
-    let i: number = 0;
-    while (i < 6 && frac > 0) {
-      frac = frac * 10;
-      let digit: number = frac - ((frac / 1) - ((frac / 1)));
-      fracStr = fracStr + digitToChar(digit);
-      frac = frac - digit;
-      i = i + 1;
-    }
-  }
-
-  let result: string = intStr + fracStr;
-  if (isNegative) { result = "-" + result; }
-
-  return result;
-}
-
-// Parses a JSON string to a number.
-function parseNumber(json: string): number {
-  let trimmed: string = trim(json);
-  if (trimmed == "") { return 0; }
-
-  let idx: number = 0;
-  let isNegative: boolean = false;
-
-  if (trimmed.substring(idx, idx + 1) == "-") {
-    isNegative = true;
-    idx = idx + 1;
-  } else if (trimmed.substring(idx, idx + 1) == "+") {
-    idx = idx + 1;
-  }
-
-  // Parse integer part
-  let intPart: number = 0;
-  while (idx < trimmed.length) {
-    let char: string = trimmed.substring(idx, idx + 1);
-    let digit: number = charToDigit(char);
-    if (digit < 0 || digit > 9) { break; }
-    intPart = intPart * 10 + digit;
-    idx = idx + 1;
-  }
-
-  // Parse decimal part
-  let fracPart: number = 0;
-  let fracDivisor: number = 10;
-  if (idx < trimmed.length && trimmed.substring(idx, idx + 1) == ".") {
-    idx = idx + 1;
-    while (idx < trimmed.length) {
-      let char: string = trimmed.substring(idx, idx + 1);
-      let digit: number = charToDigit(char);
-      if (digit < 0 || digit > 9) { break; }
-      fracPart = fracPart + digit / fracDivisor;
-      fracDivisor = fracDivisor * 10;
-      idx = idx + 1;
-    }
-  }
-
-  let result: number = intPart + fracPart;
-  if (isNegative) { result = -result; }
-
-  return result;
-}
-
-// Checks if a string represents a valid number.
-function isNumberString(str: string): boolean {
-  if (str == "") { return false; }
-
-  let idx: number = 0;
-  if (str.substring(idx, idx + 1) == "-" || str.substring(idx, idx + 1) == "+") {
-    idx = idx + 1;
-  }
-
-  if (idx >= str.length) { return false; }
-
-  // Must have at least one digit
-  let hasDigit: boolean = false;
-  while (idx < str.length) {
-    let char: string = str.substring(idx, idx + 1);
-    let digit: number = charToDigit(char);
-    if (digit >= 0 && digit <= 9) {
-      hasDigit = true;
+  
+  let num: number = 0;
+  while (index < text.length) {
+    let c: string = text.substring(index, index + 1);
+    if (c >= "0" && c <= "9") {
+      num = num * 10 + (c.charCodeAt(0) - "0".charCodeAt(0));
+      index = index + 1;
+    } else {
       break;
     }
-    if (char != ".") { return false; }
-    idx = idx + 1;
   }
-
-  return hasDigit;
+  
+  if (isNegative) {
+    num = 0 - num;
+  }
+  
+  return [num, index];
 }
 
-// Helper: Convert digit to character.
-function digitToChar(digit: number): string {
-  if (digit == 0) { return "0"; }
-  if (digit == 1) { return "1"; }
-  if (digit == 2) { return "2"; }
-  if (digit == 3) { return "3"; }
-  if (digit == 4) { return "4"; }
-  if (digit == 5) { return "5"; }
-  if (digit == 6) { return "6"; }
-  if (digit == 7) { return "7"; }
-  if (digit == 8) { return "8"; }
-  if (digit == 9) { return "9"; }
-  return "0";
+function parseBoolean(text: string, index: number): [value: boolean, index: number] {
+  if (index + 4 <= text.length && text.substring(index, index + 4) == "true") {
+    return [true, index + 4];
+  }
+  if (index + 5 <= text.length && text.substring(index, index + 5) == "false") {
+    return [false, index + 5];
+  }
+  return [false, index];
 }
 
-// Helper: Convert character to digit.
-function charToDigit(char: string): number {
-  if (char == "0") { return 0; }
-  if (char == "1") { return 1; }
-  if (char == "2") { return 2; }
-  if (char == "3") { return 3; }
-  if (char == "4") { return 4; }
-  if (char == "5") { return 5; }
-  if (char == "6") { return 6; }
-  if (char == "7") { return 7; }
-  if (char == "8") { return 8; }
-  if (char == "9") { return 9; }
-  return -1;
+function parseNull(text: string, index: number): [value: any, index: number] {
+  if (index + 4 <= text.length && text.substring(index, index + 4) == "null") {
+    return [null, index + 4];
+  }
+  return [null, index];
 }
 
-// Helper: Trim whitespace from string.
-function trim(str: string): string {
-  let start: number = 0;
-  let end: number = str.length - 1;
-
-  while (start <= end) {
-    let char: string = str.substring(start, start + 1);
-    if (char != " " && char != "\t" && char != "\n" && char != "\r") {
+function parseArray(text: string, index: number): [value: any[], index: number] {
+  index = index + 1;
+  let result: any[] = [];
+  
+  index = skipWhitespace(text, index);
+  if (index < text.length && text.substring(index, index + 1) == "]") {
+    return [result, index + 1];
+  }
+  
+  while (index < text.length) {
+    let value: [value: any, index: number] = parseValue(text, index);
+    result = result + [value[0]];
+    index = value[1];
+    
+    index = skipWhitespace(text, index);
+    if (index >= text.length) { break; }
+    
+    let c: string = text.substring(index, index + 1);
+    if (c == "]") {
+      return [result, index + 1];
+    }
+    if (c == ",") {
+      index = index + 1;
+    } else {
       break;
     }
-    start = start + 1;
   }
+  
+  return [result, index];
+}
 
-  while (end >= start) {
-    let char: string = str.substring(end, end + 1);
-    if (char != " " && char != "\t" && char != "\n" && char != "\r") {
+function parseObject(text: string, index: number): [value: any, index: number] {
+  index = index + 1;
+  let result: any = {};
+  
+  index = skipWhitespace(text, index);
+  if (index < text.length && text.substring(index, index + 1) == "}") {
+    return [result, index + 1];
+  }
+  
+  while (index < text.length) {
+    index = skipWhitespace(text, index);
+    
+    if (index >= text.length || text.substring(index, index + 1) != "\"") { break; }
+    
+    let keyResult: [value: string, index: number] = parseString(text, index);
+    let key: string = keyResult[0];
+    index = keyResult[1];
+    
+    index = skipWhitespace(text, index);
+    if (index >= text.length || text.substring(index, index + 1) != ":") { break; }
+    index = index + 1;
+    
+    let valueResult: [value: any, index: number] = parseValue(text, index);
+    result[key] = valueResult[0];
+    index = valueResult[1];
+    
+    index = skipWhitespace(text, index);
+    if (index >= text.length) { break; }
+    
+    let c: string = text.substring(index, index + 1);
+    if (c == "}") {
+      return [result, index + 1];
+    }
+    if (c == ",") {
+      index = index + 1;
+    } else {
       break;
     }
-    end = end - 1;
   }
+  
+  return [result, index];
+}
 
-  if (start > end) { return ""; }
-  return str.substring(start, end + 1);
+function skipWhitespace(text: string, index: number): number {
+  while (index < text.length) {
+    let c: string = text.substring(index, index + 1);
+    if (c != " " && c != "\t" && c != "\n" && c != "\r") {
+      break;
+    }
+    index = index + 1;
+  }
+  return index;
 }
